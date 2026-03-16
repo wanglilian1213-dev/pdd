@@ -10,6 +10,7 @@ import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import DashboardLayout from './components/layout/DashboardLayout';
+import { BalanceProvider } from './contexts/BalanceContext';
 import Workspace from './pages/dashboard/Workspace';
 import Tasks from './pages/dashboard/Tasks';
 import Recharge from './pages/dashboard/Recharge';
@@ -42,7 +43,7 @@ export default function App() {
         <Route path="/privacy-policy" element={<PrivacyPolicy />} />
         <Route path="/terms-of-service" element={<TermsOfService />} />
 
-        <Route path="/dashboard" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+        <Route path="/dashboard" element={<ProtectedRoute><BalanceProvider><DashboardLayout /></BalanceProvider></ProtectedRoute>}>
           <Route index element={<Navigate to="/dashboard/workspace" replace />} />
           <Route path="workspace" element={<Workspace />} />
           <Route path="tasks" element={<Tasks />} />

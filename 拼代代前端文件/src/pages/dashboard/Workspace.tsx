@@ -4,6 +4,7 @@ import { Button } from '../../components/ui/button';
 import { UploadCloud, FileText, CheckCircle2, ChevronRight, AlertCircle, Download, Bot, ShieldCheck, RefreshCw, X, Loader2, File } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { api } from '../../lib/api';
+import { useBalance } from '../../contexts/BalanceContext';
 
 // ---------------------
 // Types
@@ -109,6 +110,7 @@ export default function Workspace() {
   // ---------------------
   // State
   // ---------------------
+  const { balance, refreshBalance } = useBalance();
   const [step, setStep] = useState(1);
   const [files, setFiles] = useState<File[]>([]);
   const [title, setTitle] = useState('');
@@ -122,7 +124,6 @@ export default function Workspace() {
   const [taskData, setTaskData] = useState<TaskData | null>(null);
   const [editInstruction, setEditInstruction] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [balance, setBalance] = useState<number | null>(null);
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [isLoadingResume, setIsLoadingResume] = useState(true);
 
@@ -160,18 +161,6 @@ export default function Workspace() {
     clearWritePoll();
     clearHumanizePoll();
   }, [clearOutlinePoll, clearWritePoll, clearHumanizePoll]);
-
-  // ---------------------
-  // Fetch balance
-  // ---------------------
-  const fetchBalance = useCallback(async () => {
-    try {
-      const data = await api.getProfile();
-      setBalance(data.balance ?? null);
-    } catch {
-      // non-critical, silently ignore
-    }
-  }, []);
 
   // ---------------------
   // Polling: outline generation
@@ -306,13 +295,13 @@ export default function Workspace() {
     }
 
     resumeTask();
-    fetchBalance();
+    refreshBalance();
 
     return () => {
       cancelled = true;
       clearAllPolls();
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [startOutlinePolling, startWritePolling, startHumanizePolling, refreshBalance, clearAllPolls]);
 
   // ---------------------
   // Handlers
@@ -441,8 +430,8 @@ export default function Workspace() {
     setIsRegeneratingOutline(false);
     setIsConfirmingOutline(false);
     setIsStartingHumanize(false);
-    fetchBalance();
-  }, [clearAllPolls, fetchBalance]);
+    refreshBalance();
+  }, [clearAllPolls, refreshBalance]);
 
   // ---------------------
   // Derived state

@@ -2,24 +2,18 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { PenLine, LayoutDashboard, ListTodo, Wallet, LogOut, User, Menu, X } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
-import { api } from '../../lib/api';
+import { useBalance } from '../../contexts/BalanceContext';
 
 export default function DashboardLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [balance, setBalance] = useState<number | null>(null);
+  const { balance, refreshBalance } = useBalance();
 
   useEffect(() => {
-    api.getProfile()
-      .then((data: { balance: number }) => {
-        setBalance(data.balance);
-      })
-      .catch(() => {
-        // Profile fetch failed — balance stays null
-      });
-  }, []);
+    refreshBalance();
+  }, [refreshBalance]);
 
   const handleSignOut = async () => {
     await signOut();

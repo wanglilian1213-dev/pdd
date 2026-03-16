@@ -4,6 +4,8 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Wallet, QrCode, MessageSquare, Zap, CheckCircle2, History, Loader2 } from 'lucide-react';
 import { api } from '../../lib/api';
+import { useBalance } from '../../contexts/BalanceContext';
+import { formatDate } from '../../lib/utils';
 
 interface HistoryRecord {
   id: string;
@@ -12,16 +14,6 @@ interface HistoryRecord {
   balance_after: number;
   note: string;
   created_at: string;
-}
-
-function formatDate(isoString: string): string {
-  const date = new Date(isoString);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const hour = String(date.getHours()).padStart(2, '0');
-  const minute = String(date.getMinutes()).padStart(2, '0');
-  return `${year}-${month}-${day} ${hour}:${minute}`;
 }
 
 function getRecordDisplay(record: HistoryRecord): { label: string; colorClass: string; displayAmount: string } {
@@ -54,11 +46,11 @@ function getRecordDisplay(record: HistoryRecord): { label: string; colorClass: s
 }
 
 export default function Recharge() {
+  const { balance, refreshBalance } = useBalance();
   const [code, setCode] = useState('');
   const [isRedeeming, setIsRedeeming] = useState(false);
   const [redeemSuccess, setRedeemSuccess] = useState(false);
   const [redeemDenomination, setRedeemDenomination] = useState(0);
-  const [balance, setBalance] = useState(0);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -68,11 +60,10 @@ export default function Recharge() {
     try {
       setLoading(true);
       setError('');
-      const [profileData, historyData] = await Promise.all([
-        api.getProfile(),
+      const [, historyData] = await Promise.all([
+        refreshBalance(),
         api.getRechargeHistory(20, 0),
       ]);
-      setBalance(profileData.balance ?? 0);
       setHistory(historyData.records ?? []);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '加载数据失败';
@@ -95,7 +86,7 @@ export default function Recharge() {
 
     try {
       const result = await api.redeemCode(code.trim());
-      setBalance(result.balance);
+      await refreshBalance();
       setRedeemDenomination(result.denomination);
       setRedeemSuccess(true);
       setCode('');
@@ -161,7 +152,7 @@ export default function Recharge() {
                 </span>
               </div>
               <div className="text-5xl font-bold font-mono tracking-tight">
-                {balance.toLocaleString()}
+                {(balance ?? 0).toLocaleString()}
               </div>
               <div className="mt-6 pt-6 border-t border-red-600/50 flex flex-col sm:flex-row gap-4 sm:gap-6 text-sm text-red-200">
                 <div className="flex items-center gap-2">

@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
 import { api } from '../../lib/api';
+import { formatDate } from '../../lib/utils';
 
 interface TaskItem {
   id: string;
@@ -21,16 +22,6 @@ interface TaskItem {
   frozen_credits: number;
   created_at: string;
   completed_at: string | null;
-}
-
-function formatDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const hour = String(d.getHours()).padStart(2, '0');
-  const min = String(d.getMinutes()).padStart(2, '0');
-  return `${year}-${month}-${day} ${hour}:${min}`;
 }
 
 export default function Tasks() {
