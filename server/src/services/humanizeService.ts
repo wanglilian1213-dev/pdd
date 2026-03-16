@@ -161,11 +161,6 @@ async function executeHumanize(taskId: string, userId: string, jobId: string, in
       completed_at: new Date().toISOString(),
     }).eq('id', jobId);
 
-    await supabaseAdmin.from('tasks').update({
-      stage: 'completed',
-      updated_at: new Date().toISOString(),
-    }).eq('id', taskId);
-
     await supabaseAdmin.from('task_events').insert({
       task_id: taskId,
       event_type: 'humanize_completed',

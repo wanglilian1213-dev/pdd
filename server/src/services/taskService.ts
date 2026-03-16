@@ -81,7 +81,7 @@ export async function getCurrentTask(userId: string) {
 export async function getTaskList(userId: string, status?: string, limit = 20, offset = 0) {
   let query = supabaseAdmin
     .from('tasks')
-    .select('id, title, stage, status, target_words, failure_stage, failure_reason, refunded, created_at, completed_at, updated_at', { count: 'exact' })
+    .select('id, title, stage, status, target_words, frozen_credits, failure_stage, failure_reason, refunded, created_at, completed_at, updated_at', { count: 'exact' })
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);

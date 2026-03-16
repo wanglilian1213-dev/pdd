@@ -1,54 +1,142 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Wallet, QrCode, MessageSquare, Zap, CheckCircle2, History, Loader2 } from 'lucide-react';
+import { api } from '../../lib/api';
+
+interface HistoryRecord {
+  id: string;
+  type: 'recharge' | 'consume' | 'refund';
+  amount: number;
+  balance_after: number;
+  note: string;
+  created_at: string;
+}
+
+function formatDate(isoString: string): string {
+  const date = new Date(isoString);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
+function getRecordDisplay(record: HistoryRecord): { label: string; colorClass: string; displayAmount: string } {
+  switch (record.type) {
+    case 'recharge':
+      return {
+        label: record.note || '激活码充值',
+        colorClass: 'text-emerald-600',
+        displayAmount: `+${record.amount}`,
+      };
+    case 'consume':
+      return {
+        label: record.note || '积分扣除',
+        colorClass: 'text-gray-900',
+        displayAmount: `${record.amount}`,  // amount is already negative from backend
+      };
+    case 'refund':
+      return {
+        label: record.note || '退款',
+        colorClass: 'text-amber-600',
+        displayAmount: `+${record.amount}`,
+      };
+    default:
+      return {
+        label: record.note || '其他',
+        colorClass: 'text-gray-900',
+        displayAmount: String(record.amount),
+      };
+  }
+}
 
 export default function Recharge() {
   const [code, setCode] = useState('');
   const [isRedeeming, setIsRedeeming] = useState(false);
   const [redeemSuccess, setRedeemSuccess] = useState(false);
-  const [balance, setBalance] = useState(12500);
-  const [history, setHistory] = useState([
-    { id: 1, action: '生成文章扣除', date: '2026-03-15 14:30', amount: -450, type: 'expense' },
-    { id: 2, action: '激活码充值 (10000档)', date: '2026-03-14 10:00', amount: 10000, type: 'income' },
-    { id: 3, action: '生成文章扣除', date: '2026-03-14 09:15', amount: -620, type: 'expense' },
-    { id: 4, action: '自动降AI扣除', date: '2026-03-10 11:25', amount: -300, type: 'expense' },
-    { id: 5, action: '生成文章扣除', date: '2026-03-10 11:20', amount: -850, type: 'expense' },
-  ]);
+  const [redeemDenomination, setRedeemDenomination] = useState(0);
+  const [balance, setBalance] = useState(0);
+  const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [redeemError, setRedeemError] = useState('');
 
-  const handleRedeem = () => {
-    if (!code.trim()) return;
-    
-    setIsRedeeming(true);
-    // Simulate API call
-    setTimeout(() => {
-      setIsRedeeming(false);
-      setRedeemSuccess(true);
-      setBalance(prev => prev + 5000); // Simulate adding 5000 points
-      setCode('');
-      
-      // Add to history
-      setHistory(prev => [
-        {
-          id: Date.now(),
-          action: '激活码充值 (5000档)',
-          date: new Date().toLocaleString('zh-CN', { 
-            year: 'numeric', month: '2-digit', day: '2-digit', 
-            hour: '2-digit', minute: '2-digit' 
-          }).replace(/\//g, '-'),
-          amount: 5000,
-          type: 'income'
-        },
-        ...prev
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const [profileData, historyData] = await Promise.all([
+        api.getProfile(),
+        api.getRechargeHistory(20, 0),
       ]);
+      setBalance(profileData.balance ?? 0);
+      setHistory(historyData.records ?? []);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '加载数据失败';
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const handleRedeem = async () => {
+    if (!code.trim()) return;
+
+    setIsRedeeming(true);
+    setRedeemError('');
+    setRedeemSuccess(false);
+
+    try {
+      const result = await api.redeemCode(code.trim());
+      setBalance(result.balance);
+      setRedeemDenomination(result.denomination);
+      setRedeemSuccess(true);
+      setCode('');
+
+      // Refresh history to show the new record from backend
+      const historyData = await api.getRechargeHistory(20, 0);
+      setHistory(historyData.records ?? []);
 
       // Hide success message after 3 seconds
       setTimeout(() => {
         setRedeemSuccess(false);
       }, 3000);
-    }, 1500);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '兑换失败，请重试';
+      setRedeemError(message);
+      setTimeout(() => {
+        setRedeemError('');
+      }, 5000);
+    } finally {
+      setIsRedeeming(false);
+    }
   };
+
+  if (loading) {
+    return (
+      <div className="max-w-5xl mx-auto flex items-center justify-center py-32">
+        <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
+        <span className="ml-3 text-gray-500">加载中...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-5xl mx-auto flex flex-col items-center justify-center py-32 space-y-4">
+        <p className="text-red-600">{error}</p>
+        <Button variant="outline" onClick={fetchData}>重新加载</Button>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-5xl mx-auto space-y-8">
       <div>
@@ -96,15 +184,15 @@ export default function Recharge() {
             </CardHeader>
             <CardContent className="p-6 space-y-6">
               <div className="flex flex-col sm:flex-row gap-4">
-                <Input 
-                  placeholder="请输入 16 位激活码 (例如: ABCD-1234-EFGH-5678)" 
+                <Input
+                  placeholder="请输入 16 位激活码 (例如: ABCD-1234-EFGH-5678)"
                   className="font-mono uppercase text-lg h-12"
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                   disabled={isRedeeming}
                 />
-                <Button 
-                  className="h-12 px-8 shadow-sm w-full sm:w-auto shrink-0" 
+                <Button
+                  className="h-12 px-8 shadow-sm w-full sm:w-auto shrink-0"
                   onClick={handleRedeem}
                   disabled={isRedeeming || !code.trim()}
                 >
@@ -115,16 +203,22 @@ export default function Recharge() {
               {redeemSuccess && (
                 <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-lg flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
                   <CheckCircle2 className="w-5 h-5" />
-                  <span>兑换成功！已为您充值 5,000 积分。</span>
+                  <span>兑换成功！已为您充值 {redeemDenomination.toLocaleString()} 积分。</span>
                 </div>
               )}
-              
+
+              {redeemError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+                  <span>{redeemError}</span>
+                </div>
+              )}
+
               <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600 space-y-2 border border-gray-100">
                 <p className="font-medium text-gray-900 mb-1">兑换规则说明：</p>
                 <ul className="list-disc list-inside space-y-1 ml-1">
                   <li>每个激活码仅限使用一次，兑换后即刻失效。</li>
                   <li>同一账号可多次兑换不同激活码，积分自动累加。</li>
-                  <li>激活码包含 4 档固定额度：1000、5000、10000、20000 积分。</li>
+                  <li>激活码包含 4 档固定额度：1000、3000、10000、20000 积分。</li>
                 </ul>
               </div>
             </CardContent>
@@ -140,17 +234,26 @@ export default function Recharge() {
             </CardHeader>
             <CardContent className="p-0">
               <div className="divide-y divide-gray-100">
-                {history.map((record) => (
-                  <div key={record.id} className="flex items-center justify-between p-4 hover:bg-gray-50 transition-colors">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">{record.action}</p>
-                      <p className="text-xs text-gray-400 font-mono mt-0.5">{record.date}</p>
-                    </div>
-                    <div className={`font-mono font-bold ${record.type === 'income' ? 'text-emerald-600' : 'text-gray-900'}`}>
-                      {record.amount > 0 ? `+${record.amount}` : record.amount}
-                    </div>
+                {history.length === 0 ? (
+                  <div className="p-8 text-center text-gray-400 text-sm">
+                    暂无交易记录
                   </div>
-                ))}
+                ) : (
+                  history.map((record) => {
+                    const display = getRecordDisplay(record);
+                    return (
+                      <div key={record.id} className="flex items-center justify-between p-4 hover:bg-gray-50 transition-colors">
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">{display.label}</p>
+                          <p className="text-xs text-gray-400 font-mono mt-0.5">{formatDate(record.created_at)}</p>
+                        </div>
+                        <div className={`font-mono font-bold ${display.colorClass}`}>
+                          {display.displayAmount}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </CardContent>
           </Card>
@@ -169,7 +272,7 @@ export default function Recharge() {
                 <QrCode className="w-12 h-12 text-gray-400 mb-2" />
                 <span className="text-xs text-gray-500 text-center">微信二维码占位区<br/>请替换为真实二维码</span>
               </div>
-              
+
               <div className="w-full bg-gray-50 rounded-lg p-4 border border-gray-100 mb-6 text-center">
                 <div className="flex items-center justify-center gap-2 text-sm font-medium text-gray-600 mb-1">
                   <MessageSquare className="w-4 h-4 text-green-600" /> 官方微信号

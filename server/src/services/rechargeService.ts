@@ -21,7 +21,7 @@ export async function redeemCode(userId: string, code: string) {
     throw new AppError(400, '该激活码已失效。');
   }
 
-  const { error: updateError } = await supabaseAdmin
+  const { data: updatedRows, error: updateError } = await supabaseAdmin
     .from('recharge_codes')
     .update({
       status: 'used',
@@ -29,10 +29,15 @@ export async function redeemCode(userId: string, code: string) {
       used_at: new Date().toISOString(),
     })
     .eq('id', codeRecord.id)
-    .eq('status', 'unused');
+    .eq('status', 'unused')
+    .select();
 
   if (updateError) {
     throw new AppError(500, '兑换失败，请稍后重试。');
+  }
+
+  if (!updatedRows || updatedRows.length === 0) {
+    throw new AppError(400, '该激活码已被使用。');
   }
 
   const result = await addBalance(

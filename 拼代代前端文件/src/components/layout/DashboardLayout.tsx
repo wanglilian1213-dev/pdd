@@ -1,10 +1,30 @@
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { PenLine, LayoutDashboard, ListTodo, Wallet, LogOut, User, Menu, X } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useAuth } from '../../contexts/AuthContext';
+import { api } from '../../lib/api';
 
 export default function DashboardLayout() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { user, signOut } = useAuth();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [balance, setBalance] = useState<number | null>(null);
+
+  useEffect(() => {
+    api.getProfile()
+      .then((data: { balance: number }) => {
+        setBalance(data.balance);
+      })
+      .catch(() => {
+        // Profile fetch failed — balance stays null
+      });
+  }, []);
+
+  const handleSignOut = async () => {
+    await signOut();
+    navigate('/login');
+  };
 
   const navigation = [
     { name: '工作台', href: '/dashboard/workspace', icon: LayoutDashboard },
@@ -79,17 +99,17 @@ export default function DashboardLayout() {
                 <User className="h-4 w-4" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">user@example.com</p>
-                <p className="text-xs text-gray-500 truncate">积分余额: 12,500</p>
+                <p className="text-sm font-medium text-gray-900 truncate">{user?.email ?? '加载中...'}</p>
+                <p className="text-xs text-gray-500 truncate">积分余额: {balance !== null ? balance.toLocaleString() : '--'}</p>
               </div>
             </div>
-            <Link
-              to="/login"
-              className="group flex items-center px-3 py-2 text-sm font-medium text-gray-700 rounded-md hover:bg-gray-100 hover:text-gray-900 transition-colors"
+            <button
+              onClick={handleSignOut}
+              className="w-full group flex items-center px-3 py-2 text-sm font-medium text-gray-700 rounded-md hover:bg-gray-100 hover:text-gray-900 transition-colors"
             >
               <LogOut className="flex-shrink-0 -ml-1 mr-3 h-5 w-5 text-gray-400 group-hover:text-gray-500" />
               退出登录
-            </Link>
+            </button>
           </div>
         </div>
       </div>
