@@ -1,10 +1,46 @@
-import { Link } from 'react-router-dom';
+import React, { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card';
-import { PenLine, ArrowLeft, MessageSquare } from 'lucide-react';
+import { PenLine, ArrowLeft, MessageSquare, Loader2 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Register() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const { signUp } = useAuth();
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+
+    if (password !== confirmPassword) {
+      setError('两次输入的密码不一致，请重新输入。');
+      return;
+    }
+
+    if (password.length < 6) {
+      setError('密码长度至少为 6 位。');
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      await signUp(email, password);
+      navigate('/dashboard/workspace', { replace: true });
+    } catch (err: any) {
+      setError(err.message || '注册失败，请稍后重试。');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-md">
@@ -25,27 +61,61 @@ export default function Register() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form className="space-y-4">
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              {error && (
+                <div className="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+                  {error}
+                </div>
+              )}
               <div className="space-y-2">
                 <label htmlFor="email" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-gray-900">
                   邮箱地址
                 </label>
-                <Input id="email" type="email" placeholder="name@example.com" required />
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="name@example.com"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={submitting}
+                />
               </div>
               <div className="space-y-2">
                 <label htmlFor="password" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-gray-900">
                   设置密码
                 </label>
-                <Input id="password" type="password" required />
+                <Input
+                  id="password"
+                  type="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={submitting}
+                />
               </div>
               <div className="space-y-2">
                 <label htmlFor="confirm-password" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-gray-900">
                   确认密码
                 </label>
-                <Input id="confirm-password" type="password" required />
+                <Input
+                  id="confirm-password"
+                  type="password"
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  disabled={submitting}
+                />
               </div>
-              <Button type="button" className="w-full h-11 text-base shadow-sm" asChild>
-                <Link to="/login">注册并登录</Link>
+              <Button type="submit" className="w-full h-11 text-base shadow-sm" disabled={submitting}>
+                {submitting ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    注册中...
+                  </>
+                ) : (
+                  '注册并登录'
+                )}
               </Button>
             </form>
           </CardContent>
@@ -56,7 +126,7 @@ export default function Register() {
                 直接登录
               </Link>
             </div>
-            
+
             <div className="relative w-full">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-gray-200"></div>
@@ -65,7 +135,7 @@ export default function Register() {
                 <span className="bg-white px-2 text-gray-500">遇到问题？</span>
               </div>
             </div>
-            
+
             <div className="flex justify-center gap-4">
               <Link to="/" className="inline-flex items-center text-sm text-gray-500 hover:text-gray-900">
                 <ArrowLeft className="mr-2 h-4 w-4" /> 返回首页
@@ -76,9 +146,9 @@ export default function Register() {
             </div>
           </CardFooter>
         </Card>
-        
+
         <p className="text-center text-xs text-gray-500 mt-8">
-          注册成功后，即可使用“额度激活码”充值积分
+          注册成功后，即可使用"额度激活码"充值积分
         </p>
       </div>
     </div>
