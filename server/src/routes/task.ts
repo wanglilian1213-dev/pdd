@@ -4,6 +4,8 @@ import { AuthRequest } from '../middleware/auth';
 import { statusGuard } from '../middleware/statusGuard';
 import { createTask, getTask, getCurrentTask, getTaskList } from '../services/taskService';
 import { validateFiles, uploadFiles, getDownloadUrl } from '../services/fileService';
+import { generateOutline, regenerateOutline, confirmOutline } from '../services/outlineService';
+import { startHumanize } from '../services/humanizeService';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = Router();
@@ -21,6 +23,11 @@ router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: 
     const task = await createTask(req.userId!, title || files[0]?.originalname || '未命名任务', specialRequirements || '');
 
     await uploadFiles(task.id, files);
+
+    // 异步启动大纲生成（不阻塞响应）
+    generateOutline(task.id, req.userId!).catch(err => {
+      console.error(`Outline generation failed for task ${task.id}:`, err);
+    });
 
     res.json({ success: true, data: task });
   } catch (err: unknown) {
@@ -81,6 +88,48 @@ router.get('/:id/file/:fileId/download', async (req: AuthRequest, res: Response)
     const appErr = err as { statusCode?: number; userMessage?: string };
     const status = appErr.statusCode || 500;
     res.status(status).json({ success: false, error: appErr.userMessage || '下载失败。' });
+  }
+});
+
+// POST /api/task/:id/outline/regenerate
+router.post('/:id/outline/regenerate', async (req: AuthRequest, res: Response) => {
+  try {
+    const { editInstruction } = req.body;
+    if (!editInstruction) {
+      res.status(400).json({ success: false, error: '请输入修改意见。' });
+      return;
+    }
+    const outline = await regenerateOutline(req.params.id as string, req.userId!, editInstruction);
+    res.json({ success: true, data: outline });
+  } catch (err: unknown) {
+    const appErr = err as { statusCode?: number; userMessage?: string };
+    const status = appErr.statusCode || 500;
+    res.status(status).json({ success: false, error: appErr.userMessage || '大纲修改失败。' });
+  }
+});
+
+// POST /api/task/:id/outline/confirm
+router.post('/:id/outline/confirm', async (req: AuthRequest, res: Response) => {
+  try {
+    const { targetWords, citationStyle } = req.body;
+    const result = await confirmOutline(req.params.id as string, req.userId!, targetWords, citationStyle);
+    res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    const appErr = err as { statusCode?: number; userMessage?: string };
+    const status = appErr.statusCode || 500;
+    res.status(status).json({ success: false, error: appErr.userMessage || '确认大纲失败。' });
+  }
+});
+
+// POST /api/task/:id/humanize
+router.post('/:id/humanize', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await startHumanize(req.params.id as string, req.userId!);
+    res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    const appErr = err as { statusCode?: number; userMessage?: string };
+    const status = appErr.statusCode || 500;
+    res.status(status).json({ success: false, error: appErr.userMessage || '降 AI 启动失败。' });
   }
 });
 
