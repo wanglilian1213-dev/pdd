@@ -4,6 +4,7 @@ import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask } from './taskService';
 import { freezeCredits } from './walletService';
 import { getConfig } from './configService';
+import { startWritingPipeline } from './writingService';
 
 export async function generateOutline(taskId: string, userId: string) {
   // 读取材料
@@ -256,6 +257,11 @@ export async function confirmOutline(taskId: string, userId: string, targetWords
     task_id: taskId,
     event_type: 'outline_confirmed',
     detail: { target_words: finalWords, citation_style: finalStyle, frozen_credits: cost },
+  });
+
+  // Fire-and-forget: start the writing pipeline asynchronously
+  startWritingPipeline(taskId, userId).catch(err => {
+    console.error(`Writing pipeline failed for task ${taskId}:`, err);
   });
 
   return { taskId, stage: 'writing', frozenCredits: cost };
