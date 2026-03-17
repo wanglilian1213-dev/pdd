@@ -23,6 +23,10 @@ export interface StartHumanizeResult {
   frozenCredits: number;
 }
 
+export interface VoidRechargeCodesResult {
+  voidedCount: number;
+}
+
 function getRpcErrorMessage(error: unknown) {
   if (!error || typeof error !== 'object') return '';
   const maybeMessage = 'message' in error ? error.message : '';
@@ -218,6 +222,25 @@ export async function startHumanizeJobAtomic(
         return new AppError(500, '找不到可用的正文版本。', message);
       }
       return mapWalletRpcError(error, '降 AI 启动失败，请稍后重试。');
+    },
+  );
+}
+
+export async function voidRechargeCodesAtomic(codeIds: string[]): Promise<VoidRechargeCodesResult> {
+  return callRpc<VoidRechargeCodesResult>(
+    'void_recharge_codes',
+    {
+      p_code_ids: codeIds,
+    },
+    (error) => {
+      const message = getRpcErrorMessage(error);
+      if (message.includes('RECHARGE_CODE_NONE_VOIDABLE')) {
+        return new AppError(400, '没有找到可作废的未使用激活码。', message);
+      }
+      if (message.includes('RECHARGE_CODE_PARTIAL_VOID')) {
+        return new AppError(400, '这批激活码里只有一部分能作废。请刷新列表后重新选择。', message);
+      }
+      return new AppError(500, '作废激活码失败，请稍后重试。', message);
     },
   );
 }

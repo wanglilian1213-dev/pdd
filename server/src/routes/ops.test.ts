@@ -23,6 +23,22 @@ function stubSupabaseFrom(impl: (table: string) => any) {
   };
 }
 
+function stubSupabaseRpc(impl: (fn: string, args: Record<string, unknown>) => any) {
+  const originalRpc = supabaseAdmin.rpc;
+
+  Object.defineProperty(supabaseAdmin, 'rpc', {
+    value: impl,
+    configurable: true,
+  });
+
+  return () => {
+    Object.defineProperty(supabaseAdmin, 'rpc', {
+      value: originalRpc,
+      configurable: true,
+    });
+  };
+}
+
 async function withOpsServer(
   userEmail: string,
   run: (baseUrl: string) => Promise<void>,
@@ -184,22 +200,20 @@ test('POST /api/ops/codes/void rejects partial success', async () => {
   const originalWhitelist = [...env.opsWhitelistEmails];
   env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
 
-  const restore = stubSupabaseFrom((table: string) => {
-    if (table === 'recharge_codes') {
-      return {
-        update: () => ({
-          in: () => ({
-            eq: () => ({
-              select: async () => ({
-                data: [{ id: '11111111-1111-4111-8111-111111111111' }],
-                error: null,
-              }),
-            }),
-          }),
-        }),
-      };
-    }
-    throw new Error(`Unexpected table: ${table}`);
+  let calledRpc = false;
+  const restoreRpc = stubSupabaseRpc(async (fn: string) => {
+    calledRpc = true;
+    assert.equal(fn, 'void_recharge_codes');
+    return {
+      data: null,
+      error: { message: 'RECHARGE_CODE_PARTIAL_VOID' },
+      count: null,
+      status: 400,
+      statusText: 'Bad Request',
+    } as never;
+  });
+  const restoreFrom = stubSupabaseFrom((_table: string) => {
+    throw new Error('table update should not run for atomic recharge code void');
   });
 
   try {
@@ -218,10 +232,12 @@ test('POST /api/ops/codes/void rejects partial success', async () => {
       assert.equal(response.status, 400);
       const body = await response.json() as any;
       assert.match(body.error, /只有一部分|部分/);
+      assert.equal(calledRpc, true);
     });
   } finally {
     env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);
-    restore();
+    restoreRpc();
+    restoreFrom();
   }
 });
 

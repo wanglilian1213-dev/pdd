@@ -9,6 +9,7 @@ import {
   validateUuidOrThrow,
   validateVoidCodeIds,
 } from '../services/opsService';
+import { voidRechargeCodesAtomic } from '../services/atomicOpsService';
 
 const router = Router();
 
@@ -116,21 +117,7 @@ router.post('/codes/generate', async (req: AuthRequest, res: Response) => {
 router.post('/codes/void', async (req: AuthRequest, res: Response) => {
   try {
     const codeIds = validateVoidCodeIds(req.body?.codeIds);
-
-    const { data, error } = await supabaseAdmin
-      .from('recharge_codes')
-      .update({ status: 'voided' })
-      .in('id', codeIds)
-      .eq('status', 'unused')
-      .select('id');
-
-    if (error) throw error;
-    if (!data || data.length === 0) {
-      throw new AppError(400, '没有找到可作废的未使用激活码。');
-    }
-    if (data.length !== codeIds.length) {
-      throw new AppError(400, '这批激活码里只有一部分能作废。请刷新列表后重新选择。');
-    }
+    await voidRechargeCodesAtomic(codeIds);
     res.json({ success: true });
   } catch (err: any) {
     res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });

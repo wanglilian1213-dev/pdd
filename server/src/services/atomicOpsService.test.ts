@@ -7,6 +7,7 @@ import {
   freezeCreditsAtomic,
   redeemRechargeCodeAtomic,
   startHumanizeJobAtomic,
+  voidRechargeCodesAtomic,
 } from './atomicOpsService';
 
 function stubRpc(impl: any) {
@@ -172,6 +173,64 @@ test('startHumanizeJobAtomic uses start_humanize_job RPC', async () => {
       },
     });
     assert.deepEqual(result, { jobId: 'job-1', stage: 'humanizing', frozenCredits: 250 });
+  } finally {
+    restore();
+  }
+});
+
+test('voidRechargeCodesAtomic uses void_recharge_codes RPC', async () => {
+  let called: { fn: string; args: Record<string, unknown> } | null = null;
+  const restore = stubRpc(async (fn: string, args: Record<string, unknown>) => {
+    called = { fn, args: args as Record<string, unknown> };
+    return {
+      data: { voidedCount: 2 },
+      error: null,
+      count: null,
+      status: 200,
+      statusText: 'OK',
+    } as never;
+  });
+
+  try {
+    const result = await voidRechargeCodesAtomic([
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+    ]);
+    assert.deepEqual(called, {
+      fn: 'void_recharge_codes',
+      args: {
+        p_code_ids: [
+          '11111111-1111-4111-8111-111111111111',
+          '22222222-2222-4222-8222-222222222222',
+        ],
+      },
+    });
+    assert.deepEqual(result, { voidedCount: 2 });
+  } finally {
+    restore();
+  }
+});
+
+test('voidRechargeCodesAtomic maps partial void errors to AppError', async () => {
+  const restore = stubRpc(async () => {
+    return {
+      data: null,
+      error: { message: 'RECHARGE_CODE_PARTIAL_VOID' },
+      count: null,
+      status: 400,
+      statusText: 'Bad Request',
+    } as never;
+  });
+
+  try {
+    await assert.rejects(
+      () => voidRechargeCodesAtomic(['11111111-1111-4111-8111-111111111111']),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.match(error.userMessage, /部分/);
+        return true;
+      },
+    );
   } finally {
     restore();
   }
