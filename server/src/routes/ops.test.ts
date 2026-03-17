@@ -87,6 +87,7 @@ test('POST /api/ops/codes/generate rejects denomination outside allowed list', a
       return {
         select: () => ({
           eq: () => ({
+            maybeSingle: async () => ({ data: { value: [1000, 3000, 10000, 20000] }, error: null }),
             single: async () => ({ data: { value: [1000, 3000, 10000, 20000] } }),
           }),
         }),
@@ -153,6 +154,101 @@ test('POST /api/ops/codes/void rejects empty code id array', async () => {
   }
 });
 
+test('POST /api/ops/codes/void rejects invalid code id format', async () => {
+  const originalWhitelist = [...env.opsWhitelistEmails];
+  env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
+
+  const restore = stubSupabaseFrom((_table: string) => {
+    throw new Error('database should not be called for invalid code ids');
+  });
+
+  try {
+    await withOpsServer('1318823634@qq.com', async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/ops/codes/void`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ codeIds: ['not-a-uuid'] }),
+      });
+
+      assert.equal(response.status, 400);
+      const body = await response.json() as any;
+      assert.match(body.error, /ID/);
+    });
+  } finally {
+    env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);
+    restore();
+  }
+});
+
+test('POST /api/ops/codes/void rejects partial success', async () => {
+  const originalWhitelist = [...env.opsWhitelistEmails];
+  env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
+
+  const restore = stubSupabaseFrom((table: string) => {
+    if (table === 'recharge_codes') {
+      return {
+        update: () => ({
+          in: () => ({
+            eq: () => ({
+              select: async () => ({
+                data: [{ id: '11111111-1111-4111-8111-111111111111' }],
+                error: null,
+              }),
+            }),
+          }),
+        }),
+      };
+    }
+    throw new Error(`Unexpected table: ${table}`);
+  });
+
+  try {
+    await withOpsServer('1318823634@qq.com', async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/ops/codes/void`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          codeIds: [
+            '11111111-1111-4111-8111-111111111111',
+            '22222222-2222-4222-8222-222222222222',
+          ],
+        }),
+      });
+
+      assert.equal(response.status, 400);
+      const body = await response.json() as any;
+      assert.match(body.error, /只有一部分|部分/);
+    });
+  } finally {
+    env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);
+    restore();
+  }
+});
+
+test('POST /api/ops/users/:id/disable rejects invalid user id format', async () => {
+  const originalWhitelist = [...env.opsWhitelistEmails];
+  env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
+
+  const restore = stubSupabaseFrom((_table: string) => {
+    throw new Error('database should not be called for invalid user id');
+  });
+
+  try {
+    await withOpsServer('1318823634@qq.com', async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/ops/users/not-a-uuid/disable`, {
+        method: 'POST',
+      });
+
+      assert.equal(response.status, 400);
+      const body = await response.json() as any;
+      assert.match(body.error, /ID/);
+    });
+  } finally {
+    env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);
+    restore();
+  }
+});
+
 test('PUT /api/ops/config/writing_price_per_1000 rejects non-positive value', async () => {
   const originalWhitelist = [...env.opsWhitelistEmails];
   env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
@@ -182,6 +278,83 @@ test('PUT /api/ops/config/writing_price_per_1000 rejects non-positive value', as
       assert.equal(response.status, 400);
       const body = await response.json() as any;
       assert.match(body.error, /配置值/);
+    });
+  } finally {
+    env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);
+    restore();
+  }
+});
+
+test('GET /api/ops/config returns 500 when config read fails', async () => {
+  const originalWhitelist = [...env.opsWhitelistEmails];
+  env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
+
+  const restore = stubSupabaseFrom((table: string) => {
+    if (table === 'system_config') {
+      return {
+        select: async () => ({
+          data: null,
+          error: { message: 'db down' },
+        }),
+      };
+    }
+    throw new Error(`Unexpected table: ${table}`);
+  });
+
+  try {
+    await withOpsServer('1318823634@qq.com', async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/ops/config`);
+
+      assert.equal(response.status, 500);
+      const body = await response.json() as any;
+      assert.match(body.error, /获取配置失败/);
+    });
+  } finally {
+    env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);
+    restore();
+  }
+});
+
+test('POST /api/ops/codes/generate returns 500 when denominations config read fails', async () => {
+  const originalWhitelist = [...env.opsWhitelistEmails];
+  env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
+
+  const restore = stubSupabaseFrom((table: string) => {
+    if (table === 'system_config') {
+      return {
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({
+              data: null,
+              error: { message: 'db down' },
+            }),
+            single: async () => ({
+              data: null,
+              error: { message: 'db down' },
+            }),
+          }),
+        }),
+      };
+    }
+    if (table === 'recharge_codes') {
+      return {
+        insert: async () => ({ error: null }),
+      };
+    }
+    throw new Error(`Unexpected table: ${table}`);
+  });
+
+  try {
+    await withOpsServer('1318823634@qq.com', async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/ops/codes/generate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ denomination: 1000, count: 2 }),
+      });
+
+      assert.equal(response.status, 500);
+      const body = await response.json() as any;
+      assert.match(body.error, /读取配置失败/);
     });
   } finally {
     env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, ...originalWhitelist);

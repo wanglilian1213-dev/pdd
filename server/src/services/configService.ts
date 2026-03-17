@@ -3,18 +3,28 @@ import { AppError } from '../lib/errors';
 import { validateConfigValue } from './opsService';
 
 export async function getConfig(key: string): Promise<any> {
-  const { data } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('system_config')
     .select('value')
     .eq('key', key)
-    .single();
+    .maybeSingle();
+
+  if (error) {
+    throw new AppError(500, '读取配置失败，请稍后重试。', error.message);
+  }
+
   return data?.value ?? null;
 }
 
 export async function getAllConfig() {
-  const { data } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('system_config')
     .select('key, value, updated_at');
+
+  if (error) {
+    throw new AppError(500, '读取配置失败，请稍后重试。', error.message);
+  }
+
   return data || [];
 }
 

@@ -6,6 +6,7 @@ import { getAllConfig, getConfig, setConfig } from '../services/configService';
 import {
   DEFAULT_ACTIVATION_DENOMINATIONS,
   validateGenerateCodeInput,
+  validateUuidOrThrow,
   validateVoidCodeIds,
 } from '../services/opsService';
 
@@ -46,10 +47,11 @@ router.get('/users', async (_req: AuthRequest, res: Response) => {
 // POST /api/ops/users/:id/disable
 router.post('/users/:id/disable', async (req: AuthRequest, res: Response) => {
   try {
+    const userId = validateUuidOrThrow(req.params.id, '账号');
     const { data, error } = await supabaseAdmin
       .from('user_profiles')
       .update({ status: 'disabled', updated_at: new Date().toISOString() })
-      .eq('id', req.params.id as string)
+      .eq('id', userId)
       .select('id')
       .maybeSingle();
     if (error) throw error;
@@ -63,10 +65,11 @@ router.post('/users/:id/disable', async (req: AuthRequest, res: Response) => {
 // POST /api/ops/users/:id/enable
 router.post('/users/:id/enable', async (req: AuthRequest, res: Response) => {
   try {
+    const userId = validateUuidOrThrow(req.params.id, '账号');
     const { data, error } = await supabaseAdmin
       .from('user_profiles')
       .update({ status: 'active', updated_at: new Date().toISOString() })
-      .eq('id', req.params.id as string)
+      .eq('id', userId)
       .select('id')
       .maybeSingle();
     if (error) throw error;
@@ -124,6 +127,9 @@ router.post('/codes/void', async (req: AuthRequest, res: Response) => {
     if (error) throw error;
     if (!data || data.length === 0) {
       throw new AppError(400, '没有找到可作废的未使用激活码。');
+    }
+    if (data.length !== codeIds.length) {
+      throw new AppError(400, '这批激活码里只有一部分能作废。请刷新列表后重新选择。');
     }
     res.json({ success: true });
   } catch (err: any) {

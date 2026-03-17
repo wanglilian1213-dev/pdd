@@ -1,4 +1,5 @@
 import { AppError } from '../lib/errors';
+import { validate as isUuid } from 'uuid';
 
 const POSITIVE_INTEGER_CONFIG_KEYS = new Set([
   'writing_price_per_1000',
@@ -50,7 +51,21 @@ export function validateVoidCodeIds(codeIds: unknown) {
     throw new AppError(400, '请至少选择一个要作废的激活码。');
   }
 
+  for (const codeId of normalized) {
+    if (!isUuid(codeId)) {
+      throw new AppError(400, '激活码 ID 格式不对，请刷新页面后重试。');
+    }
+  }
+
   return [...new Set(normalized)];
+}
+
+export function validateUuidOrThrow(value: unknown, label: string) {
+  if (typeof value !== 'string' || !isUuid(value.trim())) {
+    throw new AppError(400, `${label} ID 格式不对，请刷新页面后重试。`);
+  }
+
+  return value.trim();
 }
 
 export function validateConfigValue(key: string, value: unknown) {
