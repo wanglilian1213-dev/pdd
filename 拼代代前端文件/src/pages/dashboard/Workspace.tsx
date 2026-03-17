@@ -5,16 +5,11 @@ import { UploadCloud, FileText, CheckCircle2, ChevronRight, AlertCircle, Downloa
 import { motion, AnimatePresence } from 'motion/react';
 import { api } from '../../lib/api';
 import { useBalance } from '../../contexts/BalanceContext';
+import { buildDownloadCards, normalizeTaskFiles, TaskFile, TaskFileCategory } from '../../lib/taskFiles';
 
 // ---------------------
 // Types
 // ---------------------
-
-interface TaskFile {
-  id: string;
-  category: 'final_doc' | 'citation_report' | 'humanized_doc';
-  filename: string;
-}
 
 interface Outline {
   id: string;
@@ -97,13 +92,60 @@ function reshapeTaskResponse(raw: Record<string, unknown>): TaskData {
     document: latestDocument
       ? (latestDocument as unknown as { id: string; word_count?: number })
       : undefined,
-    files: files
-      ? (files.filter((f) => f.category !== 'material') as unknown as TaskFile[])
-      : [],
+    files: normalizeTaskFiles(files),
     humanizeJob: humanizeJobs && humanizeJobs.length > 0
       ? (humanizeJobs[0] as unknown as HumanizeJob)
       : undefined,
   };
+}
+
+function getDownloadCardMeta(category: TaskFileCategory) {
+  switch (category) {
+    case 'final_doc':
+      return {
+        title: '最终版文章',
+        buttonLabel: '下载文档',
+        emptyLabel: 'Word 格式 (.docx)',
+        icon: FileText,
+        iconWrapClass: 'bg-blue-50 text-blue-600',
+        borderClass: 'hover:border-red-300',
+        buttonClass: '',
+        buttonVariant: 'outline' as const,
+      };
+    case 'citation_report':
+      return {
+        title: '引用核验报告',
+        buttonLabel: '下载报告',
+        emptyLabel: '文本格式 (.txt)',
+        icon: ShieldCheck,
+        iconWrapClass: 'bg-red-50 text-red-600',
+        borderClass: 'hover:border-red-300',
+        buttonClass: '',
+        buttonVariant: 'outline' as const,
+      };
+    case 'humanized_doc':
+      return {
+        title: '降重版文章',
+        buttonLabel: '下载降重版',
+        emptyLabel: 'Word 格式 (.docx)',
+        icon: FileText,
+        iconWrapClass: 'bg-blue-50 text-blue-600',
+        borderClass: 'hover:border-blue-300',
+        buttonClass: 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm',
+        buttonVariant: 'default' as const,
+      };
+    default:
+      return {
+        title: '交付文件',
+        buttonLabel: '下载文件',
+        emptyLabel: '文件',
+        icon: File,
+        iconWrapClass: 'bg-gray-100 text-gray-600',
+        borderClass: 'hover:border-gray-300',
+        buttonClass: '',
+        buttonVariant: 'outline' as const,
+      };
+  }
 }
 
 export default function Workspace() {
@@ -470,10 +512,14 @@ export default function Workspace() {
   // ---------------------
   const isHumanizeComplete = taskData?.humanizeJob?.status === 'completed';
   const isHumanizeProcessing = step === 7 && isStartingHumanize && !isHumanizeComplete;
-
-  const finalDocFile = taskData?.files?.find(f => f.category === 'final_doc');
-  const citationReportFile = taskData?.files?.find(f => f.category === 'citation_report');
-  const humanizedDocFile = taskData?.files?.find(f => f.category === 'humanized_doc');
+  const deliveryDownloadCards = buildDownloadCards(taskData?.files ?? [], {
+    includeCategories: (taskData?.files ?? [])
+      .map((file) => file.category)
+      .filter((category) => category !== 'humanized_doc'),
+  });
+  const humanizeDownloadCards = buildDownloadCards(taskData?.files ?? [], {
+    includeCategories: (taskData?.files ?? []).map((file) => file.category),
+  });
 
   const balanceDisplay = balance !== null ? balance.toLocaleString() : '--';
 
@@ -753,54 +799,35 @@ export default function Workspace() {
             <CardContent className="space-y-8">
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Final Document */}
-                <div className="border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center hover:border-red-300 transition-colors bg-white shadow-sm">
-                  <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mb-4">
-                    <FileText className="w-8 h-8" />
-                  </div>
-                  <h3 className="font-semibold text-gray-900 mb-1">最终版文章</h3>
-                  <p className="text-xs text-gray-500 mb-6">
-                    {finalDocFile ? finalDocFile.filename : 'Word 格式 (.docx)'}
-                    {taskData?.document?.word_count ? ` • ${taskData.document.word_count.toLocaleString()} words` : ''}
-                  </p>
-                  <Button
-                    className="w-full gap-2"
-                    variant="outline"
-                    disabled={!finalDocFile || downloadingFileId === finalDocFile?.id}
-                    onClick={() => finalDocFile && handleDownload(finalDocFile.id)}
-                  >
-                    {downloadingFileId === finalDocFile?.id ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Download className="w-4 h-4" />
-                    )}
-                    下载文档
-                  </Button>
-                </div>
+                {deliveryDownloadCards.map((card) => {
+                  const meta = getDownloadCardMeta(card.category);
+                  const Icon = meta.icon;
 
-                {/* Verification Report */}
-                <div className="border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center hover:border-red-300 transition-colors bg-white shadow-sm">
-                  <div className="w-16 h-16 bg-red-50 text-red-600 rounded-2xl flex items-center justify-center mb-4">
-                    <ShieldCheck className="w-8 h-8" />
-                  </div>
-                  <h3 className="font-semibold text-gray-900 mb-1">引用核验报告</h3>
-                  <p className="text-xs text-gray-500 mb-6">
-                    {citationReportFile ? citationReportFile.filename : 'PDF 格式 (.pdf)'}
-                  </p>
-                  <Button
-                    className="w-full gap-2"
-                    variant="outline"
-                    disabled={!citationReportFile || downloadingFileId === citationReportFile?.id}
-                    onClick={() => citationReportFile && handleDownload(citationReportFile.id)}
-                  >
-                    {downloadingFileId === citationReportFile?.id ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Download className="w-4 h-4" />
-                    )}
-                    下载报告
-                  </Button>
-                </div>
+                  return (
+                    <div key={card.file.id} className={`border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center transition-colors bg-white shadow-sm ${meta.borderClass}`}>
+                      <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${meta.iconWrapClass}`}>
+                        <Icon className="w-8 h-8" />
+                      </div>
+                      <h3 className="font-semibold text-gray-900 mb-1">{meta.title}</h3>
+                      <p className="text-xs text-gray-500 mb-6">
+                        {card.file.filename || meta.emptyLabel}
+                      </p>
+                      <Button
+                        className={`w-full gap-2 ${meta.buttonClass}`.trim()}
+                        variant={meta.buttonVariant}
+                        disabled={downloadingFileId === card.file.id}
+                        onClick={() => handleDownload(card.file.id)}
+                      >
+                        {downloadingFileId === card.file.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4" />
+                        )}
+                        {meta.buttonLabel}
+                      </Button>
+                    </div>
+                  );
+                })}
               </div>
 
               {/* AI Reduction Section */}
@@ -864,26 +891,36 @@ export default function Workspace() {
                     </div>
                   </div>
 
-                  <div className="border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center hover:border-blue-300 transition-colors bg-white shadow-sm max-w-md mx-auto">
-                    <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mb-4">
-                      <FileText className="w-8 h-8" />
-                    </div>
-                    <h3 className="font-semibold text-gray-900 mb-1">降重版文章</h3>
-                    <p className="text-xs text-gray-500 mb-6">
-                      {humanizedDocFile ? humanizedDocFile.filename : 'Word 格式 (.docx)'}
-                    </p>
-                    <Button
-                      className="w-full gap-2 bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
-                      disabled={!humanizedDocFile || downloadingFileId === humanizedDocFile?.id}
-                      onClick={() => humanizedDocFile && handleDownload(humanizedDocFile.id)}
-                    >
-                      {downloadingFileId === humanizedDocFile?.id ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Download className="w-4 h-4" />
-                      )}
-                      下载降重版
-                    </Button>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    {humanizeDownloadCards.map((card) => {
+                      const meta = getDownloadCardMeta(card.category);
+                      const Icon = meta.icon;
+
+                      return (
+                        <div key={card.file.id} className={`border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center transition-colors bg-white shadow-sm ${meta.borderClass}`}>
+                          <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${meta.iconWrapClass}`}>
+                            <Icon className="w-8 h-8" />
+                          </div>
+                          <h3 className="font-semibold text-gray-900 mb-1">{meta.title}</h3>
+                          <p className="text-xs text-gray-500 mb-6">
+                            {card.file.filename || meta.emptyLabel}
+                          </p>
+                          <Button
+                            className={`w-full gap-2 ${meta.buttonClass}`.trim()}
+                            variant={meta.buttonVariant}
+                            disabled={downloadingFileId === card.file.id}
+                            onClick={() => handleDownload(card.file.id)}
+                          >
+                            {downloadingFileId === card.file.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Download className="w-4 h-4" />
+                            )}
+                            {meta.buttonLabel}
+                          </Button>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   <div className="flex justify-center pt-4 border-t border-gray-100">
