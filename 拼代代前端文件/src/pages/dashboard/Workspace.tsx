@@ -307,6 +307,8 @@ export default function Workspace() {
   // Handlers
   // ---------------------
 
+  const [isDragging, setIsDragging] = useState(false);
+
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const newFiles = Array.from(e.target.files);
@@ -314,6 +316,35 @@ export default function Workspace() {
     }
     // Reset input so the same file can be selected again
     if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  const ACCEPTED_EXTENSIONS = ['.txt', '.md', '.docx', '.pdf', '.ppt', '.pptx'];
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(file => {
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+      return ACCEPTED_EXTENSIONS.includes(ext);
+    });
+
+    if (droppedFiles.length > 0) {
+      setFiles(prev => [...prev, ...droppedFiles]);
+    }
   }, []);
 
   const removeFile = useCallback((index: number) => {
@@ -524,8 +555,16 @@ export default function Workspace() {
             </CardHeader>
             <CardContent className="space-y-6">
               <div
-                className="border-2 border-dashed border-gray-300 rounded-xl p-10 text-center hover:bg-gray-50 hover:border-red-300 transition-all cursor-pointer group relative"
+                className={`border-2 border-dashed rounded-xl p-10 text-center transition-all cursor-pointer group relative ${
+                  isDragging
+                    ? 'border-red-500 bg-red-50 scale-[1.02]'
+                    : 'border-gray-300 hover:bg-gray-50 hover:border-red-300'
+                }`}
                 onClick={() => fileInputRef.current?.click()}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
               >
                 <input
                   type="file"

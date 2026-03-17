@@ -10,6 +10,9 @@ import opsRoutes from './routes/ops';
 
 const app = express();
 
+// Railway runs behind a reverse proxy — must trust it for rate limiting to work
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json());
 
