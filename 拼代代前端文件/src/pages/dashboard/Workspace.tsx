@@ -210,6 +210,7 @@ export default function Workspace() {
 
         if (data.task.status === 'failed') {
           clearWritePoll();
+          await refreshBalance();
           setError(data.task.failure_reason || '写作流程出错');
           setStep(stageToStep(data.task.stage, data.task.status));
           return;
@@ -221,13 +222,14 @@ export default function Workspace() {
         // When completed (step 6), stop polling
         if (data.task.stage === 'completed' && data.task.status === 'completed') {
           clearWritePoll();
+          await refreshBalance();
         }
       } catch (err) {
         clearWritePoll();
         setError(err instanceof Error ? err.message : '轮询写作状态失败');
       }
     }, 5000);
-  }, [clearWritePoll]);
+  }, [clearWritePoll, refreshBalance]);
 
   // ---------------------
   // Polling: humanize
@@ -243,12 +245,14 @@ export default function Workspace() {
 
         if (data.task.status === 'failed') {
           clearHumanizePoll();
+          await refreshBalance();
           setError(data.task.failure_reason || '降AI处理失败');
           return;
         }
 
         if (data.humanizeJob?.status === 'completed') {
           clearHumanizePoll();
+          await refreshBalance();
           setIsStartingHumanize(false);
         }
       } catch (err) {
@@ -257,7 +261,7 @@ export default function Workspace() {
         setError(err instanceof Error ? err.message : '轮询降AI状态失败');
       }
     }, 5000);
-  }, [clearHumanizePoll]);
+  }, [clearHumanizePoll, refreshBalance]);
 
   // ---------------------
   // Resume existing task on mount
@@ -318,8 +322,6 @@ export default function Workspace() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
-  const ACCEPTED_EXTENSIONS = ['.txt', '.md', '.docx', '.pdf', '.ppt', '.pptx'];
-
   const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -337,10 +339,7 @@ export default function Workspace() {
     e.stopPropagation();
     setIsDragging(false);
 
-    const droppedFiles = Array.from(e.dataTransfer.files).filter(file => {
-      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
-      return ACCEPTED_EXTENSIONS.includes(ext);
-    });
+    const droppedFiles: File[] = Array.from(e.dataTransfer.files as ArrayLike<File>);
 
     if (droppedFiles.length > 0) {
       setFiles(prev => [...prev, ...droppedFiles]);
@@ -410,6 +409,7 @@ export default function Workspace() {
       );
       setTaskData(prev => prev ? { ...prev, task: data.task ?? { ...prev.task, stage: 'writing' } } : prev);
       setStep(3);
+      await refreshBalance();
       // Start polling for writing pipeline
       startWritePolling(taskData.task.id);
     } catch (err) {
@@ -417,7 +417,7 @@ export default function Workspace() {
     } finally {
       setIsConfirmingOutline(false);
     }
-  }, [taskData, startWritePolling]);
+  }, [taskData, startWritePolling, refreshBalance]);
 
   const handleStartHumanize = useCallback(async () => {
     if (!taskData) return;
@@ -427,12 +427,13 @@ export default function Workspace() {
 
     try {
       await api.startHumanize(taskData.task.id);
+      await refreshBalance();
       startHumanizePolling(taskData.task.id);
     } catch (err) {
       setIsStartingHumanize(false);
       setError(err instanceof Error ? err.message : '启动降AI失败');
     }
-  }, [taskData, startHumanizePolling]);
+  }, [taskData, startHumanizePolling, refreshBalance]);
 
   const handleDownload = useCallback(async (fileId: string) => {
     if (!taskData) return;
@@ -551,7 +552,6 @@ export default function Workspace() {
           <Card className="border-gray-200 shadow-sm">
             <CardHeader>
               <CardTitle>上传任务材料</CardTitle>
-              <CardDescription>支持 txt, md, docx, pdf, ppt, pptx 格式。可上传多个文件。</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div
@@ -572,7 +572,6 @@ export default function Workspace() {
                   className="hidden"
                   ref={fileInputRef}
                   onChange={handleFileChange}
-                  accept=".txt,.md,.docx,.pdf,.ppt,.pptx"
                 />
                 <div className="w-16 h-16 mx-auto bg-red-50 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                   <UploadCloud className="w-8 h-8 text-red-700" />

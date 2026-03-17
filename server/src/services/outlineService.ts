@@ -2,9 +2,61 @@ import { openai } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask } from './taskService';
-import { freezeCredits } from './walletService';
 import { getConfig } from './configService';
 import { startWritingPipeline } from './writingService';
+import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialInputService';
+import { confirmOutlineTaskAtomic } from './atomicOpsService';
+
+export function mapOutlineGenerationError(err: unknown) {
+  if (err instanceof AppError) {
+    return err;
+  }
+
+  const detail = err instanceof Error ? err.message : String(err || '');
+  const normalized = detail.toLowerCase();
+
+  if (
+    normalized.includes('unsupported') ||
+    normalized.includes('not supported') ||
+    normalized.includes('invalid image') ||
+    normalized.includes('does not represent a valid image') ||
+    normalized.includes('invalid file') ||
+    normalized.includes('failed to parse') ||
+    normalized.includes('could not be processed')
+  ) {
+    return new AppError(
+      400,
+      'AI 接口暂时无法读取这个材料文件，请换一个常见格式，或先确认文件能正常打开后再试。',
+      detail,
+    );
+  }
+
+  if (
+    normalized.includes('too large') ||
+    normalized.includes('request too large') ||
+    normalized.includes('maximum context') ||
+    normalized.includes('context length')
+  ) {
+    return new AppError(
+      400,
+      '材料文件太大，AI 接口这次处理不了。请压缩文件，或拆成更小的几个文件后重试。',
+      detail,
+    );
+  }
+
+  if (
+    normalized.includes('timed out') ||
+    normalized.includes('timeout')
+  ) {
+    return new AppError(
+      500,
+      'AI 处理材料超时了，请稍后重试；如果文件很多，建议拆小一点再传。',
+      detail,
+    );
+  }
+
+  return new AppError(500, '大纲生成失败，请稍后重试。', detail);
+}
 
 export async function generateOutline(taskId: string, userId: string) {
   // 读取材料
@@ -25,31 +77,19 @@ export async function generateOutline(taskId: string, userId: string) {
     .eq('id', taskId)
     .single();
 
-  // 下载并读取材料内容
-  const materialTexts: string[] = [];
-  for (const file of files) {
-    try {
-      const { data: fileData } = await supabaseAdmin.storage
-        .from('task-files')
-        .download(file.storage_path);
-      if (fileData) {
-        const text = await fileData.text();
-        materialTexts.push(`--- ${file.original_name} ---\n${text}`);
-      }
-    } catch {
-      materialTexts.push(`--- ${file.original_name} --- (无法解析)`);
-    }
-  }
-
   await updateTaskStage(taskId, 'outline_generating');
 
+  let uploadedFileIds: string[] = [];
   try {
+    const materialContent = await buildMaterialContentFromStorage(files);
+    uploadedFileIds = materialContent.uploadedFileIds;
+
     const response = await openai.responses.create({
       model: 'gpt-4.1',
       input: [
         {
           role: 'system' as const,
-          content: `You are an academic writing assistant. Based on the provided materials, generate a detailed English outline for an academic paper. Also identify:
+          content: `You are an academic writing assistant. Read every attached material file directly. Some files may be documents and some may be images. Based on all provided materials, generate a detailed English outline for an academic paper. Also identify:
 1. Target word count (default 1000 if unclear)
 2. Citation style (default APA 7 if unclear)
 
@@ -62,7 +102,13 @@ Respond in JSON format:
         },
         {
           role: 'user' as const,
-          content: `Materials:\n${materialTexts.join('\n\n')}\n\nSpecial requirements: ${task?.special_requirements || 'None'}`,
+          content: [
+            {
+              type: 'input_text',
+              text: `请直接阅读我上传的全部材料文件，并据此生成英文论文大纲。特殊要求：${task?.special_requirements || 'None'}`,
+            },
+            ...materialContent.parts,
+          ],
         },
       ],
     });
@@ -109,9 +155,11 @@ Respond in JSON format:
 
     return outline;
   } catch (err: any) {
-    if (err instanceof AppError) throw err;
-    await failTask(taskId, 'outline_generating', '大纲生成失败，请重新创建任务。AI 返回异常。', false);
-    throw new AppError(500, '大纲生成失败，请重新创建任务。');
+    const mappedError = mapOutlineGenerationError(err);
+    await failTask(taskId, 'outline_generating', mappedError.userMessage, false);
+    throw mappedError;
+  } finally {
+    await cleanupOpenAIFiles(uploadedFileIds);
   }
 }
 
@@ -240,29 +288,12 @@ export async function confirmOutline(taskId: string, userId: string, targetWords
   const units = Math.ceil(finalWords / 1000);
   const cost = units * pricePerThousand;
 
-  await freezeCredits(userId, cost, 'task', taskId, `正文生成：${finalWords} 词，${cost} 积分`);
-
-  await supabaseAdmin
-    .from('tasks')
-    .update({
-      stage: 'writing',
-      target_words: finalWords,
-      citation_style: finalStyle,
-      frozen_credits: cost,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', taskId);
-
-  await supabaseAdmin.from('task_events').insert({
-    task_id: taskId,
-    event_type: 'outline_confirmed',
-    detail: { target_words: finalWords, citation_style: finalStyle, frozen_credits: cost },
-  });
+  const result = await confirmOutlineTaskAtomic(taskId, userId, finalWords, finalStyle, cost);
 
   // Fire-and-forget: start the writing pipeline asynchronously
   startWritingPipeline(taskId, userId).catch(err => {
     console.error(`Writing pipeline failed for task ${taskId}:`, err);
   });
 
-  return { taskId, stage: 'writing', frozenCredits: cost };
+  return result;
 }

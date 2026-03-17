@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { AuthRequest } from '../middleware/auth';
 import { statusGuard } from '../middleware/statusGuard';
-import { createTask, getTask, getCurrentTask, getTaskList } from '../services/taskService';
+import { createTask, getTask, getCurrentTask, getTaskList, deleteTask } from '../services/taskService';
 import { validateFiles, uploadFiles, getDownloadUrl } from '../services/fileService';
 import { generateOutline, regenerateOutline, confirmOutline } from '../services/outlineService';
 import { startHumanize } from '../services/humanizeService';
@@ -14,6 +14,7 @@ router.use(statusGuard);
 
 // POST /api/task/create
 router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: Response) => {
+  let createdTaskId: string | null = null;
   try {
     const files = req.files as Express.Multer.File[];
     const { title, specialRequirements } = req.body;
@@ -21,6 +22,7 @@ router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: 
     validateFiles(files);
 
     const task = await createTask(req.userId!, title || files[0]?.originalname || '未命名任务', specialRequirements || '');
+    createdTaskId = task.id;
 
     await uploadFiles(task.id, files);
 
@@ -31,6 +33,11 @@ router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: 
 
     res.json({ success: true, data: task });
   } catch (err: unknown) {
+    if (createdTaskId) {
+      await deleteTask(createdTaskId).catch((cleanupError) => {
+        console.error(`Failed to delete half-created task ${createdTaskId}:`, cleanupError);
+      });
+    }
     const appErr = err as { statusCode?: number; userMessage?: string };
     const status = appErr.statusCode || 500;
     res.status(status).json({ success: false, error: appErr.userMessage || '创建任务失败。' });

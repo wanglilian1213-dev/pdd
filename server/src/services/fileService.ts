@@ -1,7 +1,21 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
-import { ALLOWED_FILE_TYPES, MAX_FILE_SIZE, MAX_TOTAL_SIZE, MAX_FILES_PER_TASK } from '../types';
-import path from 'path';
+import { MAX_FILE_SIZE, MAX_TOTAL_SIZE, MAX_FILES_PER_TASK } from '../types';
+
+interface UploadFilesDeps {
+  uploadToStorage: (storagePath: string, file: Express.Multer.File) => Promise<{ storagePath: string }>;
+  insertTaskFileRecord: (record: {
+    task_id: string;
+    category: 'material';
+    original_name: string;
+    storage_path: string;
+    file_size: number;
+    mime_type: string;
+  }) => Promise<{ id: string }>;
+  removeFromStorage: (storagePath: string) => Promise<void>;
+  removeTaskFileRecord: (recordId: string) => Promise<void>;
+  now?: () => number;
+}
 
 export function validateFiles(files: Express.Multer.File[]) {
   if (files.length === 0) {
@@ -13,10 +27,6 @@ export function validateFiles(files: Express.Multer.File[]) {
 
   let totalSize = 0;
   for (const file of files) {
-    const ext = path.extname(file.originalname).toLowerCase().replace('.', '');
-    if (!ALLOWED_FILE_TYPES.includes(ext)) {
-      throw new AppError(400, `不支持的文件格式：${ext}。支持的格式：${ALLOWED_FILE_TYPES.join(', ')}。`);
-    }
     if (file.size > MAX_FILE_SIZE) {
       throw new AppError(400, `文件 ${file.originalname} 超过 20MB 大小限制。`);
     }
@@ -27,41 +37,75 @@ export function validateFiles(files: Express.Multer.File[]) {
   }
 }
 
-export async function uploadFiles(taskId: string, files: Express.Multer.File[]) {
-  const records = [];
+export async function uploadFilesWithDeps(taskId: string, files: Express.Multer.File[], deps: UploadFilesDeps) {
+  const uploadedPaths: string[] = [];
+  const insertedRecordIds: string[] = [];
+  const results = [];
+  const getNow = deps.now || Date.now;
 
-  for (const file of files) {
-    const storagePath = `${taskId}/${Date.now()}-${file.originalname}`;
+  try {
+    for (const file of files) {
+      const storagePath = `${taskId}/${getNow()}-${file.originalname}`;
 
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from('task-files')
-      .upload(storagePath, file.buffer, {
-        contentType: file.mimetype,
-      });
+      const uploaded = await deps.uploadToStorage(storagePath, file);
+      uploadedPaths.push(uploaded.storagePath);
 
-    if (uploadError) {
-      throw new AppError(500, `文件 ${file.originalname} 上传失败，请稍后重试。`);
-    }
-
-    const { error: dbError } = await supabaseAdmin
-      .from('task_files')
-      .insert({
+      const inserted = await deps.insertTaskFileRecord({
         task_id: taskId,
         category: 'material',
         original_name: file.originalname,
-        storage_path: storagePath,
+        storage_path: uploaded.storagePath,
         file_size: file.size,
         mime_type: file.mimetype,
       });
 
-    if (dbError) {
-      throw new AppError(500, `文件记录保存失败。`);
+      insertedRecordIds.push(inserted.id);
+      results.push({ name: file.originalname, size: file.size });
     }
 
-    records.push({ name: file.originalname, size: file.size });
+    return results;
+  } catch (error) {
+    await Promise.allSettled(insertedRecordIds.map((recordId) => deps.removeTaskFileRecord(recordId)));
+    await Promise.allSettled(uploadedPaths.map((storagePath) => deps.removeFromStorage(storagePath)));
+    throw error;
   }
+}
 
-  return records;
+export async function uploadFiles(taskId: string, files: Express.Multer.File[]) {
+  return uploadFilesWithDeps(taskId, files, {
+    uploadToStorage: async (storagePath, file) => {
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from('task-files')
+        .upload(storagePath, file.buffer, {
+          contentType: file.mimetype,
+        });
+
+      if (uploadError) {
+        throw new AppError(500, `文件 ${file.originalname} 上传失败，请稍后重试。`);
+      }
+
+      return { storagePath };
+    },
+    insertTaskFileRecord: async (record) => {
+      const { data, error: dbError } = await supabaseAdmin
+        .from('task_files')
+        .insert(record)
+        .select('id')
+        .single();
+
+      if (dbError || !data) {
+        throw new AppError(500, '文件记录保存失败。');
+      }
+
+      return { id: data.id as string };
+    },
+    removeFromStorage: async (storagePath) => {
+      await supabaseAdmin.storage.from('task-files').remove([storagePath]);
+    },
+    removeTaskFileRecord: async (recordId) => {
+      await supabaseAdmin.from('task_files').delete().eq('id', recordId);
+    },
+  });
 }
 
 export async function getDownloadUrl(taskId: string, fileId: string, userId: string) {

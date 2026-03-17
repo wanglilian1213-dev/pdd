@@ -1,13 +1,6 @@
 node_modules
 .git
-src
-*.ts
-*.tsx
-!server.js
-tsconfig.json
-tsconfig.*.json
-vite.config.ts
-components.json
-tailwind.config.*
-postcss.config.*
-.env.example
+dist
+coverage
+*.log
+!.env.example

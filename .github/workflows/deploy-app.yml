@@ -1,0 +1,47 @@
+name: Deploy App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/**'
+      - '.github/workflows/deploy-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-app-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy app service to Railway production
+        working-directory: server
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+        run: |
+          railway up . \
+            --path-as-root \
+            --no-gitignore \
+            --ci \
+            --project f372a67e-5f11-4c8a-85fd-cd4196eba420 \
+            --environment 721bba45-818c-42ee-822c-8ee3cd8bef17 \
+            --service 27eeaeed-98b9-4e6d-a9c1-c42305ec1995 \
+            --message "GitHub Actions deploy app ${GITHUB_SHA}"

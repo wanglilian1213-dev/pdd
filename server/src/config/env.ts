@@ -6,7 +6,10 @@ export const env = {
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY!,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
   openaiApiKey: process.env.OPENAI_API_KEY!,
-  opsWhitelistEmails: (process.env.OPS_WHITELIST_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean),
+  opsWhitelistEmails: (process.env.OPS_WHITELIST_EMAILS || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
   port: parseInt(process.env.PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
 };

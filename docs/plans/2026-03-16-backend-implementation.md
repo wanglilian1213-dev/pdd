@@ -12,7 +12,7 @@
 - 设计文档：`docs/plans/2026-03-16-backend-design.md`
 - PRD：`拼代代PRD.md`
 - 架构：`DESIGN.md`
-- 开发规矩：`CLAUDE.md`
+- 开发规矩：`agent.md`
 
 ---
 
@@ -333,7 +333,7 @@ git commit -m "feat: add server base structure with supabase, openai clients and
 ### Task 3: 创建数据库 migration SQL
 
 **Files:**
-- Create: `server/db/migrations/001_init.sql`
+- Create: `server/supabase/migrations/20260316000000_init.sql`
 
 **Step 1: 编写完整建表 SQL**
 
@@ -2917,11 +2917,11 @@ git commit -m "feat: add daily cleanup service - stuck tasks, expired files, mat
 ### Task 13: 前端安装 Supabase + 创建 Auth 上下文
 
 **Files:**
-- Modify: `拼代代最终版/package.json` — 添加 @supabase/supabase-js
-- Create: `拼代代最终版/src/lib/supabase.ts`
-- Create: `拼代代最终版/src/contexts/AuthContext.tsx`
-- Modify: `拼代代最终版/src/main.tsx` — 包裹 AuthProvider
-- Modify: `拼代代最终版/src/App.tsx` — 添加路由守卫
+- Modify: `拼代代前端文件/package.json` — 添加 @supabase/supabase-js
+- Create: `拼代代前端文件/src/lib/supabase.ts`
+- Create: `拼代代前端文件/src/contexts/AuthContext.tsx`
+- Modify: `拼代代前端文件/src/main.tsx` — 包裹 AuthProvider
+- Modify: `拼代代前端文件/src/App.tsx` — 添加路由守卫
 
 这个 Task 改动较大，具体代码在执行时根据现有前端代码生成。核心要点：
 
@@ -2941,8 +2941,8 @@ git commit -m "feat: add Supabase auth integration and route guards to frontend"
 ### Task 14: 前端改造 — 登录、注册页接通真实 Auth
 
 **Files:**
-- Modify: `拼代代最终版/src/pages/Login.tsx`
-- Modify: `拼代代最终版/src/pages/Register.tsx`
+- Modify: `拼代代前端文件/src/pages/Login.tsx`
+- Modify: `拼代代前端文件/src/pages/Register.tsx`
 
 核心要点：
 1. Login 页面调用 `supabase.auth.signInWithPassword`
@@ -2960,9 +2960,9 @@ git commit -m "feat: connect Login and Register pages to Supabase Auth"
 ### Task 15: 前端改造 — DashboardLayout、Recharge、Tasks 接通后端
 
 **Files:**
-- Modify: `拼代代最终版/src/components/layout/DashboardLayout.tsx` — 真实用户信息
-- Modify: `拼代代最终版/src/pages/dashboard/Recharge.tsx` — 接通真实余额和兑换
-- Modify: `拼代代最终版/src/pages/dashboard/Tasks.tsx` — 接通真实任务列表
+- Modify: `拼代代前端文件/src/components/layout/DashboardLayout.tsx` — 真实用户信息
+- Modify: `拼代代前端文件/src/pages/dashboard/Recharge.tsx` — 接通真实余额和兑换
+- Modify: `拼代代前端文件/src/pages/dashboard/Tasks.tsx` — 接通真实任务列表
 
 **Commit:**
 ```bash
@@ -2974,8 +2974,8 @@ git commit -m "feat: connect dashboard layout, recharge, and tasks pages to back
 ### Task 16: 前端改造 — Workspace 接通后端
 
 **Files:**
-- Modify: `拼代代最终版/src/pages/dashboard/Workspace.tsx`
-- Create: `拼代代最终版/src/lib/api.ts` — API 调用封装
+- Modify: `拼代代前端文件/src/pages/dashboard/Workspace.tsx`
+- Create: `拼代代前端文件/src/lib/api.ts` — API 调用封装
 
 这是最大的改造任务。核心要点：
 
@@ -2997,8 +2997,8 @@ git commit -m "feat: connect Workspace to backend - real file upload, outline, w
 ### Task 17: 更新环境变量和最终验证
 
 **Files:**
-- Modify: `拼代代最终版/.env.example`
-- Create: `拼代代最终版/.env`
+- Modify: `拼代代前端文件/.env.example`
+- Create: `拼代代前端文件/.env`
 
 **Step 1: 前端 .env**
 
@@ -3015,7 +3015,7 @@ VITE_API_BASE_URL=http://localhost:3001
 cd server && npm run lint && npm run build
 
 # 前端
-cd 拼代代最终版 && npm run lint && npm run build
+cd 拼代代前端文件 && npm run lint && npm run build
 ```
 
 **Step 3: 更新 PLAN.md**

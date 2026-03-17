@@ -7,6 +7,7 @@ interface AuthContextType {
   user: User | null;
   session: Session | null;
   loading: boolean;
+  authBusy: boolean;
   signUp: (email: string, password: string) => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -18,6 +19,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [authBusy, setAuthBusy] = useState(false);
 
   useEffect(() => {
     // Get initial session
@@ -37,36 +39,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signUp = async (email: string, password: string) => {
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;
-    if (!data.user) throw new Error('注册失败，请稍后重试。');
-
-    // Initialize user profile + wallet on backend
     try {
-      await api.initUser();
-    } catch (initErr: any) {
-      // If init fails, sign out to prevent half-initialized user from entering
-      await supabase.auth.signOut();
-      throw new Error('账号初始化失败，请稍后重试。');
+      setAuthBusy(true);
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      if (error) throw error;
+      if (!data.user) throw new Error('注册失败，请稍后重试。');
+
+      // Initialize user profile + wallet on backend
+      try {
+        await api.initUser();
+      } catch {
+        // If init fails, sign out to prevent half-initialized user from entering
+        await supabase.auth.signOut();
+        throw new Error('账号初始化失败，请稍后重试。');
+      }
+    } finally {
+      setAuthBusy(false);
     }
   };
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      if (error.message.includes('Invalid login credentials')) {
-        throw new Error('邮箱或密码错误，请重新输入。');
+    try {
+      setAuthBusy(true);
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        if (error.message.includes('Invalid login credentials')) {
+          throw new Error('邮箱或密码错误，请重新输入。');
+        }
+        throw new Error(error.message);
       }
-      throw new Error(error.message);
+    } finally {
+      setAuthBusy(false);
     }
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    try {
+      setAuthBusy(true);
+      await supabase.auth.signOut();
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, signUp, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, session, loading, authBusy, signUp, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   );

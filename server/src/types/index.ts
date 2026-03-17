@@ -24,12 +24,6 @@ export interface ApiResponse<T = unknown> {
   error?: string;
 }
 
-export const ALLOWED_FILE_TYPES = [
-  'txt', 'md', 'docx', 'pdf', 'ppt', 'pptx',
-  'jpg', 'jpeg', 'png', 'webp', 'gif',
-  'heic', 'heif', 'bmp', 'tiff', 'tif',
-];
-
 export const MAX_FILES_PER_TASK = 10;
 export const MAX_FILE_SIZE = 20 * 1024 * 1024;
 export const MAX_TOTAL_SIZE = 50 * 1024 * 1024;

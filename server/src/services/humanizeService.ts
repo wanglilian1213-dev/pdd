@@ -1,9 +1,11 @@
 import { openai } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
-import { freezeCredits, settleCredits, refundCredits } from './walletService';
+import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { startHumanizeJobAtomic } from './atomicOpsService';
+import { storeGeneratedTaskFile } from './writingService';
 
 export async function startHumanize(taskId: string, userId: string) {
   const { data: task } = await supabaseAdmin
@@ -15,15 +17,6 @@ export async function startHumanize(taskId: string, userId: string) {
 
   if (!task) throw new AppError(404, '任务不存在。');
   if (task.status !== 'completed') throw new AppError(400, '只有已完成的任务才能发起降 AI。');
-
-  const { data: pendingJob } = await supabaseAdmin
-    .from('humanize_jobs')
-    .select('id')
-    .eq('task_id', taskId)
-    .eq('status', 'processing')
-    .single();
-
-  if (pendingJob) throw new AppError(400, '当前已有降 AI 任务在处理中，请等待完成。');
 
   // Determine input version
   const { data: lastSuccessJob } = await supabaseAdmin
@@ -67,33 +60,14 @@ export async function startHumanize(taskId: string, userId: string) {
   const units = Math.ceil(inputWordCount / 1000);
   const cost = units * pricePerThousand;
 
-  const { data: job } = await supabaseAdmin
-    .from('humanize_jobs')
-    .insert({
-      task_id: taskId,
-      input_version_id: inputVersion.id,
-      input_word_count: inputWordCount,
-      frozen_credits: cost,
-      status: 'processing',
-    })
-    .select()
-    .single();
-
-  if (!job) throw new AppError(500, '创建降 AI 任务失败。');
-
-  await freezeCredits(userId, cost, 'humanize_job', job.id, `降 AI：${inputWordCount} 词，${cost} 积分`);
-
-  await supabaseAdmin
-    .from('tasks')
-    .update({ stage: 'humanizing', updated_at: new Date().toISOString() })
-    .eq('id', taskId);
+  const result = await startHumanizeJobAtomic(taskId, userId, inputVersion.id, inputWordCount, cost);
 
   // Async execution
-  executeHumanize(taskId, userId, job.id, inputVersion.content, inputWordCount, cost).catch(err => {
-    console.error(`Humanize failed for job ${job.id}:`, err);
+  executeHumanize(taskId, userId, result.jobId, inputVersion.content, inputWordCount, cost).catch(err => {
+    console.error(`Humanize failed for job ${result.jobId}:`, err);
   });
 
-  return { jobId: job.id, stage: 'humanizing', frozenCredits: cost };
+  return result;
 }
 
 async function executeHumanize(taskId: string, userId: string, jobId: string, inputText: string, wordCount: number, frozenCredits: number) {
@@ -141,18 +115,15 @@ async function executeHumanize(taskId: string, userId: string, jobId: string, in
     const docBuffer = await Packer.toBuffer(doc);
     const docPath = `${taskId}/humanized-${Date.now()}.docx`;
 
-    await supabaseAdmin.storage
-      .from('task-files')
-      .upload(docPath, docBuffer, { contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-
-    await supabaseAdmin.from('task_files').insert({
-      task_id: taskId,
+    await storeGeneratedTaskFile({
+      taskId,
       category: 'humanized_doc',
-      original_name: 'humanized-paper.docx',
-      storage_path: docPath,
-      file_size: docBuffer.length,
-      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      expires_at: expiresAt.toISOString(),
+      originalName: 'humanized-paper.docx',
+      storagePath: docPath,
+      fileSize: docBuffer.length,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      expiresAtIso: expiresAt.toISOString(),
+      body: docBuffer,
     });
 
     await settleCredits(userId, frozenCredits);
@@ -160,6 +131,11 @@ async function executeHumanize(taskId: string, userId: string, jobId: string, in
       status: 'completed',
       completed_at: new Date().toISOString(),
     }).eq('id', jobId);
+
+    await supabaseAdmin.from('tasks').update({
+      stage: 'completed',
+      updated_at: new Date().toISOString(),
+    }).eq('id', taskId);
 
     await supabaseAdmin.from('task_events').insert({
       task_id: taskId,

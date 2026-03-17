@@ -1,10 +1,77 @@
 import { openai } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
-import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+
+interface GeneratedTaskFilePayload {
+  taskId: string;
+  category: 'final_doc' | 'citation_report' | 'humanized_doc';
+  originalName: string;
+  storagePath: string;
+  fileSize: number;
+  mimeType: string;
+  expiresAtIso: string;
+  body: Buffer;
+}
+
+interface StoreGeneratedTaskFileDeps {
+  uploadToStorage: (
+    storagePath: string,
+    body: Buffer,
+    mimeType: string,
+  ) => Promise<{ error: Error | null }>;
+  insertTaskFileRecord: (record: {
+    task_id: string;
+    category: 'final_doc' | 'citation_report' | 'humanized_doc';
+    original_name: string;
+    storage_path: string;
+    file_size: number;
+    mime_type: string;
+    expires_at: string;
+  }) => Promise<{ error: Error | null }>;
+  removeFromStorage: (storagePath: string) => Promise<void>;
+}
+
+export async function storeGeneratedTaskFile(
+  payload: GeneratedTaskFilePayload,
+  deps: StoreGeneratedTaskFileDeps = {
+    uploadToStorage: async (storagePath, body, mimeType) => {
+      const { error } = await supabaseAdmin.storage
+        .from('task-files')
+        .upload(storagePath, body, { contentType: mimeType });
+      return { error: error ? new Error(error.message) : null };
+    },
+    insertTaskFileRecord: async (record) => {
+      const { error } = await supabaseAdmin.from('task_files').insert(record);
+      return { error: error ? new Error(error.message) : null };
+    },
+    removeFromStorage: async (storagePath) => {
+      await supabaseAdmin.storage.from('task-files').remove([storagePath]);
+    },
+  },
+) {
+  const uploadResult = await deps.uploadToStorage(payload.storagePath, payload.body, payload.mimeType);
+  if (uploadResult.error) {
+    throw uploadResult.error;
+  }
+
+  const insertResult = await deps.insertTaskFileRecord({
+    task_id: payload.taskId,
+    category: payload.category,
+    original_name: payload.originalName,
+    storage_path: payload.storagePath,
+    file_size: payload.fileSize,
+    mime_type: payload.mimeType,
+    expires_at: payload.expiresAtIso,
+  });
+
+  if (insertResult.error) {
+    await deps.removeFromStorage(payload.storagePath).catch(() => undefined);
+    throw insertResult.error;
+  }
+}
 
 export async function startWritingPipeline(taskId: string, userId: string) {
   try {
@@ -215,18 +282,15 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
   const docBuffer = await Packer.toBuffer(doc);
   const docPath = `${taskId}/final-paper.docx`;
 
-  await supabaseAdmin.storage
-    .from('task-files')
-    .upload(docPath, docBuffer, { contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-
-  await supabaseAdmin.from('task_files').insert({
-    task_id: taskId,
+  await storeGeneratedTaskFile({
+    taskId,
     category: 'final_doc',
-    original_name: 'final-paper.docx',
-    storage_path: docPath,
-    file_size: docBuffer.length,
-    mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    expires_at: expiresAt.toISOString(),
+    originalName: 'final-paper.docx',
+    storagePath: docPath,
+    fileSize: docBuffer.length,
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    expiresAtIso: expiresAt.toISOString(),
+    body: docBuffer,
   });
 
   // Generate citation report
@@ -234,18 +298,15 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
   const reportBuffer = Buffer.from(citationReport, 'utf-8');
   const reportPath = `${taskId}/citation-report.txt`;
 
-  await supabaseAdmin.storage
-    .from('task-files')
-    .upload(reportPath, reportBuffer, { contentType: 'text/plain' });
-
-  await supabaseAdmin.from('task_files').insert({
-    task_id: taskId,
+  await storeGeneratedTaskFile({
+    taskId,
     category: 'citation_report',
-    original_name: 'citation-report.txt',
-    storage_path: reportPath,
-    file_size: reportBuffer.length,
-    mime_type: 'text/plain',
-    expires_at: expiresAt.toISOString(),
+    originalName: 'citation-report.txt',
+    storagePath: reportPath,
+    fileSize: reportBuffer.length,
+    mimeType: 'text/plain',
+    expiresAtIso: expiresAt.toISOString(),
+    body: reportBuffer,
   });
 }
 

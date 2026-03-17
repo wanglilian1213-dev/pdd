@@ -1,20 +1,41 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# 拼代代前端
 
-# Run and deploy your AI Studio app
+这是拼代代的前端项目，负责登录、注册、工作台、任务列表、充值页和静态页面。
 
-This contains everything you need to run your app locally.
+## 本地运行
 
-View your app in AI Studio: https://ai.studio/apps/d4cf0736-9091-4608-91e2-b72b28dcf1e7
+前提：
 
-## Run Locally
+- Node.js 22 左右
+- 已准备好 `.env` 或 Railway 变量
 
-**Prerequisites:**  Node.js
+命令：
 
+```bash
+cd 拼代代前端文件
+npm install
+npm run dev
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+默认本地地址：
+
+- 前端：`http://localhost:3000`
+
+## 构建和部署
+
+```bash
+cd 拼代代前端文件
+npm run lint
+npm run build
+npm run start
+```
+
+线上当前跑在 Railway 的 `拼代代前端` 服务上。
+
+## 需要的环境变量
+
+```env
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+VITE_API_BASE_URL=
+```

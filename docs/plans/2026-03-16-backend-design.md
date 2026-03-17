@@ -1,15 +1,15 @@
 # 拼代代后端设计文档
 
 > 日期：2026-03-16
-> 状态：已确认，待实施
+> 状态：已基本落地，仍需继续收口和联调
 
 ## 1. 架构概述
 
-采用 Monorepo 单仓库方案，后端代码放在 `server/` 目录下，与前端 `拼代代最终版/` 并列。
+采用 Monorepo 单仓库方案，后端代码放在 `server/` 目录下，与前端 `拼代代前端文件/` 并列。
 
 ```
 拼代代/
-├── 拼代代最终版/          ← 现有前端（不动）
+├── 拼代代前端文件/        ← 现有前端
 └── server/                ← 后端
 ```
 
@@ -329,7 +329,7 @@ server/
 │   │   ├── openai.ts
 │   │   └── errors.ts
 │   └── types/index.ts
-├── db/migrations/001_init.sql
+├── supabase/migrations/20260316000000_init.sql
 ├── package.json
 ├── tsconfig.json
 └── .env.example
@@ -356,7 +356,7 @@ NODE_ENV=production
 
 ## 9. 关键设计决策
 
-1. AI 用 OpenAI Responses API，不是 Google GenAI
+1. AI 统一使用 OpenAI Responses API
 2. 正文单价 250积分/千字，降AI 250积分/千字（可通过 system_config 调整）
 3. Cleanup 每天跑一次
 4. 前端不直接调 AI，所有 AI 调用走 Railway app

@@ -19,15 +19,15 @@ import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="flex items-center justify-center h-screen text-gray-500">加载中...</div>;
+  const { user, loading, authBusy } = useAuth();
+  if (loading || authBusy) return <div className="flex items-center justify-center h-screen text-gray-500">加载中...</div>;
   if (!user) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
 
 function PublicOnlyRoute({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="flex items-center justify-center h-screen text-gray-500">加载中...</div>;
+  const { user, loading, authBusy } = useAuth();
+  if (loading || authBusy) return <div className="flex items-center justify-center h-screen text-gray-500">加载中...</div>;
   if (user) return <Navigate to="/dashboard/workspace" replace />;
   return <>{children}</>;
 }

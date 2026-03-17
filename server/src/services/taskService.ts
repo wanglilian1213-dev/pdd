@@ -148,3 +148,14 @@ export async function completeTask(taskId: string) {
     throw new AppError(500, '任务完成状态更新失败。');
   }
 }
+
+export async function deleteTask(taskId: string) {
+  const { error } = await supabaseAdmin
+    .from('tasks')
+    .delete()
+    .eq('id', taskId);
+
+  if (error) {
+    throw new AppError(500, '清理任务失败。');
+  }
+}

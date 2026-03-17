@@ -1,7 +1,13 @@
 import { Router, Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { supabaseAdmin } from '../lib/supabase';
-import { getAllConfig, setConfig } from '../services/configService';
+import { AppError } from '../lib/errors';
+import { getAllConfig, getConfig, setConfig } from '../services/configService';
+import {
+  DEFAULT_ACTIVATION_DENOMINATIONS,
+  validateGenerateCodeInput,
+  validateVoidCodeIds,
+} from '../services/opsService';
 
 const router = Router();
 
@@ -40,39 +46,46 @@ router.get('/users', async (_req: AuthRequest, res: Response) => {
 // POST /api/ops/users/:id/disable
 router.post('/users/:id/disable', async (req: AuthRequest, res: Response) => {
   try {
-    const { error } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('user_profiles')
       .update({ status: 'disabled', updated_at: new Date().toISOString() })
-      .eq('id', req.params.id as string);
+      .eq('id', req.params.id as string)
+      .select('id')
+      .maybeSingle();
     if (error) throw error;
+    if (!data) throw new AppError(404, '账号不存在。');
     res.json({ success: true });
-  } catch {
-    res.status(500).json({ success: false, error: '操作失败。' });
+  } catch (err: any) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });
   }
 });
 
 // POST /api/ops/users/:id/enable
 router.post('/users/:id/enable', async (req: AuthRequest, res: Response) => {
   try {
-    const { error } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('user_profiles')
       .update({ status: 'active', updated_at: new Date().toISOString() })
-      .eq('id', req.params.id as string);
+      .eq('id', req.params.id as string)
+      .select('id')
+      .maybeSingle();
     if (error) throw error;
+    if (!data) throw new AppError(404, '账号不存在。');
     res.json({ success: true });
-  } catch {
-    res.status(500).json({ success: false, error: '操作失败。' });
+  } catch (err: any) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });
   }
 });
 
 // POST /api/ops/codes/generate
 router.post('/codes/generate', async (req: AuthRequest, res: Response) => {
   try {
-    const { denomination, count } = req.body;
-    if (!denomination || !count || count < 1 || count > 100) {
-      res.status(400).json({ success: false, error: '请指定面值和数量（1-100）。' });
-      return;
-    }
+    const activationDenominations = (await getConfig('activation_denominations')) || DEFAULT_ACTIVATION_DENOMINATIONS;
+    const { denomination, count } = validateGenerateCodeInput(
+      req.body?.denomination,
+      req.body?.count,
+      Array.isArray(activationDenominations) ? activationDenominations : DEFAULT_ACTIVATION_DENOMINATIONS,
+    );
 
     const batchId = `BATCH-${Date.now()}`;
     const codes = [];
@@ -91,30 +104,30 @@ router.post('/codes/generate', async (req: AuthRequest, res: Response) => {
     if (error) throw error;
 
     res.json({ success: true, data: { batchId, count, denomination, codes: codes.map(c => c.code) } });
-  } catch {
-    res.status(500).json({ success: false, error: '生成激活码失败。' });
+  } catch (err: any) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '生成激活码失败。' });
   }
 });
 
 // POST /api/ops/codes/void
 router.post('/codes/void', async (req: AuthRequest, res: Response) => {
   try {
-    const { codeIds } = req.body;
-    if (!codeIds || !Array.isArray(codeIds)) {
-      res.status(400).json({ success: false, error: '请指定要作废的激活码 ID。' });
-      return;
-    }
+    const codeIds = validateVoidCodeIds(req.body?.codeIds);
 
-    const { error } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('recharge_codes')
       .update({ status: 'voided' })
       .in('id', codeIds)
-      .eq('status', 'unused');
+      .eq('status', 'unused')
+      .select('id');
 
     if (error) throw error;
+    if (!data || data.length === 0) {
+      throw new AppError(400, '没有找到可作废的未使用激活码。');
+    }
     res.json({ success: true });
-  } catch {
-    res.status(500).json({ success: false, error: '操作失败。' });
+  } catch (err: any) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });
   }
 });
 
@@ -192,8 +205,8 @@ router.put('/config/:key', async (req: AuthRequest, res: Response) => {
     const { value } = req.body;
     await setConfig(req.params.key as string, value, req.userEmail!);
     res.json({ success: true });
-  } catch {
-    res.status(500).json({ success: false, error: '更新配置失败。' });
+  } catch (err: any) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '更新配置失败。' });
   }
 });
 
