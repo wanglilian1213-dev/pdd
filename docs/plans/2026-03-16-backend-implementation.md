@@ -1611,6 +1611,7 @@ import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask } from './taskService';
 import { freezeCredits } from './walletService';
 import { getConfig } from './configService';
+import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 
 export async function generateOutline(taskId: string, userId: string) {
   // 读取材料
@@ -1652,7 +1653,7 @@ export async function generateOutline(taskId: string, userId: string) {
 
   try {
     const response = await openai.responses.create({
-      model: 'gpt-5.4',
+      ...buildMainOpenAIResponsesOptions('outline_generation'),
       input: [
         {
           role: 'system',
@@ -1761,7 +1762,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
 
   try {
     const response = await openai.responses.create({
-      model: 'gpt-5.4',
+      ...buildMainOpenAIResponsesOptions('outline_regeneration'),
       input: [
         {
           role: 'system',
@@ -1962,6 +1963,7 @@ import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 
 export async function startWritingPipeline(taskId: string, userId: string) {
   try {
@@ -2036,7 +2038,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
 async function generateDraft(taskId: string, outline: string, targetWords: number, citationStyle: string, requirements: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-5.4',
+    ...buildMainOpenAIResponsesOptions('draft_generation'),
     input: [
       {
         role: 'system',
@@ -2091,7 +2093,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
 
   // 需要调整字数
   const response = await openai.responses.create({
-    model: 'gpt-5.4',
+    ...buildMainOpenAIResponsesOptions('word_calibration'),
     input: [
       {
         role: 'system',
@@ -2120,7 +2122,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
 
 async function verifyCitations(taskId: string, text: string, citationStyle: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-5.4',
+    ...buildMainOpenAIResponsesOptions('citation_verification'),
     input: [
       {
         role: 'system',
@@ -2212,8 +2214,9 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
 }
 
 async function generateCitationReport(text: string, citationStyle: string): Promise<string> {
+  // 当前先复用 citation_verification 这套统一参数；如果以后要单独调强度，再拆 stage 名。
   const response = await openai.responses.create({
-    model: 'gpt-5.4',
+    ...buildMainOpenAIResponsesOptions('citation_verification'),
     input: [
       {
         role: 'system',
@@ -2374,7 +2377,7 @@ export async function startHumanize(taskId: string, userId: string) {
 async function executeHumanize(taskId: string, userId: string, jobId: string, inputText: string, wordCount: number, frozenCredits: number) {
   try {
     const response = await openai.responses.create({
-      model: 'separate-humanize-model',
+      model: 'gpt-4.1', // 当前真实状态；后面会单独迁移到别的 API，不在这轮里处理
       input: [
         {
           role: 'system',

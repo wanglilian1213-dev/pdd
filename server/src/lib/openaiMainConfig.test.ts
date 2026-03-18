@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildMainOpenAIResponsesOptions, type MainOpenAIStage } from './openaiMainConfig';
+import { env } from '../config/env';
 
 const expectedEffortByStage: Record<MainOpenAIStage, 'medium' | 'high'> = {
   outline_generation: 'medium',
@@ -14,10 +15,10 @@ for (const [stage, expectedEffort] of Object.entries(expectedEffortByStage) as A
   MainOpenAIStage,
   'medium' | 'high',
 ]>) {
-  test(`buildMainOpenAIResponsesOptions uses GPT-5.4 defaults for ${stage}`, () => {
+  test(`buildMainOpenAIResponsesOptions uses current env model and reasoning for ${stage}`, () => {
     const options = buildMainOpenAIResponsesOptions(stage);
 
-    assert.equal(options.model, 'gpt-5.4');
+    assert.equal(options.model, env.openaiModel);
     assert.deepEqual(options.reasoning, { effort: expectedEffort });
     assert.equal('temperature' in options, false);
     assert.equal('text' in options, false);

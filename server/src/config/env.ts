@@ -1,23 +1,53 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-export const env = {
-  supabaseUrl: process.env.SUPABASE_URL!,
-  supabaseAnonKey: process.env.SUPABASE_ANON_KEY!,
-  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  openaiApiKey: process.env.OPENAI_API_KEY!,
-  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.4',
-  opsWhitelistEmails: (process.env.OPS_WHITELIST_EMAILS || '')
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean),
-  port: parseInt(process.env.PORT || '3001', 10),
-  nodeEnv: process.env.NODE_ENV || 'development',
-};
+const allowedOpenAIModels = ['gpt-5.4'] as const;
 
-const required = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'OPENAI_API_KEY'] as const;
-for (const key of required) {
-  if (!process.env[key]) {
-    throw new Error(`Missing required env var: ${key}`);
-  }
+type AllowedOpenAIModel = (typeof allowedOpenAIModels)[number];
+
+export interface Env {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  supabaseServiceRoleKey: string;
+  openaiApiKey: string;
+  openaiModel: AllowedOpenAIModel;
+  opsWhitelistEmails: string[];
+  port: number;
+  nodeEnv: string;
 }
+
+function readRequired(rawEnv: NodeJS.ProcessEnv, key: string) {
+  const value = rawEnv[key]?.trim();
+  if (!value) {
+    throw new Error(`缺少环境变量 ${key}`);
+  }
+  return value;
+}
+
+function readOpenAIModel(rawEnv: NodeJS.ProcessEnv): AllowedOpenAIModel {
+  const value = readRequired(rawEnv, 'OPENAI_MODEL');
+
+  if (!allowedOpenAIModels.includes(value as AllowedOpenAIModel)) {
+    throw new Error(`OPENAI_MODEL 只能是 gpt-5.4，当前值：${value}`);
+  }
+
+  return value as AllowedOpenAIModel;
+}
+
+export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
+  return {
+    supabaseUrl: readRequired(rawEnv, 'SUPABASE_URL'),
+    supabaseAnonKey: readRequired(rawEnv, 'SUPABASE_ANON_KEY'),
+    supabaseServiceRoleKey: readRequired(rawEnv, 'SUPABASE_SERVICE_ROLE_KEY'),
+    openaiApiKey: readRequired(rawEnv, 'OPENAI_API_KEY'),
+    openaiModel: readOpenAIModel(rawEnv),
+    opsWhitelistEmails: (rawEnv.OPS_WHITELIST_EMAILS || '')
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean),
+    port: parseInt(rawEnv.PORT || '3001', 10),
+    nodeEnv: rawEnv.NODE_ENV || 'development',
+  };
+}
+
+export const env = parseEnv(process.env);

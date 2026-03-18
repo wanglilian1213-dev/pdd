@@ -12,6 +12,7 @@ const reasoningEffortByStage: Record<MainOpenAIStage, 'medium' | 'high'> = {
   outline_regeneration: 'medium',
   draft_generation: 'high',
   word_calibration: 'medium',
+  // Citation report intentionally reuses citation_verification for now.
   citation_verification: 'medium',
 };
 

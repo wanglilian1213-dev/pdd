@@ -72,6 +72,9 @@ export async function startHumanize(taskId: string, userId: string) {
 
 async function executeHumanize(taskId: string, userId: string, jobId: string, inputText: string, wordCount: number, frozenCredits: number) {
   try {
+    // Humanize deliberately stays outside the shared main-writing config for now.
+    // This step will move to a separate API/model later, so do not wire it to
+    // OPENAI_MODEL in this round.
     const response = await openai.responses.create({
       model: 'gpt-4.1',
       input: [

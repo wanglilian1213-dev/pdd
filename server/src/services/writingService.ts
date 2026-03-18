@@ -312,6 +312,8 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
 }
 
 async function generateCitationReport(text: string, citationStyle: string): Promise<string> {
+  // Keep report generation on the same tuning as citation verification until we
+  // have a concrete need to split them into separate stages.
   const response = await openai.responses.create({
     ...buildMainOpenAIResponsesOptions('citation_verification'),
     input: [
