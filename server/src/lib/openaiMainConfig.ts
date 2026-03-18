@@ -21,6 +21,5 @@ export function buildMainOpenAIResponsesOptions(stage: MainOpenAIStage) {
     reasoning: {
       effort: reasoningEffortByStage[stage],
     },
-    temperature: 0,
   };
 }

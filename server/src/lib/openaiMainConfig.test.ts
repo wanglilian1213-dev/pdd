@@ -18,8 +18,8 @@ for (const [stage, expectedEffort] of Object.entries(expectedEffortByStage) as A
     const options = buildMainOpenAIResponsesOptions(stage);
 
     assert.equal(options.model, 'gpt-5.4');
-    assert.equal(options.temperature, 0);
     assert.deepEqual(options.reasoning, { effort: expectedEffort });
+    assert.equal('temperature' in options, false);
     assert.equal('text' in options, false);
   });
 }
