@@ -6,6 +6,7 @@ export const env = {
   supabaseAnonKey: process.env.SUPABASE_ANON_KEY!,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
   openaiApiKey: process.env.OPENAI_API_KEY!,
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-5.4',
   opsWhitelistEmails: (process.env.OPS_WHITELIST_EMAILS || '')
     .split(',')
     .map((email) => email.trim().toLowerCase())

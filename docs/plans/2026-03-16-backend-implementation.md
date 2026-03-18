@@ -16,6 +16,8 @@
 
 ---
 
+> 2026-03-18 补充：当前真实代码里，主写作链路已经统一到 OpenAI Responses API + `gpt-5.4`。下面这份旧实现文档中，降 AI 相关片段不在这轮统一范围内，后面会单独迁移到别的 API。
+
 ## 阶段 0：项目脚手架
 
 ### Task 1: 初始化后端项目
@@ -1650,7 +1652,7 @@ export async function generateOutline(taskId: string, userId: string) {
 
   try {
     const response = await openai.responses.create({
-      model: 'gpt-4.1',
+      model: 'gpt-5.4',
       input: [
         {
           role: 'system',
@@ -1759,7 +1761,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
 
   try {
     const response = await openai.responses.create({
-      model: 'gpt-4.1',
+      model: 'gpt-5.4',
       input: [
         {
           role: 'system',
@@ -2034,7 +2036,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
 async function generateDraft(taskId: string, outline: string, targetWords: number, citationStyle: string, requirements: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    model: 'gpt-5.4',
     input: [
       {
         role: 'system',
@@ -2089,7 +2091,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
 
   // 需要调整字数
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    model: 'gpt-5.4',
     input: [
       {
         role: 'system',
@@ -2118,7 +2120,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
 
 async function verifyCitations(taskId: string, text: string, citationStyle: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    model: 'gpt-5.4',
     input: [
       {
         role: 'system',
@@ -2211,7 +2213,7 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
 
 async function generateCitationReport(text: string, citationStyle: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    model: 'gpt-5.4',
     input: [
       {
         role: 'system',
@@ -2372,7 +2374,7 @@ export async function startHumanize(taskId: string, userId: string) {
 async function executeHumanize(taskId: string, userId: string, jobId: string, inputText: string, wordCount: number, frozenCredits: number) {
   try {
     const response = await openai.responses.create({
-      model: 'gpt-4.1',
+      model: 'separate-humanize-model',
       input: [
         {
           role: 'system',

@@ -4,6 +4,7 @@ import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 
 interface GeneratedTaskFilePayload {
   taskId: string;
@@ -144,7 +145,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
 async function generateDraft(taskId: string, outline: string, targetWords: number, citationStyle: string, requirements: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    ...buildMainOpenAIResponsesOptions('draft_generation'),
     input: [
       {
         role: 'system',
@@ -197,7 +198,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
   }
 
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    ...buildMainOpenAIResponsesOptions('word_calibration'),
     input: [
       {
         role: 'system',
@@ -226,7 +227,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
 
 async function verifyCitations(taskId: string, text: string, citationStyle: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    ...buildMainOpenAIResponsesOptions('citation_verification'),
     input: [
       {
         role: 'system',
@@ -312,7 +313,7 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
 
 async function generateCitationReport(text: string, citationStyle: string): Promise<string> {
   const response = await openai.responses.create({
-    model: 'gpt-4.1',
+    ...buildMainOpenAIResponsesOptions('citation_verification'),
     input: [
       {
         role: 'system',

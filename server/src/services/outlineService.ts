@@ -7,6 +7,7 @@ import { startWritingPipeline } from './writingService';
 import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialInputService';
 import { confirmOutlineTaskAtomic } from './atomicOpsService';
 import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt } from './outlinePromptService';
+import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 
 export function mapOutlineGenerationError(err: unknown) {
   if (err instanceof AppError) {
@@ -89,7 +90,7 @@ export async function generateOutline(taskId: string, userId: string) {
     });
 
     const response = await openai.responses.create({
-      model: 'gpt-4.1',
+      ...buildMainOpenAIResponsesOptions('outline_generation'),
       input: [
         {
           role: 'system' as const,
@@ -200,7 +201,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     });
 
     const response = await openai.responses.create({
-      model: 'gpt-4.1',
+      ...buildMainOpenAIResponsesOptions('outline_regeneration'),
       input: [
         {
           role: 'system' as const,
