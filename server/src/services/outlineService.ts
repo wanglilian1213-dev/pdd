@@ -6,6 +6,7 @@ import { getConfig } from './configService';
 import { startWritingPipeline } from './writingService';
 import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialInputService';
 import { confirmOutlineTaskAtomic } from './atomicOpsService';
+import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt } from './outlinePromptService';
 
 export function mapOutlineGenerationError(err: unknown) {
   if (err instanceof AppError) {
@@ -83,29 +84,23 @@ export async function generateOutline(taskId: string, userId: string) {
   try {
     const materialContent = await buildMaterialContentFromStorage(files);
     uploadedFileIds = materialContent.uploadedFileIds;
+    const prompt = buildInitialOutlinePrompt({
+      specialRequirements: task?.special_requirements,
+    });
 
     const response = await openai.responses.create({
       model: 'gpt-4.1',
       input: [
         {
           role: 'system' as const,
-          content: `You are an academic writing assistant. Read every attached material file directly. Some files may be documents and some may be images. Based on all provided materials, generate a detailed English outline for an academic paper. Also identify:
-1. Target word count (default 1000 if unclear)
-2. Citation style (default APA 7 if unclear)
-
-Respond in JSON format:
-{
-  "outline": "the full outline text",
-  "target_words": number,
-  "citation_style": "string"
-}`,
+          content: prompt.systemPrompt,
         },
         {
           role: 'user' as const,
           content: [
             {
               type: 'input_text',
-              text: `请直接阅读我上传的全部材料文件，并据此生成英文论文大纲。特殊要求：${task?.special_requirements || 'None'}`,
+              text: prompt.userPrompt,
             },
             ...materialContent.parts,
           ],
@@ -196,21 +191,24 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
   }
 
   try {
+    const prompt = buildRegenerateOutlinePrompt({
+      currentOutline: latestOutline.content,
+      currentTargetWords: latestOutline.target_words,
+      currentCitationStyle: latestOutline.citation_style,
+      specialRequirements: task.special_requirements,
+      editInstruction,
+    });
+
     const response = await openai.responses.create({
       model: 'gpt-4.1',
       input: [
         {
           role: 'system' as const,
-          content: `You are an academic writing assistant. Revise the existing outline based on the user's feedback. Keep the same JSON format:
-{
-  "outline": "revised outline text",
-  "target_words": number,
-  "citation_style": "string"
-}`,
+          content: prompt.systemPrompt,
         },
         {
           role: 'user' as const,
-          content: `Current outline:\n${latestOutline.content}\n\nCurrent target words: ${latestOutline.target_words}\nCurrent citation style: ${latestOutline.citation_style}\n\nRevision request: ${editInstruction}`,
+          content: prompt.userPrompt,
         },
       ],
     });
