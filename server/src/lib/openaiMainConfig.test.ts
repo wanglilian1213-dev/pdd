@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildMainOpenAIResponsesOptions, type MainOpenAIStage } from './openaiMainConfig';
-import { env } from '../config/env';
+import { env } from './runtimeEnv';
 
 const expectedEffortByStage: Record<MainOpenAIStage, 'medium' | 'high'> = {
   outline_generation: 'medium',

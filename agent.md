@@ -93,7 +93,7 @@ npx -y @aisuite/chub annotate --list
 - 认证：Supabase Auth
 - 数据和文件：Supabase Database + Storage
 - 业务接口：Railway 上的 Express 服务
-- AI 调用：OpenAI Responses API（主写作链路统一走 `OPENAI_MODEL=gpt-5.4`；降 AI 暂时单独保留，后续再拆到别的 API）
+- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
 
 ## 项目文件结构
 

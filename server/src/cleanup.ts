@@ -1,4 +1,4 @@
-import './config/env';
+import './lib/runtimeEnv';
 import { startCleanupService } from './cleanupRuntime';
 
 startCleanupService();

@@ -1,4 +1,3 @@
-import { openai } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 import { settleCredits, refundCredits } from './walletService';
@@ -6,6 +5,51 @@ import { getConfig } from './configService';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { startHumanizeJobAtomic } from './atomicOpsService';
 import { storeGeneratedTaskFile } from './writingService';
+import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
+
+interface ExecuteHumanizeDeps {
+  humanizeText: (inputText: string) => Promise<HumanizeTextResult>;
+  insertDocumentVersion: (payload: {
+    task_id: string;
+    version: number;
+    stage: 'final';
+    word_count: number;
+    content: string;
+  }) => Promise<void>;
+  getConfigValue: (key: string) => Promise<any>;
+  storeGeneratedTaskFile: typeof storeGeneratedTaskFile;
+  settleCredits: (userId: string, amount: number) => Promise<unknown>;
+  refundCredits: (userId: string, amount: number, refType: string, refId: string, note: string) => Promise<unknown>;
+  updateHumanizeJob: (jobId: string, payload: Record<string, unknown>) => Promise<void>;
+  updateTask: (taskId: string, payload: Record<string, unknown>) => Promise<void>;
+  insertTaskEvent: (payload: {
+    task_id: string;
+    event_type: string;
+    detail: Record<string, unknown>;
+  }) => Promise<void>;
+  now: () => Date;
+}
+
+const defaultExecuteHumanizeDeps: ExecuteHumanizeDeps = {
+  humanizeText: (inputText) => undetectableClient.humanizeText(inputText),
+  insertDocumentVersion: async (payload) => {
+    await supabaseAdmin.from('document_versions').insert(payload);
+  },
+  getConfigValue: getConfig,
+  storeGeneratedTaskFile,
+  settleCredits,
+  refundCredits,
+  updateHumanizeJob: async (jobId, payload) => {
+    await supabaseAdmin.from('humanize_jobs').update(payload).eq('id', jobId);
+  },
+  updateTask: async (taskId, payload) => {
+    await supabaseAdmin.from('tasks').update(payload).eq('id', taskId);
+  },
+  insertTaskEvent: async (payload) => {
+    await supabaseAdmin.from('task_events').insert(payload);
+  },
+  now: () => new Date(),
+};
 
 export async function startHumanize(taskId: string, userId: string) {
   const { data: task } = await supabaseAdmin
@@ -70,40 +114,30 @@ export async function startHumanize(taskId: string, userId: string) {
   return result;
 }
 
-async function executeHumanize(taskId: string, userId: string, jobId: string, inputText: string, wordCount: number, frozenCredits: number) {
+export async function executeHumanize(
+  taskId: string,
+  userId: string,
+  jobId: string,
+  inputText: string,
+  wordCount: number,
+  frozenCredits: number,
+  deps: ExecuteHumanizeDeps = defaultExecuteHumanizeDeps,
+) {
   try {
-    // Humanize deliberately stays outside the shared main-writing config for now.
-    // This step will move to a separate API/model later, so do not wire it to
-    // OPENAI_MODEL in this round.
-    const response = await openai.responses.create({
-      model: 'gpt-4.1',
-      input: [
-        {
-          role: 'system',
-          content: `You are a writing humanization expert. Rewrite the following academic paper to reduce AI detection signals while maintaining the same content, arguments, and academic quality. Make the writing style more natural and human-like. Preserve all citations and references. Output only the rewritten paper.`,
-        },
-        {
-          role: 'user',
-          content: inputText,
-        },
-      ],
-    });
-
-    const humanized = typeof response.output_text === 'string' ? response.output_text : '';
+    const { documentId, output } = await deps.humanizeText(inputText);
+    const humanized = output;
     const newWordCount = humanized.split(/\s+/).filter(Boolean).length;
 
-    await supabaseAdmin
-      .from('document_versions')
-      .insert({
-        task_id: taskId,
-        version: 100 + Math.floor(Date.now() / 1000),
-        stage: 'final',
-        word_count: newWordCount,
-        content: humanized,
-      });
+    await deps.insertDocumentVersion({
+      task_id: taskId,
+      version: 100 + Math.floor(deps.now().getTime() / 1000),
+      stage: 'final',
+      word_count: newWordCount,
+      content: humanized,
+    });
 
-    const retentionDays = (await getConfig('result_file_retention_days')) || 3;
-    const expiresAt = new Date();
+    const retentionDays = (await deps.getConfigValue('result_file_retention_days')) || 3;
+    const expiresAt = deps.now();
     expiresAt.setDate(expiresAt.getDate() + retentionDays);
 
     const doc = new Document({
@@ -116,9 +150,9 @@ async function executeHumanize(taskId: string, userId: string, jobId: string, in
     });
 
     const docBuffer = await Packer.toBuffer(doc);
-    const docPath = `${taskId}/humanized-${Date.now()}.docx`;
+    const docPath = `${taskId}/humanized-${deps.now().getTime()}.docx`;
 
-    await storeGeneratedTaskFile({
+    await deps.storeGeneratedTaskFile({
       taskId,
       category: 'humanized_doc',
       originalName: 'humanized-paper.docx',
@@ -129,45 +163,51 @@ async function executeHumanize(taskId: string, userId: string, jobId: string, in
       body: docBuffer,
     });
 
-    await settleCredits(userId, frozenCredits);
-    await supabaseAdmin.from('humanize_jobs').update({
+    await deps.settleCredits(userId, frozenCredits);
+    await deps.updateHumanizeJob(jobId, {
       status: 'completed',
-      completed_at: new Date().toISOString(),
-    }).eq('id', jobId);
+      completed_at: deps.now().toISOString(),
+    });
 
-    await supabaseAdmin.from('tasks').update({
+    await deps.updateTask(taskId, {
       stage: 'completed',
-      updated_at: new Date().toISOString(),
-    }).eq('id', taskId);
+      updated_at: deps.now().toISOString(),
+    });
 
-    await supabaseAdmin.from('task_events').insert({
+    await deps.insertTaskEvent({
       task_id: taskId,
       event_type: 'humanize_completed',
-      detail: { job_id: jobId, word_count: newWordCount },
+      detail: {
+        job_id: jobId,
+        word_count: newWordCount,
+        provider: 'undetectable',
+        provider_document_id: documentId,
+        input_word_count: wordCount,
+      },
     });
 
   } catch (err: any) {
     try {
-      await refundCredits(userId, frozenCredits, 'humanize_job', jobId, `降 AI 失败退款：${frozenCredits} 积分`);
-      await supabaseAdmin.from('humanize_jobs').update({
+      await deps.refundCredits(userId, frozenCredits, 'humanize_job', jobId, `降 AI 失败退款：${frozenCredits} 积分`);
+      await deps.updateHumanizeJob(jobId, {
         status: 'failed',
-        failure_reason: '降 AI 处理失败，积分已退回。',
+        failure_reason: `降 AI 处理失败，积分已退回。${err?.message ? `原因：${err.message}` : ''}`.trim(),
         refunded: true,
-      }).eq('id', jobId);
+      });
     } catch {
-      await supabaseAdmin.from('humanize_jobs').update({
+      await deps.updateHumanizeJob(jobId, {
         status: 'failed',
         failure_reason: '降 AI 失败且退款异常，请联系客服。',
         refunded: false,
-      }).eq('id', jobId);
+      });
     }
 
-    await supabaseAdmin.from('tasks').update({
+    await deps.updateTask(taskId, {
       stage: 'completed',
-      updated_at: new Date().toISOString(),
-    }).eq('id', taskId);
+      updated_at: deps.now().toISOString(),
+    });
 
-    await supabaseAdmin.from('task_events').insert({
+    await deps.insertTaskEvent({
       task_id: taskId,
       event_type: 'humanize_failed',
       detail: { job_id: jobId, error: err.message },

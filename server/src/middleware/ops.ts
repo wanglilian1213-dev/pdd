@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from './auth';
-import { env } from '../config/env';
+import { env } from '../lib/runtimeEnv';
 import { isOpsWhitelisted } from '../services/opsService';
 
 export function opsMiddleware(req: AuthRequest, res: Response, next: NextFunction) {

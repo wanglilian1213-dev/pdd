@@ -9,6 +9,7 @@ function buildRawEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
     OPENAI_API_KEY: 'openai-key',
     OPENAI_MODEL: 'gpt-5.4',
+    UNDETECTABLE_API_KEY: 'undetectable-key',
     OPS_WHITELIST_EMAILS: 'ops@example.com',
     PORT: '3001',
     NODE_ENV: 'test',
@@ -34,5 +35,12 @@ test('parseEnv throws when OPENAI_MODEL is not allowed', () => {
   assert.throws(
     () => parseEnv(buildRawEnv({ OPENAI_MODEL: 'gpt-4.1' })),
     /OPENAI_MODEL 只能是 gpt-5\.4/,
+  );
+});
+
+test('parseEnv throws when UNDETECTABLE_API_KEY is missing', () => {
+  assert.throws(
+    () => parseEnv(buildRawEnv({ UNDETECTABLE_API_KEY: '' })),
+    /缺少环境变量 UNDETECTABLE_API_KEY/,
   );
 });

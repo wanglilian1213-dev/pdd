@@ -1,4 +1,4 @@
-import { env } from '../config/env';
+import { env } from './runtimeEnv';
 
 export type MainOpenAIStage =
   | 'outline_generation'

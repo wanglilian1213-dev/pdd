@@ -1,6 +1,3 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
 const allowedOpenAIModels = ['gpt-5.4'] as const;
 
 type AllowedOpenAIModel = (typeof allowedOpenAIModels)[number];
@@ -11,6 +8,7 @@ export interface Env {
   supabaseServiceRoleKey: string;
   openaiApiKey: string;
   openaiModel: AllowedOpenAIModel;
+  undetectableApiKey: string;
   opsWhitelistEmails: string[];
   port: number;
   nodeEnv: string;
@@ -41,6 +39,7 @@ export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
     supabaseServiceRoleKey: readRequired(rawEnv, 'SUPABASE_SERVICE_ROLE_KEY'),
     openaiApiKey: readRequired(rawEnv, 'OPENAI_API_KEY'),
     openaiModel: readOpenAIModel(rawEnv),
+    undetectableApiKey: readRequired(rawEnv, 'UNDETECTABLE_API_KEY'),
     opsWhitelistEmails: (rawEnv.OPS_WHITELIST_EMAILS || '')
       .split(',')
       .map((email) => email.trim().toLowerCase())
@@ -49,5 +48,3 @@ export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
     nodeEnv: rawEnv.NODE_ENV || 'development',
   };
 }
-
-export const env = parseEnv(process.env);

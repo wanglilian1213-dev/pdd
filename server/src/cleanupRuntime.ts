@@ -4,7 +4,6 @@ import { refundCredits } from './services/walletService';
 import { failTask } from './services/taskService';
 import { deleteExpiredFiles } from './services/fileService';
 import { getConfig } from './services/configService';
-import './config/env';
 
 export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;

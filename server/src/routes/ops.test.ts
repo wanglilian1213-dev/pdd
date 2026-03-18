@@ -4,7 +4,7 @@ import express from 'express';
 import { AddressInfo } from 'node:net';
 import opsRoutes from './ops';
 import { opsMiddleware } from '../middleware/ops';
-import { env } from '../config/env';
+import { env } from '../lib/runtimeEnv';
 import { supabaseAdmin } from '../lib/supabase';
 
 function stubSupabaseFrom(impl: (table: string) => any) {

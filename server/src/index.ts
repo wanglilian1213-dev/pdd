@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { env } from './config/env';
+import { env } from './lib/runtimeEnv';
 import { authMiddleware } from './middleware/auth';
 import { opsMiddleware } from './middleware/ops';
 import userRoutes from './routes/user';

@@ -16,7 +16,7 @@
 
 ---
 
-> 2026-03-18 补充：当前真实代码里，主写作链路已经统一到 OpenAI Responses API + `gpt-5.4`。下面这份旧实现文档中，降 AI 相关片段不在这轮统一范围内，后面会单独迁移到别的 API。
+> 2026-03-18 补充：当前真实代码里，主写作链路已经统一到 OpenAI Responses API + `gpt-5.4`。降 AI 也已经单独迁移到 Undetectable Humanization API，固定参数是 `v11sr + More Human + University + Essay`。下面这份旧实现文档如果和真实代码冲突，以真实代码为准。
 
 ## 阶段 0：项目脚手架
 
@@ -2376,21 +2376,12 @@ export async function startHumanize(taskId: string, userId: string) {
 
 async function executeHumanize(taskId: string, userId: string, jobId: string, inputText: string, wordCount: number, frozenCredits: number) {
   try {
-    const response = await openai.responses.create({
-      model: 'gpt-4.1', // 当前真实状态；后面会单独迁移到别的 API，不在这轮里处理
-      input: [
-        {
-          role: 'system',
-          content: `You are a writing humanization expert. Rewrite the following academic paper to reduce AI detection signals while maintaining the same content, arguments, and academic quality. Make the writing style more natural and human-like. Preserve all citations and references. Output only the rewritten paper.`,
-        },
-        {
-          role: 'user',
-          content: inputText,
-        },
-      ],
-    });
-
-    const humanized = typeof response.output_text === 'string' ? response.output_text : '';
+    // 2026-03-18 当前真实实现已经改成：
+    // 1. POST https://humanize.undetectable.ai/submit
+    // 2. 每 5 秒轮询 /document
+    // 3. 固定参数：v11sr + More Human + University + Essay
+    // 4. 成功后继续复用下面这套“存版本、出 docx、结算积分”的收尾逻辑
+    const humanized = await humanizeThroughUndetectable(inputText);
     const newWordCount = humanized.split(/\s+/).filter(Boolean).length;
 
     // 保存新版本
