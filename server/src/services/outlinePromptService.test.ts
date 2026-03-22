@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildInitialOutlinePrompt,
+  buildRepairOutlinePrompt,
   buildRegenerateOutlinePrompt,
 } from './outlinePromptService';
 
@@ -15,7 +16,8 @@ test('buildInitialOutlinePrompt includes outline length rules and JSON response 
   assert.match(prompt.systemPrompt, /2500 words.*4 sections/i);
   assert.match(prompt.systemPrompt, /4000 words.*5 sections/i);
   assert.match(prompt.systemPrompt, /introduction and conclusion count within the total section count/i);
-  assert.match(prompt.systemPrompt, /3 to 5 bullet points/i);
+  assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
+  assert.match(prompt.systemPrompt, /each bullet point should stay on a single line starting with "- "/i);
   assert.match(prompt.systemPrompt, /"outline"/i);
   assert.match(prompt.systemPrompt, /"target_words"/i);
   assert.match(prompt.systemPrompt, /"citation_style"/i);
@@ -39,6 +41,7 @@ test('buildRegenerateOutlinePrompt includes previous outline, old requirements, 
   assert.match(prompt.systemPrompt, /default to 1000 words/i);
   assert.match(prompt.systemPrompt, /2500 words.*4 sections/i);
   assert.match(prompt.systemPrompt, /4000 words.*5 sections/i);
+  assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
   assert.match(prompt.systemPrompt, /if older instructions and newer instructions conflict, decide the final target_words yourself/i);
 
   assert.match(prompt.userPrompt, /I\. Introduction/);
@@ -59,4 +62,20 @@ test('buildRegenerateOutlinePrompt keeps original requirements even when blank e
 
   assert.match(prompt.userPrompt, /Keep a concise comparative structure/i);
   assert.match(prompt.userPrompt, /Please make the second section stronger/i);
+});
+
+test('buildRepairOutlinePrompt explicitly fixes sections that break the 3 to 5 bullet rule', () => {
+  const prompt = buildRepairOutlinePrompt({
+    currentOutline: 'I. Introduction\n- One\n- Two',
+    currentTargetWords: 1000,
+    currentCitationStyle: 'APA 7',
+    specialRequirements: 'Keep the tone formal.',
+    editInstruction: 'None',
+    violationSummary: '- I. Introduction: 2 bullet points',
+  });
+
+  assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
+  assert.match(prompt.userPrompt, /I\. Introduction: 2 bullet points/i);
+  assert.match(prompt.userPrompt, /every section follows the rule exactly/i);
+  assert.match(prompt.userPrompt, /each bullet on one line starting with "- "/i);
 });

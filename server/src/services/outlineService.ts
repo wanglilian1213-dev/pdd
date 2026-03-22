@@ -6,9 +6,70 @@ import { getConfig } from './configService';
 import { startWritingPipeline } from './writingService';
 import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialInputService';
 import { confirmOutlineTaskAtomic } from './atomicOpsService';
-import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt } from './outlinePromptService';
+import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt, buildRepairOutlinePrompt } from './outlinePromptService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { normalizeCitationStyle } from './citationStyleService';
+import {
+  ensureValidOutlineBulletCounts,
+  formatOutlineBulletViolations,
+} from './outlineStructureService';
+
+interface ParsedOutlineResponse {
+  outline: string;
+  target_words: number;
+  citation_style: string;
+}
+
+function parseOutlineJson(content: string, fallback: ParsedOutlineResponse): ParsedOutlineResponse {
+  try {
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    return JSON.parse(jsonMatch ? jsonMatch[0] : content);
+  } catch {
+    return fallback;
+  }
+}
+
+async function repairOutlineBulletCounts(
+  stage: 'outline_generation' | 'outline_regeneration',
+  payload: ParsedOutlineResponse,
+  options: {
+    specialRequirements?: string | null;
+    editInstruction?: string | null;
+  },
+) {
+  return ensureValidOutlineBulletCounts(payload, async (currentPayload, violations) => {
+    const prompt = buildRepairOutlinePrompt({
+      currentOutline: currentPayload.outline,
+      currentTargetWords: currentPayload.target_words,
+      currentCitationStyle: currentPayload.citation_style,
+      specialRequirements: options.specialRequirements,
+      editInstruction: options.editInstruction,
+      violationSummary: formatOutlineBulletViolations(violations),
+    });
+
+    const response = await openai.responses.create({
+      ...buildMainOpenAIResponsesOptions(stage),
+      input: [
+        {
+          role: 'system' as const,
+          content: prompt.systemPrompt,
+        },
+        {
+          role: 'user' as const,
+          content: prompt.userPrompt,
+        },
+      ],
+    });
+
+    const repaired = parseOutlineJson(response.output_text, currentPayload);
+
+    return {
+      outline: repaired.outline,
+      target_words: repaired.target_words || currentPayload.target_words,
+      citation_style: repaired.citation_style || currentPayload.citation_style,
+    };
+  });
+}
 
 export function mapOutlineGenerationError(err: unknown) {
   if (err instanceof AppError) {
@@ -112,13 +173,13 @@ export async function generateOutline(taskId: string, userId: string) {
 
     const content = response.output_text;
 
-    let parsed: { outline: string; target_words: number; citation_style: string };
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);
-    } catch {
-      parsed = { outline: content, target_words: 1000, citation_style: 'APA 7' };
-    }
+    const parsed = await repairOutlineBulletCounts(
+      'outline_generation',
+      parseOutlineJson(content, { outline: content, target_words: 1000, citation_style: 'APA 7' }),
+      {
+        specialRequirements: task?.special_requirements,
+      },
+    );
 
     const targetWords = parsed.target_words || 1000;
     const citationStyle = normalizeCitationStyle(parsed.citation_style);
@@ -216,17 +277,18 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     });
 
     const content = response.output_text;
-    let parsed: { outline: string; target_words: number; citation_style: string };
-    try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);
-    } catch {
-      parsed = {
+    const parsed = await repairOutlineBulletCounts(
+      'outline_regeneration',
+      parseOutlineJson(content, {
         outline: content,
         target_words: latestOutline.target_words,
         citation_style: latestOutline.citation_style,
-      };
-    }
+      }),
+      {
+        specialRequirements: task.special_requirements,
+        editInstruction,
+      },
+    );
 
     const newVersion = latestOutline.version + 1;
 
