@@ -75,6 +75,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ targetWords, citationStyle }),
     }),
+  discardTask: (taskId: string) =>
+    request<any>(`/api/task/${taskId}/discard`, { method: 'POST' }),
   startHumanize: (taskId: string) =>
     request<any>(`/api/task/${taskId}/humanize`, { method: 'POST' }),
   getDownloadUrl: (taskId: string, fileId: string) =>

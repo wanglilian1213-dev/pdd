@@ -305,6 +305,33 @@ export default function Workspace() {
     }, 5000);
   }, [clearHumanizePoll, refreshBalance]);
 
+  const resumeTaskInUi = useCallback((raw: Record<string, unknown>) => {
+    const data: TaskData = reshapeTaskResponse(raw);
+    setTaskData(data);
+    const resumeStep = stageToStep(data.task.stage, data.task.status);
+    setStep(resumeStep);
+
+    if (data.task.status === 'failed') {
+      setError(data.task.failure_reason || '任务处理失败');
+      return;
+    }
+
+    if (data.task.stage === 'outline_generating' || data.task.stage === 'uploading') {
+      startOutlinePolling(data.task.id);
+      return;
+    }
+
+    if (['writing', 'word_calibrating', 'citation_checking'].includes(data.task.stage)) {
+      startWritePolling(data.task.id);
+      return;
+    }
+
+    if (data.task.stage === 'humanizing') {
+      setIsStartingHumanize(true);
+      startHumanizePolling(data.task.id);
+    }
+  }, [startHumanizePolling, startOutlinePolling, startWritePolling]);
+
   // ---------------------
   // Resume existing task on mount
   // ---------------------
@@ -317,24 +344,12 @@ export default function Workspace() {
         if (cancelled) return;
 
         if (raw && raw.id) {
-          const data: TaskData = reshapeTaskResponse(raw);
-          setTaskData(data);
-          const resumeStep = stageToStep(data.task.stage, data.task.status);
-          setStep(resumeStep);
-
-          if (data.task.status === 'failed') {
-            setError(data.task.failure_reason || '任务处理失败');
-          } else if (data.task.stage === 'outline_generating' || data.task.stage === 'uploading') {
-            startOutlinePolling(data.task.id);
-          } else if (['writing', 'word_calibrating', 'citation_checking'].includes(data.task.stage)) {
-            startWritePolling(data.task.id);
-          } else if (data.task.stage === 'humanizing') {
-            setIsStartingHumanize(true);
-            startHumanizePolling(data.task.id);
-          }
+          resumeTaskInUi(raw);
         }
-      } catch {
-        // No active task, stay at step 1
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : '恢复未完成任务失败，请刷新后重试。');
+        }
       } finally {
         if (!cancelled) setIsLoadingResume(false);
       }
@@ -347,7 +362,7 @@ export default function Workspace() {
       cancelled = true;
       clearAllPolls();
     };
-  }, [startOutlinePolling, startWritePolling, startHumanizePolling, refreshBalance, clearAllPolls]);
+  }, [resumeTaskInUi, refreshBalance, clearAllPolls]);
 
   // ---------------------
   // Handlers
@@ -407,11 +422,25 @@ export default function Workspace() {
       startOutlinePolling(rawTask.id);
       // Show a transitional state: step 1 but polling
     } catch (err) {
-      setError(err instanceof Error ? err.message : '创建任务失败');
+      const message = err instanceof Error ? err.message : '创建任务失败';
+      if (message.includes('您当前有一个进行中的任务')) {
+        try {
+          const currentRaw = await api.getCurrentTask();
+          if (currentRaw && currentRaw.id) {
+            resumeTaskInUi(currentRaw);
+            setError('检测到您有未完成的任务，系统已自动恢复到对应步骤。');
+            return;
+          }
+        } catch (resumeErr) {
+          setError(resumeErr instanceof Error ? resumeErr.message : message);
+          return;
+        }
+      }
+      setError(message);
     } finally {
       setIsSubmitting(false);
     }
-  }, [files, title, specialRequirements, startOutlinePolling]);
+  }, [files, title, specialRequirements, startOutlinePolling, resumeTaskInUi]);
 
   const handleRegenerateOutline = useCallback(async () => {
     if (!taskData) return;
@@ -506,6 +535,22 @@ export default function Workspace() {
     setIsStartingHumanize(false);
     refreshBalance();
   }, [clearAllPolls, refreshBalance]);
+
+  const handleDiscardPendingTask = useCallback(async () => {
+    if (!taskData) return;
+
+    const confirmed = window.confirm('放弃后，当前已上传的材料和大纲都会清掉，您需要重新上传。确定要重新开始吗？');
+    if (!confirmed) return;
+
+    setError(null);
+
+    try {
+      await api.discardTask(taskData.task.id);
+      handleNewTask();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '放弃当前任务失败');
+    }
+  }, [taskData, handleNewTask]);
 
   // ---------------------
   // Derived state
@@ -732,7 +777,7 @@ export default function Workspace() {
               </div>
 
               <div className="flex flex-col sm:flex-row justify-between items-center pt-4 border-t border-gray-100 gap-4">
-                <Button variant="outline" onClick={handleNewTask} className="w-full sm:w-auto">返回修改要求</Button>
+                <Button variant="outline" onClick={handleDiscardPendingTask} className="w-full sm:w-auto">放弃当前任务并重新上传</Button>
                 <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
                   <Button
                     variant="secondary"

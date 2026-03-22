@@ -1,6 +1,19 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError, ActiveTaskExistsError } from '../lib/errors';
 
+interface DiscardPendingTaskDeps {
+  loadTask: (taskId: string, userId: string) => Promise<{
+    id: string;
+    user_id: string;
+    stage: string;
+    status: string;
+    frozen_credits: number;
+  } | null>;
+  listTaskFiles: (taskId: string) => Promise<Array<{ storage_path: string }>>;
+  removeStoragePaths: (paths: string[]) => Promise<void>;
+  deleteTask: (taskId: string) => Promise<void>;
+}
+
 export async function createTask(userId: string, title: string, specialRequirements: string) {
   const { data: activeTask } = await supabaseAdmin
     .from('tasks')
@@ -76,6 +89,75 @@ export async function getCurrentTask(userId: string) {
   }
 
   return getTask(task.id, userId);
+}
+
+export async function discardPendingTaskWithDeps(
+  taskId: string,
+  userId: string,
+  deps: DiscardPendingTaskDeps,
+) {
+  const task = await deps.loadTask(taskId, userId);
+
+  if (!task) {
+    throw new AppError(404, '任务不存在。');
+  }
+
+  const discardableStages = ['uploading', 'outline_generating', 'outline_ready'];
+  if (task.status !== 'processing' || !discardableStages.includes(task.stage)) {
+    throw new AppError(400, '当前任务已经进入正文流程，不能直接放弃。');
+  }
+
+  if (task.frozen_credits > 0) {
+    throw new AppError(400, '当前任务已经冻结积分，不能直接放弃。');
+  }
+
+  const files = await deps.listTaskFiles(taskId);
+  const storagePaths = files
+    .map((file) => file.storage_path)
+    .filter(Boolean);
+
+  if (storagePaths.length > 0) {
+    await deps.removeStoragePaths(storagePaths);
+  }
+
+  await deps.deleteTask(taskId);
+}
+
+export async function discardPendingTask(taskId: string, userId: string) {
+  return discardPendingTaskWithDeps(taskId, userId, {
+    loadTask: async (currentTaskId, currentUserId) => {
+      const { data } = await supabaseAdmin
+        .from('tasks')
+        .select('id, user_id, stage, status, frozen_credits')
+        .eq('id', currentTaskId)
+        .eq('user_id', currentUserId)
+        .single();
+
+      return data || null;
+    },
+    listTaskFiles: async (currentTaskId) => {
+      const { data, error } = await supabaseAdmin
+        .from('task_files')
+        .select('storage_path')
+        .eq('task_id', currentTaskId);
+
+      if (error) {
+        throw new AppError(500, '读取任务文件失败，请稍后重试。');
+      }
+
+      return data || [];
+    },
+    removeStoragePaths: async (paths) => {
+      const { error } = await supabaseAdmin.storage
+        .from('task-files')
+        .remove(paths);
+
+      if (error) {
+        throw new AppError(500, '清理任务文件失败，请稍后重试。');
+      }
+    },
+    deleteTask,
+  });
 }
 
 export async function getTaskList(userId: string, status?: string, limit = 20, offset = 0) {

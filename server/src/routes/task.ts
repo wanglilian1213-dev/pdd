@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { AuthRequest } from '../middleware/auth';
 import { statusGuard } from '../middleware/statusGuard';
-import { createTask, getTask, getCurrentTask, getTaskList, deleteTask } from '../services/taskService';
+import { createTask, getTask, getCurrentTask, getTaskList, deleteTask, discardPendingTask } from '../services/taskService';
 import { validateFiles, uploadFiles, getDownloadUrl } from '../services/fileService';
 import { generateOutline, regenerateOutline, confirmOutline } from '../services/outlineService';
 import { startHumanize } from '../services/humanizeService';
@@ -137,6 +137,18 @@ router.post('/:id/humanize', async (req: AuthRequest, res: Response) => {
     const appErr = err as { statusCode?: number; userMessage?: string };
     const status = appErr.statusCode || 500;
     res.status(status).json({ success: false, error: appErr.userMessage || '降 AI 启动失败。' });
+  }
+});
+
+// POST /api/task/:id/discard
+router.post('/:id/discard', async (req: AuthRequest, res: Response) => {
+  try {
+    await discardPendingTask(req.params.id as string, req.userId!);
+    res.json({ success: true, data: { discarded: true } });
+  } catch (err: unknown) {
+    const appErr = err as { statusCode?: number; userMessage?: string };
+    const status = appErr.statusCode || 500;
+    res.status(status).json({ success: false, error: appErr.userMessage || '放弃任务失败。' });
   }
 });
 
