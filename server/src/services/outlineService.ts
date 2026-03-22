@@ -8,6 +8,7 @@ import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialI
 import { confirmOutlineTaskAtomic } from './atomicOpsService';
 import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt } from './outlinePromptService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
+import { normalizeCitationStyle } from './citationStyleService';
 
 export function mapOutlineGenerationError(err: unknown) {
   if (err instanceof AppError) {
@@ -120,7 +121,7 @@ export async function generateOutline(taskId: string, userId: string) {
     }
 
     const targetWords = parsed.target_words || 1000;
-    const citationStyle = parsed.citation_style || 'APA 7';
+    const citationStyle = normalizeCitationStyle(parsed.citation_style);
 
     const { data: outline, error } = await supabaseAdmin
       .from('outline_versions')
@@ -237,7 +238,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
         content: parsed.outline,
         edit_instruction: editInstruction,
         target_words: parsed.target_words || latestOutline.target_words,
-        citation_style: parsed.citation_style || latestOutline.citation_style,
+        citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
       })
       .select()
       .single();
@@ -247,7 +248,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       .update({
         outline_edits_used: task.outline_edits_used + 1,
         target_words: parsed.target_words || latestOutline.target_words,
-        citation_style: parsed.citation_style || latestOutline.citation_style,
+        citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
         updated_at: new Date().toISOString(),
       })
       .eq('id', taskId);
@@ -281,7 +282,7 @@ export async function confirmOutline(taskId: string, userId: string, targetWords
   if (!latestOutline) throw new AppError(500, '找不到大纲。');
 
   const finalWords = targetWords || latestOutline.target_words || 1000;
-  const finalStyle = citationStyle || latestOutline.citation_style || 'APA 7';
+  const finalStyle = normalizeCitationStyle(citationStyle || latestOutline.citation_style || 'APA 7');
 
   const pricePerThousand = (await getConfig('writing_price_per_1000')) || 250;
   const units = Math.ceil(finalWords / 1000);

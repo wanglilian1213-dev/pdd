@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError, ActiveTaskExistsError } from '../lib/errors';
+import { normalizeCitationStyle } from './citationStyleService';
 
 interface DiscardPendingTaskDeps {
   loadTask: (taskId: string, userId: string) => Promise<{
@@ -69,8 +70,12 @@ export async function getTask(taskId: string, userId: string) {
 
   return {
     ...task,
+    citation_style: normalizeCitationStyle((task as { citation_style?: string | null }).citation_style),
     files: files.data || [],
-    outlines: outlines.data || [],
+    outlines: (outlines.data || []).map((outline) => ({
+      ...outline,
+      citation_style: normalizeCitationStyle((outline as { citation_style?: string | null }).citation_style),
+    })),
     latestDocument: latestDoc.data?.[0] || null,
     humanizeJobs: humanizeJobs.data || [],
   };

@@ -19,6 +19,9 @@ test('buildInitialOutlinePrompt includes outline length rules and JSON response 
   assert.match(prompt.systemPrompt, /"outline"/i);
   assert.match(prompt.systemPrompt, /"target_words"/i);
   assert.match(prompt.systemPrompt, /"citation_style"/i);
+  assert.match(prompt.systemPrompt, /extract the citation style from the material files and instructions/i);
+  assert.match(prompt.systemPrompt, /return one final citation_style only/i);
+  assert.match(prompt.systemPrompt, /do not combine multiple citation styles/i);
 
   assert.match(prompt.userPrompt, /Focus on urban logistics/i);
   assert.match(prompt.userPrompt, /read every uploaded material file/i);

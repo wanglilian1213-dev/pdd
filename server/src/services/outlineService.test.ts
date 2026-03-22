@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError } from '../lib/errors';
 import { mapOutlineGenerationError } from './outlineService';
+import { normalizeCitationStyle } from './citationStyleService';
 
 test('mapOutlineGenerationError keeps existing AppError untouched', () => {
   const error = new AppError(400, '原始错误');
@@ -19,4 +20,15 @@ test('mapOutlineGenerationError turns oversized input errors into a clear user m
   const mapped = mapOutlineGenerationError(new Error('Request too large for model input'));
   assert.equal(mapped.statusCode, 400);
   assert.match(mapped.userMessage, /文件太大|拆分/);
+});
+
+test('normalizeCitationStyle collapses mixed APA and Harvard wording into one final style', () => {
+  assert.equal(
+    normalizeCitationStyle('APA 7th edition (Harvard-style)'),
+    'APA 7',
+  );
+});
+
+test('normalizeCitationStyle keeps a plain single style unchanged', () => {
+  assert.equal(normalizeCitationStyle('Harvard'), 'Harvard');
 });

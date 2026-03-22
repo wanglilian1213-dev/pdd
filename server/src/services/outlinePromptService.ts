@@ -28,6 +28,10 @@ const OUTLINE_PLANNING_RULES = `Outline planning rules:
 - Scale the total section count upward as the target word count increases, using the same progression as the anchors above.
 - Introduction and Conclusion count within the total section count.
 - Each section only needs 3 to 5 bullet points.
+- Extract the citation style from the material files and instructions, then return one final citation_style only.
+- Do not combine multiple citation styles into one label.
+- If one source gives a broad family and another gives a more specific format inside that family, return the more specific final format.
+- If the materials mention APA without a version, use APA 7 as the final citation_style.
 - If older instructions and newer instructions conflict, decide the final target_words yourself and return that chosen value in the JSON response.`;
 
 function normalizeText(value: string | null | undefined, fallback = 'None') {
