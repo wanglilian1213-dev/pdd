@@ -3,8 +3,13 @@ import { supabaseAdmin } from '../lib/supabase';
 import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
+import { buildFormattedPaperDocBuffer } from './documentFormattingService';
+import {
+  buildCitationReportPrompt,
+  parseCitationReportData,
+  renderCitationReportPdf,
+} from './citationReportTemplateService';
 
 interface GeneratedTaskFilePayload {
   taskId: string;
@@ -268,19 +273,7 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     content: finalText,
   });
 
-  // Generate .docx
-  const doc = new Document({
-    sections: [{
-      properties: {},
-      children: finalText.split('\n').map(line =>
-        new Paragraph({
-          children: [new TextRun(line)],
-        })
-      ),
-    }],
-  });
-
-  const docBuffer = await Packer.toBuffer(doc);
+  const docBuffer = await buildFormattedPaperDocBuffer(finalText);
   const docPath = `${taskId}/final-paper.docx`;
 
   await storeGeneratedTaskFile({
@@ -294,24 +287,38 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     body: docBuffer,
   });
 
-  // Generate citation report
-  const citationReport = await generateCitationReport(finalText, task.citation_style);
-  const reportBuffer = Buffer.from(citationReport, 'utf-8');
-  const reportPath = `${taskId}/citation-report.txt`;
+  const citationReport = await generateCitationReport(finalText, task.citation_style, task.title || 'Academic Essay');
+  const reportBuffer = await renderCitationReportPdf({
+    citationStyle: task.citation_style,
+    reportId: buildCitationReportId(new Date()),
+    generatedAt: new Date().toISOString().slice(0, 10),
+    essayTitle: task.title || 'Academic Essay',
+    ...citationReport,
+  });
+  const reportPath = `${taskId}/citation-report.pdf`;
 
   await storeGeneratedTaskFile({
     taskId,
     category: 'citation_report',
-    originalName: 'citation-report.txt',
+    originalName: 'citation-report.pdf',
     storagePath: reportPath,
     fileSize: reportBuffer.length,
-    mimeType: 'text/plain',
+    mimeType: 'application/pdf',
     expiresAtIso: expiresAt.toISOString(),
     body: reportBuffer,
   });
 }
 
-async function generateCitationReport(text: string, citationStyle: string): Promise<string> {
+function buildCitationReportId(now: Date) {
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const random = Math.floor(1000 + Math.random() * 9000);
+  return `Report ID: V532-${random}-${day}${month}`;
+}
+
+async function generateCitationReport(text: string, citationStyle: string, essayTitle: string) {
+  const prompt = buildCitationReportPrompt(text, citationStyle);
+
   // Keep report generation on the same tuning as citation verification until we
   // have a concrete need to split them into separate stages.
   const response = await openai.responses.create({
@@ -319,14 +326,14 @@ async function generateCitationReport(text: string, citationStyle: string): Prom
     input: [
       {
         role: 'system',
-        content: `You are a citation verification expert. Analyze the paper and generate a citation verification report. List each citation found, whether it follows ${citationStyle} format correctly, and any issues. Output as plain text report.`,
+        content: prompt.systemPrompt,
       },
       {
         role: 'user',
-        content: text,
+        content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
       },
     ],
   });
 
-  return typeof response.output_text === 'string' ? response.output_text : 'Citation report generation failed.';
+  return parseCitationReportData(typeof response.output_text === 'string' ? response.output_text : '', citationStyle);
 }

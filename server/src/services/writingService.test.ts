@@ -31,10 +31,10 @@ test('storeGeneratedTaskFile removes uploaded file if database insert fails', as
       storeGeneratedTaskFile({
         taskId: 'task-1',
         category: 'citation_report',
-        originalName: 'citation-report.txt',
-        storagePath: 'task-1/citation-report.txt',
+        originalName: 'citation-report.pdf',
+        storagePath: 'task-1/citation-report.pdf',
         fileSize: 20,
-        mimeType: 'text/plain',
+        mimeType: 'application/pdf',
         expiresAtIso: new Date('2026-03-20T00:00:00.000Z').toISOString(),
         body: Buffer.from('report'),
       }, {
@@ -47,5 +47,5 @@ test('storeGeneratedTaskFile removes uploaded file if database insert fails', as
     /insert failed/,
   );
 
-  assert.deepEqual(removed, ['task-1/citation-report.txt']);
+  assert.deepEqual(removed, ['task-1/citation-report.pdf']);
 });

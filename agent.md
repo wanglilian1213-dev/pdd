@@ -167,3 +167,14 @@ npx -y @aisuite/chub annotate --list
 1. 跑 `npm run lint`
 2. 跑 `npm run build`
 3. 如果动了业务流程、部署方式或真实进度，同步更新文档
+4. 每次改动后，都要一起检查并同步这些本地项目文件，避免实际进度和说明打架：
+   - `agent.md`
+   - `PLAN.md`
+   - `DESIGN.md`
+   - `docs/plans/` 里和这次改动直接相关的设计/执行文档
+5. 每次确认改动通过后，都要把线上服务一起更新到最新，不允许只更一部分：
+   - GitHub `main`
+   - Railway `app`
+   - Railway `cleanup`
+   - Railway `拼代代前端`
+6. 发布完成后，要再检查一遍线上状态，确认不是“代码推了，但真实线上还是旧版本”

@@ -2,10 +2,10 @@ import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { startHumanizeJobAtomic } from './atomicOpsService';
 import { storeGeneratedTaskFile } from './writingService';
 import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
+import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 
 interface ExecuteHumanizeDeps {
   humanizeText: (inputText: string) => Promise<HumanizeTextResult>;
@@ -140,16 +140,7 @@ export async function executeHumanize(
     const expiresAt = deps.now();
     expiresAt.setDate(expiresAt.getDate() + retentionDays);
 
-    const doc = new Document({
-      sections: [{
-        properties: {},
-        children: humanized.split('\n').map(line =>
-          new Paragraph({ children: [new TextRun(line)] })
-        ),
-      }],
-    });
-
-    const docBuffer = await Packer.toBuffer(doc);
+    const docBuffer = await buildFormattedPaperDocBuffer(humanized);
     const docPath = `${taskId}/humanized-${deps.now().getTime()}.docx`;
 
     await deps.storeGeneratedTaskFile({

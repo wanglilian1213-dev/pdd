@@ -42,7 +42,7 @@ test('buildDownloadCards keeps only the newest file of each category in fixed or
     {
       id: 'report-1',
       category: 'citation_report',
-      original_name: 'citation-report.txt',
+      original_name: 'citation-report.pdf',
       created_at: '2026-03-18T10:02:00.000Z',
     },
     {
@@ -74,7 +74,7 @@ test('buildDownloadCards keeps only the newest file of each category in fixed or
     {
       category: 'citation_report',
       fileId: 'report-1',
-      filename: 'citation-report.txt',
+      filename: 'citation-report.pdf',
     },
     {
       category: 'humanized_doc',
@@ -95,7 +95,7 @@ test('buildDownloadCards can hide humanized file before humanize is completed', 
     {
       id: 'report-1',
       category: 'citation_report',
-      original_name: 'citation-report.txt',
+      original_name: 'citation-report.pdf',
       created_at: '2026-03-18T10:02:00.000Z',
     },
     {

@@ -2194,42 +2194,44 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
   });
 
   // 生成引用报告
-  const citationReport = await generateCitationReport(finalText, task.citation_style);
-  const reportBuffer = Buffer.from(citationReport, 'utf-8');
-  const reportPath = `${taskId}/citation-report.txt`;
-
-  await supabaseAdmin.storage
-    .from('task-files')
-    .upload(reportPath, reportBuffer, { contentType: 'text/plain' });
+  const citationReport = await generateCitationReport(finalText, task.citation_style, task.title || 'Academic Essay');
+  const reportBuffer = await renderCitationReportPdf({
+    reportId: buildCitationReportId(new Date()),
+    generatedAt: new Date().toISOString().slice(0, 10),
+    essayTitle: task.title || 'Academic Essay',
+    citationStyle: task.citation_style,
+    ...citationReport,
+  });
+  const reportPath = `${taskId}/citation-report.pdf`;
 
   await supabaseAdmin.from('task_files').insert({
     task_id: taskId,
     category: 'citation_report',
-    original_name: 'citation-report.txt',
+    original_name: 'citation-report.pdf',
     storage_path: reportPath,
     file_size: reportBuffer.length,
-    mime_type: 'text/plain',
+    mime_type: 'application/pdf',
     expires_at: expiresAt.toISOString(),
   });
 }
 
-async function generateCitationReport(text: string, citationStyle: string): Promise<string> {
+async function generateCitationReport(text: string, citationStyle: string, essayTitle: string) {
   // 当前先复用 citation_verification 这套统一参数；如果以后要单独调强度，再拆 stage 名。
   const response = await openai.responses.create({
     ...buildMainOpenAIResponsesOptions('citation_verification'),
     input: [
       {
         role: 'system',
-        content: `You are a citation verification expert. Analyze the paper and generate a citation verification report. List each citation found, whether it follows ${citationStyle} format correctly, and any issues. Output as plain text report.`,
+        content: buildCitationReportPrompt(text, citationStyle).systemPrompt,
       },
       {
         role: 'user',
-        content: text,
+        content: `${buildCitationReportPrompt(text, citationStyle).userPrompt}\n\nEssay title: ${essayTitle}`,
       },
     ],
   });
 
-  return typeof response.output_text === 'string' ? response.output_text : 'Citation report generation failed.';
+  return parseCitationReportData(typeof response.output_text === 'string' ? response.output_text : '', citationStyle);
 }
 ```
 

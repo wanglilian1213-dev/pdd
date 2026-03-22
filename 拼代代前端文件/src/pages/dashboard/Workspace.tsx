@@ -116,7 +116,7 @@ function getDownloadCardMeta(category: TaskFileCategory) {
       return {
         title: '引用核验报告',
         buttonLabel: '下载报告',
-        emptyLabel: '文本格式 (.txt)',
+        emptyLabel: 'PDF 格式 (.pdf)',
         icon: ShieldCheck,
         iconWrapClass: 'bg-red-50 text-red-600',
         borderClass: 'hover:border-red-300',
