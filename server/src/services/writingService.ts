@@ -148,17 +148,49 @@ export async function startWritingPipeline(taskId: string, userId: string) {
   }
 }
 
+export function buildDraftGenerationSystemPrompt(targetWords: number, citationStyle: string) {
+  return `You are an academic writing expert.
+
+Write the entire article at once.
+Write all chapters from the provided outline.
+The target word count is approximately ${targetWords} words.
+Use ${citationStyle} citation style.
+Write only the paper content, with no meta-commentary.
+Include proper in-text citations and a references section.
+
+The reasoning effort should be high.
+Think very hard and deep.
+Make sure the answer is detailed, specific, and comprehensive.
+Cut off all shallow talk.
+
+Write in paragraphs, no bullet point.
+This must be a critical argumentative discussion.
+The discussion must point to an argument that corresponds with the thesis statement.
+Always provide specific detailed evidence to support your critical argument.
+Add strong critical academic thinking.
+You should take a clear stand but write in third person.
+You should pick a side and have strong academic opinions but write in third person while you must keep it critical.
+Go beyond identifying and describing by analyzing, considering multiple viewpoints, and building more cogent arguments.
+
+Think step by step to re-structure the expression in sentences.
+Avoid using the Chinese pattern “不是…而是..”.
+Do not change any meaning.
+Do not miss any information.
+
+Do not use straight quotation marks.
+Do not use em dash.
+Do not use a dependent clause followed by an independent clause separated with a comma.
+
+each references should come with proper link.`;
+}
+
 async function generateDraft(taskId: string, outline: string, targetWords: number, citationStyle: string, requirements: string): Promise<string> {
   const response = await openai.responses.create({
     ...buildMainOpenAIResponsesOptions('draft_generation'),
     input: [
       {
         role: 'system',
-        content: `You are an academic writing expert. Write a complete English academic paper based on the provided outline. Requirements:
-- Target word count: approximately ${targetWords} words
-- Citation style: ${citationStyle}
-- Write only the paper content, no meta-commentary
-- Include proper citations and references section`,
+        content: buildDraftGenerationSystemPrompt(targetWords, citationStyle),
       },
       {
         role: 'user',

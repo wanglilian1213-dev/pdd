@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { storeGeneratedTaskFile } from './writingService';
+import { buildDraftGenerationSystemPrompt, storeGeneratedTaskFile } from './writingService';
+
+test('buildDraftGenerationSystemPrompt includes the stronger first-draft writing rules', () => {
+  const prompt = buildDraftGenerationSystemPrompt(2500, 'APA 7');
+
+  assert.match(prompt, /Write the entire article at once/i);
+  assert.match(prompt, /Write all chapters/i);
+  assert.match(prompt, /Write in paragraphs, no bullet point/i);
+  assert.match(prompt, /critical argumentative discussion/i);
+  assert.match(prompt, /Always provide specific detailed evidence/i);
+  assert.match(prompt, /write in third person/i);
+  assert.match(prompt, /Do not Use straight quotation marks/i);
+  assert.match(prompt, /Do not use em dash/i);
+  assert.match(prompt, /each references should come with proper link/i);
+});
 
 test('storeGeneratedTaskFile throws when storage upload fails', async () => {
   await assert.rejects(

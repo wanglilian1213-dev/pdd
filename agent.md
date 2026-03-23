@@ -94,6 +94,7 @@ npx -y @aisuite/chub annotate --list
 - 数据和文件：Supabase Database + Storage
 - 业务接口：Railway 上的 Express 服务
 - AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
+- 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
 
 ## 项目文件结构
 
