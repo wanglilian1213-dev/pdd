@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
 import { api } from '../../lib/api';
+import { normalizeTaskFiles, pickPrimaryDownloadFile } from '../../lib/taskFiles';
 import { formatDate } from '../../lib/utils';
 
 interface TaskItem {
@@ -69,12 +70,16 @@ export default function Tasks() {
     setDownloadingId(taskId);
     try {
       const taskDetail = await api.getTask(taskId);
-      const files = taskDetail.files ?? taskDetail.task?.files ?? [];
+      const files = normalizeTaskFiles(taskDetail.files ?? taskDetail.task?.files ?? []);
       if (!files.length) {
         alert('该任务暂无可下载的文件');
         return;
       }
-      const file = files[files.length - 1];
+      const file = pickPrimaryDownloadFile(files);
+      if (!file) {
+        alert('该任务暂无主文稿可下载');
+        return;
+      }
       const { url } = await api.getDownloadUrl(taskId, file.id);
       window.open(url, '_blank');
     } catch (err) {

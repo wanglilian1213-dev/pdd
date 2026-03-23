@@ -6,6 +6,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { api } from '../../lib/api';
 import { useBalance } from '../../contexts/BalanceContext';
 import { buildDownloadCards, normalizeTaskFiles, TaskFile, TaskFileCategory } from '../../lib/taskFiles';
+import {
+  getHumanizeStepAfterStartAttempt,
+  getWorkspaceStep,
+  isDeliveryCompletedState,
+  isDeliveryInProgressState,
+  shouldPollWritingStage,
+} from '../../lib/workspaceStage';
 
 // ---------------------
 // Types
@@ -38,36 +45,6 @@ interface TaskData {
   document?: { id: string; word_count?: number };
   files?: TaskFile[];
   humanizeJob?: HumanizeJob;
-}
-
-// ---------------------
-// Helpers
-// ---------------------
-
-/** Map backend stage to UI step number */
-function stageToStep(stage: string, status: string): number {
-  if (status === 'failed') {
-    // Show the step that failed based on stage
-    const map: Record<string, number> = {
-      uploading: 1, outline_generating: 1, outline_ready: 2,
-      writing: 3, word_calibrating: 4, citation_checking: 5,
-      delivering: 6, completed: 6, humanizing: 7,
-    };
-    return map[stage] ?? 1;
-  }
-  if (status === 'completed' && stage === 'completed') return 6;
-  switch (stage) {
-    case 'uploading': return 1;
-    case 'outline_generating': return 1; // still generating outline, show loading after upload
-    case 'outline_ready': return 2;
-    case 'writing': return 3;
-    case 'word_calibrating': return 4;
-    case 'citation_checking': return 5;
-    case 'delivering': return 6;
-    case 'completed': return 6;
-    case 'humanizing': return 7;
-    default: return 1;
-  }
 }
 
 /** Reshape the flat backend task response into the TaskData format expected by the UI */
@@ -221,7 +198,7 @@ export default function Workspace() {
           clearOutlinePoll();
           setIsPollingOutline(false);
           setError(data.task.failure_reason || '大纲生成失败');
-          setStep(stageToStep(data.task.stage, data.task.status));
+          setStep(getWorkspaceStep(data.task.stage, data.task.status, data.humanizeJob?.status));
           return;
         }
 
@@ -254,11 +231,11 @@ export default function Workspace() {
           clearWritePoll();
           await refreshBalance();
           setError(data.task.failure_reason || '写作流程出错');
-          setStep(stageToStep(data.task.stage, data.task.status));
+          setStep(getWorkspaceStep(data.task.stage, data.task.status, data.humanizeJob?.status));
           return;
         }
 
-        const newStep = stageToStep(data.task.stage, data.task.status);
+        const newStep = getWorkspaceStep(data.task.stage, data.task.status, data.humanizeJob?.status);
         setStep(newStep);
 
         // When completed (step 6), stop polling
@@ -308,7 +285,7 @@ export default function Workspace() {
   const resumeTaskInUi = useCallback((raw: Record<string, unknown>) => {
     const data: TaskData = reshapeTaskResponse(raw);
     setTaskData(data);
-    const resumeStep = stageToStep(data.task.stage, data.task.status);
+    const resumeStep = getWorkspaceStep(data.task.stage, data.task.status, data.humanizeJob?.status);
     setStep(resumeStep);
 
     if (data.task.status === 'failed') {
@@ -321,7 +298,7 @@ export default function Workspace() {
       return;
     }
 
-    if (['writing', 'word_calibrating', 'citation_checking'].includes(data.task.stage)) {
+    if (shouldPollWritingStage(data.task.stage, data.task.status)) {
       startWritePolling(data.task.id);
       return;
     }
@@ -494,14 +471,15 @@ export default function Workspace() {
     if (!taskData) return;
     setError(null);
     setIsStartingHumanize(true);
-    setStep(7);
 
     try {
       await api.startHumanize(taskData.task.id);
+      setStep((currentStep) => getHumanizeStepAfterStartAttempt(currentStep, true));
       await refreshBalance();
       startHumanizePolling(taskData.task.id);
     } catch (err) {
       setIsStartingHumanize(false);
+      setStep((currentStep) => getHumanizeStepAfterStartAttempt(currentStep, false));
       setError(err instanceof Error ? err.message : '启动降AI失败');
     }
   }, [taskData, startHumanizePolling, refreshBalance]);
@@ -557,6 +535,8 @@ export default function Workspace() {
   // ---------------------
   const isHumanizeComplete = taskData?.humanizeJob?.status === 'completed';
   const isHumanizeProcessing = step === 7 && isStartingHumanize && !isHumanizeComplete;
+  const isDeliveryInProgress = taskData ? isDeliveryInProgressState(taskData.task.stage, taskData.task.status) : false;
+  const isDeliveryComplete = taskData ? isDeliveryCompletedState(taskData.task.stage, taskData.task.status) : false;
   const deliveryDownloadCards = buildDownloadCards(taskData?.files ?? [], {
     includeCategories: (taskData?.files ?? [])
       .map((file) => file.category)
@@ -835,70 +815,95 @@ export default function Workspace() {
             <CardHeader>
               <div className="flex items-center gap-3 mb-2">
                 <div className="bg-emerald-100 p-2 rounded-full">
-                  <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+                  {isDeliveryInProgress ? (
+                    <Loader2 className="w-6 h-6 text-emerald-600 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+                  )}
                 </div>
-                <CardTitle className="text-2xl">交付核验完成</CardTitle>
+                <CardTitle className="text-2xl">
+                  {isDeliveryInProgress ? '正在整理交付文件' : '交付核验完成'}
+                </CardTitle>
               </div>
-              <CardDescription>您的文章已生成完毕，并已通过引用核验。</CardDescription>
+              <CardDescription>
+                {isDeliveryInProgress
+                  ? '系统正在整理最终交付文件，请稍候，页面会自动刷新到可下载状态。'
+                  : '您的文章已生成完毕，并已通过引用核验。'}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-8">
+              {isDeliveryInProgress ? (
+                <div className="p-12 flex flex-col items-center justify-center space-y-6">
+                  <Loader2 className="w-16 h-16 text-emerald-600 animate-spin" />
+                  <div className="text-center space-y-2">
+                    <h3 className="text-xl font-bold text-gray-900">正在生成最终下载文件...</h3>
+                    <p className="text-gray-500">请耐心等待，系统正在整理正文和引用报告。</p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {deliveryDownloadCards.map((card) => {
+                      const meta = getDownloadCardMeta(card.category);
+                      const Icon = meta.icon;
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {deliveryDownloadCards.map((card) => {
-                  const meta = getDownloadCardMeta(card.category);
-                  const Icon = meta.icon;
+                      return (
+                        <div key={card.file.id} className={`border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center transition-colors bg-white shadow-sm ${meta.borderClass}`}>
+                          <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${meta.iconWrapClass}`}>
+                            <Icon className="w-8 h-8" />
+                          </div>
+                          <h3 className="font-semibold text-gray-900 mb-1">{meta.title}</h3>
+                          <p className="text-xs text-gray-500 mb-6">
+                            {card.file.filename || meta.emptyLabel}
+                          </p>
+                          <Button
+                            className={`w-full gap-2 ${meta.buttonClass}`.trim()}
+                            variant={meta.buttonVariant}
+                            disabled={downloadingFileId === card.file.id}
+                            onClick={() => handleDownload(card.file.id)}
+                          >
+                            {downloadingFileId === card.file.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Download className="w-4 h-4" />
+                            )}
+                            {meta.buttonLabel}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
 
-                  return (
-                    <div key={card.file.id} className={`border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center transition-colors bg-white shadow-sm ${meta.borderClass}`}>
-                      <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${meta.iconWrapClass}`}>
-                        <Icon className="w-8 h-8" />
-                      </div>
-                      <h3 className="font-semibold text-gray-900 mb-1">{meta.title}</h3>
-                      <p className="text-xs text-gray-500 mb-6">
-                        {card.file.filename || meta.emptyLabel}
-                      </p>
-                      <Button
-                        className={`w-full gap-2 ${meta.buttonClass}`.trim()}
-                        variant={meta.buttonVariant}
-                        disabled={downloadingFileId === card.file.id}
-                        onClick={() => handleDownload(card.file.id)}
-                      >
-                        {downloadingFileId === card.file.id ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
+                  {/* AI Reduction Section */}
+                  <div className="bg-gray-50 border border-gray-200 rounded-xl p-6">
+                    <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-2">
+                      <Bot className="w-5 h-5 text-red-700" /> 觉得 AI 痕迹过重？
+                    </h3>
+                    <p className="text-sm text-gray-600 mb-6">
+                      您可以使用自动降AI功能，系统将重写部分文本结构以降低检测率。
+                    </p>
+
+                    <div className="flex flex-col sm:flex-row gap-4">
+                      <Button className="flex-1 gap-2 shadow-sm" onClick={handleStartHumanize} disabled={isStartingHumanize || !isDeliveryComplete}>
+                        {isStartingHumanize ? (
+                          <><Loader2 className="w-4 h-4 animate-spin" /> 正在启动降AI...</>
                         ) : (
-                          <Download className="w-4 h-4" />
+                          <><RefreshCw className="w-4 h-4" /> 开始自动降AI</>
                         )}
-                        {meta.buttonLabel}
+                      </Button>
+                      <Button variant="secondary" className="flex-1 gap-2 bg-white border border-gray-200">
+                        人工降AI请联系客服
                       </Button>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
 
-              {/* AI Reduction Section */}
-              <div className="bg-gray-50 border border-gray-200 rounded-xl p-6">
-                <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-2">
-                  <Bot className="w-5 h-5 text-red-700" /> 觉得 AI 痕迹过重？
-                </h3>
-                <p className="text-sm text-gray-600 mb-6">
-                  您可以使用自动降AI功能，系统将重写部分文本结构以降低检测率。
-                </p>
-
-                <div className="flex flex-col sm:flex-row gap-4">
-                  <Button className="flex-1 gap-2 shadow-sm" onClick={handleStartHumanize}>
-                    <RefreshCw className="w-4 h-4" /> 开始自动降AI
-                  </Button>
-                  <Button variant="secondary" className="flex-1 gap-2 bg-white border border-gray-200">
-                    人工降AI请联系客服
-                  </Button>
-                </div>
-              </div>
-
-              <div className="flex justify-center pt-4">
-                <Button variant="link" onClick={handleNewTask} className="text-gray-500 hover:text-gray-900">
-                  创建新任务
-                </Button>
-              </div>
+                  <div className="flex justify-center pt-4">
+                    <Button variant="link" onClick={handleNewTask} className="text-gray-500 hover:text-gray-900">
+                      创建新任务
+                    </Button>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </motion.div>

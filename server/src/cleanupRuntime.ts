@@ -21,6 +21,20 @@ const defaultLogger: CleanupLogger = {
   error: (message: string, error?: unknown) => console.error(message, error),
 };
 
+const AUTO_CLEANUP_STAGES = new Set([
+  'uploading',
+  'outline_generating',
+  'writing',
+  'word_calibrating',
+  'citation_checking',
+  'delivering',
+  'humanizing',
+]);
+
+export function isAutoCleanupStage(stage: string): boolean {
+  return AUTO_CLEANUP_STAGES.has(stage);
+}
+
 async function cleanupStuckTasks() {
   const timeoutMinutes = (await getConfig('stuck_task_timeout_minutes')) || 30;
   const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
@@ -37,6 +51,11 @@ async function cleanupStuckTasks() {
   }
 
   for (const task of stuckTasks) {
+    if (!isAutoCleanupStage(task.stage)) {
+      console.log(`[cleanup] Skipping task ${task.id} at stage ${task.stage} because it is waiting for user action.`);
+      continue;
+    }
+
     console.log(`[cleanup] Processing stuck task ${task.id} at stage ${task.stage}`);
 
     const paidStages = ['writing', 'word_calibrating', 'citation_checking', 'delivering'];

@@ -17,6 +17,7 @@ interface BuildDownloadCardsOptions {
 }
 
 const CATEGORY_ORDER: TaskFileCategory[] = ['final_doc', 'citation_report', 'humanized_doc'];
+const PRIMARY_DOWNLOAD_PRIORITY: TaskFileCategory[] = ['humanized_doc', 'final_doc', 'citation_report'];
 
 export function normalizeTaskFiles(rawFiles: Array<Record<string, unknown>> | undefined): TaskFile[] {
   if (!rawFiles || rawFiles.length === 0) {
@@ -73,4 +74,24 @@ export function buildDownloadCards(
       return file ? { category: file.category, file } : null;
     })
     .filter((card): card is DownloadCard => Boolean(card));
+}
+
+export function pickPrimaryDownloadFile(files: TaskFile[]): TaskFile | null {
+  const latestByCategory = new Map<string, TaskFile>();
+
+  for (const file of files) {
+    const current = latestByCategory.get(file.category);
+    if (!current || current.createdAt < file.createdAt) {
+      latestByCategory.set(file.category, file);
+    }
+  }
+
+  for (const category of PRIMARY_DOWNLOAD_PRIORITY) {
+    const file = latestByCategory.get(category);
+    if (file) {
+      return file;
+    }
+  }
+
+  return null;
 }

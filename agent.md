@@ -95,6 +95,9 @@ npx -y @aisuite/chub annotate --list
 - 业务接口：Railway 上的 Express 服务
 - AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
+- 工作台状态规则：第 6 步只是“交付阶段”，只有真正 `completed + completed` 才算交付完成；`delivering + processing` 仍然要继续轮询并显示“正在整理交付文件”
+- 下载规则：任务列表里的单个“下载”按钮固定代表“下载主文稿”，优先顺序是 `humanized_doc` → `final_doc` → `citation_report`
+- 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败
 
 ## 项目文件结构
 

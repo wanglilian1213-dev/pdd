@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildDownloadCards,
   normalizeTaskFiles,
+  pickPrimaryDownloadFile,
 } from './taskFiles';
 
 test('normalizeTaskFiles maps original_name to filename and drops material files', () => {
@@ -134,4 +135,61 @@ test('buildDownloadCards keeps unknown delivery categories instead of dropping t
       filename: 'appendix.zip',
     },
   ]);
+});
+
+test('pickPrimaryDownloadFile prefers humanized doc over other delivery files', () => {
+  const files = normalizeTaskFiles([
+    {
+      id: 'final-1',
+      category: 'final_doc',
+      original_name: 'paper.docx',
+      created_at: '2026-03-18T10:01:00.000Z',
+    },
+    {
+      id: 'report-1',
+      category: 'citation_report',
+      original_name: 'citation-report.pdf',
+      created_at: '2026-03-18T10:02:00.000Z',
+    },
+    {
+      id: 'human-1',
+      category: 'humanized_doc',
+      original_name: 'humanized-paper.docx',
+      created_at: '2026-03-18T10:03:00.000Z',
+    },
+  ]);
+
+  assert.equal(pickPrimaryDownloadFile(files)?.id, 'human-1');
+});
+
+test('pickPrimaryDownloadFile falls back to final doc before citation report', () => {
+  const files = normalizeTaskFiles([
+    {
+      id: 'report-1',
+      category: 'citation_report',
+      original_name: 'citation-report.pdf',
+      created_at: '2026-03-18T10:02:00.000Z',
+    },
+    {
+      id: 'final-1',
+      category: 'final_doc',
+      original_name: 'paper.docx',
+      created_at: '2026-03-18T10:03:00.000Z',
+    },
+  ]);
+
+  assert.equal(pickPrimaryDownloadFile(files)?.id, 'final-1');
+});
+
+test('pickPrimaryDownloadFile uses citation report only when no article file exists', () => {
+  const files = normalizeTaskFiles([
+    {
+      id: 'report-1',
+      category: 'citation_report',
+      original_name: 'citation-report.pdf',
+      created_at: '2026-03-18T10:02:00.000Z',
+    },
+  ]);
+
+  assert.equal(pickPrimaryDownloadFile(files)?.id, 'report-1');
 });
