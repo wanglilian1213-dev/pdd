@@ -18,8 +18,6 @@ import {
   GraduationCap,
   ArrowRight,
   Zap,
-  QrCode,
-  Mail,
   ChevronRight,
   Clock,
   RefreshCw,
@@ -31,6 +29,7 @@ import {
   Lock,
   Download
 } from 'lucide-react';
+import CustomerSupportPanel from '../components/support/CustomerSupportPanel';
 
 export default function Landing() {
   return (
@@ -694,21 +693,11 @@ export default function Landing() {
                 <h3 className="text-2xl font-bold mb-2">购买额度请联系销售团队</h3>
                 <p className="text-gray-500 text-sm">支持批量合作 / 长期采购 / 人工协助咨询 / 人工降AI服务</p>
               </div>
-              
-              <div className="flex flex-col items-center justify-center mb-8">
-                <div className="w-48 h-48 bg-gray-100 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center mb-4 p-4">
-                  <QrCode className="w-12 h-12 text-gray-400 mb-2" />
-                  <span className="text-xs text-gray-500 text-center">微信二维码占位区<br/>请替换为真实二维码</span>
-                </div>
-                <div className="flex items-center gap-2 text-lg font-medium text-gray-800 bg-gray-50 px-6 py-3 rounded-full border border-gray-200">
-                  <MessageSquare className="w-5 h-5 text-green-600" />
-                  微信号：<span className="font-mono font-bold selection:bg-red-200">PDDService01</span>
-                </div>
-              </div>
-              
-              <div className="flex items-center justify-center gap-2 text-sm text-gray-500">
-                <Mail className="w-4 h-4" /> 客服邮箱：1318823634@qq.com
-              </div>
+
+              <CustomerSupportPanel
+                note="支持批量合作、长期采购优惠。扫码添加客服后，可直接咨询充值、任务问题和人工协助。"
+                imageClassName="w-56 max-w-full rounded-2xl border border-gray-200 shadow-sm"
+              />
             </div>
 
           </div>

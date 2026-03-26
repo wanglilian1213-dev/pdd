@@ -5,6 +5,7 @@ import { Input } from '../components/ui/input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card';
 import { PenLine, ArrowLeft, MessageSquare, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import CustomerSupportDialog from '../components/support/CustomerSupportDialog';
 
 export default function Register() {
   const [email, setEmail] = useState('');
@@ -12,6 +13,7 @@ export default function Register() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [supportOpen, setSupportOpen] = useState(false);
   const { signUp } = useAuth();
   const navigate = useNavigate();
 
@@ -143,9 +145,13 @@ export default function Register() {
               <Link to="/" className="inline-flex items-center text-sm text-gray-500 hover:text-gray-900">
                 <ArrowLeft className="mr-2 h-4 w-4" /> 返回首页
               </Link>
-              <a href="#" className="inline-flex items-center text-sm text-gray-500 hover:text-green-600">
+              <button
+                type="button"
+                onClick={() => setSupportOpen(true)}
+                className="inline-flex items-center text-sm text-gray-500 hover:text-green-600"
+              >
                 <MessageSquare className="mr-2 h-4 w-4" /> 联系客服
-              </a>
+              </button>
             </div>
           </CardFooter>
         </Card>
@@ -154,6 +160,8 @@ export default function Register() {
           注册成功后，即可使用"额度激活码"充值积分
         </p>
       </div>
+
+      <CustomerSupportDialog open={supportOpen} onClose={() => setSupportOpen(false)} />
     </div>
   );
 }

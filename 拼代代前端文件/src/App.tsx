@@ -17,6 +17,7 @@ import Recharge from './pages/dashboard/Recharge';
 import ActivationRules from './pages/ActivationRules';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
+import NotFound from './pages/NotFound';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading, authBusy } = useAuth();
@@ -49,6 +50,8 @@ export default function App() {
           <Route path="tasks" element={<Tasks />} />
           <Route path="recharge" element={<Recharge />} />
         </Route>
+
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>
   );

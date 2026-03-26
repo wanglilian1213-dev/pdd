@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { Wallet, QrCode, MessageSquare, Zap, CheckCircle2, History, Loader2 } from 'lucide-react';
+import { Wallet, Zap, CheckCircle2, History, Loader2 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useBalance } from '../../contexts/BalanceContext';
 import { formatDate } from '../../lib/utils';
+import CustomerSupportPanel from '../../components/support/CustomerSupportPanel';
 
 interface HistoryRecord {
   id: string;
@@ -259,26 +260,11 @@ export default function Recharge() {
               <CardDescription>请联系官方销售团队获取</CardDescription>
             </CardHeader>
             <CardContent className="p-6 flex flex-col items-center">
-              <div className="w-48 h-48 bg-gray-50 border-2 border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center mb-6 p-4">
-                <QrCode className="w-12 h-12 text-gray-400 mb-2" />
-                <span className="text-xs text-gray-500 text-center">微信二维码占位区<br/>请替换为真实二维码</span>
-              </div>
-
-              <div className="w-full bg-gray-50 rounded-lg p-4 border border-gray-100 mb-6 text-center">
-                <div className="flex items-center justify-center gap-2 text-sm font-medium text-gray-600 mb-1">
-                  <MessageSquare className="w-4 h-4 text-green-600" /> 官方微信号
-                </div>
-                <div className="font-mono font-bold text-lg text-gray-900 selection:bg-red-200">
-                  PDDService01
-                </div>
-              </div>
-
-              <div className="w-full space-y-3">
-                <Button className="w-full shadow-sm">复制微信号</Button>
-                <p className="text-xs text-center text-gray-500 leading-relaxed">
-                  支持批量合作、长期采购优惠。<br/>添加客服获取专业【人工降AI服务】。
-                </p>
-              </div>
+              <CustomerSupportPanel
+                showCopyButton
+                note="支持批量合作、长期采购优惠。添加客服可咨询充值、任务问题和人工协助。"
+                imageClassName="w-52 max-w-full rounded-2xl border border-gray-200 shadow-sm"
+              />
             </CardContent>
           </Card>
         </div>

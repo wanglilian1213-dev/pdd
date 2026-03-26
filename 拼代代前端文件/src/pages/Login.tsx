@@ -5,12 +5,14 @@ import { Input } from '../components/ui/input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card';
 import { PenLine, ArrowLeft, MessageSquare, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import CustomerSupportDialog from '../components/support/CustomerSupportDialog';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [supportOpen, setSupportOpen] = useState(false);
   const { signIn } = useAuth();
   const navigate = useNavigate();
 
@@ -122,9 +124,13 @@ export default function Login() {
               <Link to="/" className="inline-flex items-center text-sm text-gray-500 hover:text-gray-900">
                 <ArrowLeft className="mr-2 h-4 w-4" /> 返回首页
               </Link>
-              <a href="#" className="inline-flex items-center text-sm text-gray-500 hover:text-green-600">
+              <button
+                type="button"
+                onClick={() => setSupportOpen(true)}
+                className="inline-flex items-center text-sm text-gray-500 hover:text-green-600"
+              >
                 <MessageSquare className="mr-2 h-4 w-4" /> 联系客服
-              </a>
+              </button>
             </div>
           </CardFooter>
         </Card>
@@ -133,6 +139,8 @@ export default function Login() {
           登录后可通过"额度激活码"充值积分
         </p>
       </div>
+
+      <CustomerSupportDialog open={supportOpen} onClose={() => setSupportOpen(false)} />
     </div>
   );
 }

@@ -140,6 +140,7 @@ npx -y @aisuite/chub annotate --list
 | `/activation-rules` | ActivationRules | 静态页 |
 | `/privacy-policy` | PrivacyPolicy | 静态页 |
 | `/terms-of-service` | TermsOfService | 静态页 |
+| `*` | NotFound | 所有不存在地址的兜底页 |
 
 ## 代码规则
 
@@ -149,6 +150,7 @@ npx -y @aisuite/chub annotate --list
 4. 前端不自己猜业务状态，真实状态以 Supabase/后端返回为准
 5. 收费金额、可修改次数、有效期这些规则，不要写死在前端
 6. 改完代码必须重新跑检查
+7. 客服二维码、微信号、邮箱统一从一处读取，不要在多个页面各写各的
 
 ## 红线
 
@@ -170,7 +172,7 @@ npx -y @aisuite/chub annotate --list
 
 1. 跑 `npm run lint`
 2. 跑 `npm run build`
-3. 如果动了业务流程、部署方式或真实进度，同步更新文档
+3. 如果动了业务流程、部署方式、页面入口或真实进度，同步更新文档
 4. 每次改动后，都要一起检查并同步这些本地项目文件，避免实际进度和说明打架：
    - `agent.md`
    - `PLAN.md`
