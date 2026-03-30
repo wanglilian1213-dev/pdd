@@ -148,3 +148,23 @@ This is the first real body paragraph.`, {
   assert.equal(firstBodyParagraph?.text, 'This is the first real body paragraph.');
   assert.equal(model.paragraphs.some((paragraph) => paragraph.text.includes('.txt')), false);
 });
+
+test('buildPaperLayoutModel removes a duplicated first body title even when punctuation style differs slightly', () => {
+  const model = buildPaperLayoutModel(`The Impact of Social Media Use on University Students’ Mental Health
+
+Introduction
+
+This is the first real body paragraph.`, {
+    paperTitle: "The Impact of Social Media Use on University Students' Mental Health",
+    courseCode: 'BUSI1001',
+  });
+
+  const headingsAndBodies = model.paragraphs.filter((paragraph) => paragraph.kind === 'heading' || paragraph.kind === 'body');
+
+  assert.equal(headingsAndBodies[0]?.text, 'Introduction');
+  assert.equal(headingsAndBodies[1]?.text, 'This is the first real body paragraph.');
+  assert.equal(
+    model.paragraphs.some((paragraph) => paragraph.kind !== 'cover_title' && /Social Media Use on University Students.? Mental Health/.test(paragraph.text)),
+    false,
+  );
+});

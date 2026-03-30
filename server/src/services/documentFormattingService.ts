@@ -241,6 +241,16 @@ function normalizeBlockText(lines: string[]) {
     .trim();
 }
 
+function normalizeTitleForComparison(value: string) {
+  return value
+    .normalize('NFKC')
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 function blockLooksLikeReference(lines: string[]) {
   const text = normalizeBlockText(lines);
   if (!text) {
@@ -312,8 +322,9 @@ export function buildPaperLayoutModel(text: string, options: PaperLayoutOptions 
     return { paragraphs };
   }
 
-  const normalizedTitleBlock = normalizeBlockText(blocks[0]!);
-  const remainingBlocks = normalizedTitleBlock.localeCompare(paperTitle, undefined, { sensitivity: 'accent' }) === 0
+  const normalizedTitleBlock = normalizeTitleForComparison(normalizeBlockText(blocks[0]!));
+  const normalizedPaperTitle = normalizeTitleForComparison(paperTitle);
+  const remainingBlocks = normalizedTitleBlock === normalizedPaperTitle
     ? blocks.slice(1)
     : blocks.slice();
 
