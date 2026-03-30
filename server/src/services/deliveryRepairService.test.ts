@@ -10,6 +10,7 @@ test('repairTaskDeliveryFilesWithDeps rebuilds final doc and citation report wit
     loadTaskMeta: async () => ({
       id: 'task-1',
       title: 'Essay Topic.txt',
+      paperTitle: 'A Better Essay Title',
       citationStyle: 'APA 7',
       courseCode: 'BUSI1001',
     }),
@@ -26,24 +27,24 @@ test('repairTaskDeliveryFilesWithDeps rebuilds final doc and citation report wit
     },
     buildWordBuffer: async (text, options) => {
       assert.equal(text, 'Final paper body');
-      assert.equal(options.paperTitle, 'Essay Topic');
+      assert.equal(options.paperTitle, 'A Better Essay Title');
       assert.equal(options.courseCode, 'BUSI1001');
       return Buffer.from('word');
     },
     buildCitationReportData: async (text, citationStyle, essayTitle) => {
       assert.equal(text, 'Final paper body');
       assert.equal(citationStyle, 'APA 7');
-      assert.equal(essayTitle, 'Essay Topic');
+      assert.equal(essayTitle, 'A Better Essay Title');
       return { essayTitle, generatedAtIso: '2026-03-30T00:00:00.000Z' };
     },
     buildCitationReportPdf: async (reportData) => {
-      assert.equal(reportData.essayTitle, 'Essay Topic');
+      assert.equal(reportData.essayTitle, 'A Better Essay Title');
       return Buffer.from('pdf');
     },
     storeGeneratedTaskFile: async (payload) => {
       storedCategories.push(payload.category);
       if (payload.category === 'final_doc') {
-        assert.equal(payload.originalName, 'Essay Topic.docx');
+        assert.equal(payload.originalName, 'A Better Essay Title.docx');
       }
       if (payload.category === 'citation_report') {
         assert.equal(payload.originalName, 'citation-report.pdf');

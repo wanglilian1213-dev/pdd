@@ -17,6 +17,8 @@ import { formatDate } from '../../lib/utils';
 interface TaskItem {
   id: string;
   title: string;
+  paper_title?: string;
+  research_question?: string;
   status: string;
   stage: string;
   target_words: number;
@@ -61,7 +63,9 @@ export default function Tasks() {
     const term = searchTerm.toLowerCase();
     if (!term) return true;
     const shortId = task.id.slice(0, 8);
-    return task.title.toLowerCase().includes(term) ||
+    const displayTitle = (task.paper_title || task.title || '').toLowerCase();
+    return displayTitle.includes(term) ||
+           task.title.toLowerCase().includes(term) ||
            task.id.toLowerCase().includes(term) ||
            shortId.toLowerCase().includes(term);
   });
@@ -170,7 +174,9 @@ export default function Tasks() {
                         </td>
                       </tr>
                     ) : (
-                      tasks.map((task) => (
+                      tasks.map((task) => {
+                        const displayTitle = task.paper_title || task.title;
+                        return (
                         <tr key={task.id} className="bg-white border-b border-gray-100 hover:bg-gray-50 transition-colors">
                           <td className="px-6 py-4">
                             <div className="flex items-start gap-3">
@@ -178,8 +184,8 @@ export default function Tasks() {
                                 <FileText className="w-4 h-4 text-red-700" />
                               </div>
                               <div>
-                                <div className="font-medium text-gray-900 line-clamp-1 max-w-xs" title={task.title}>
-                                  {task.title}
+                                <div className="font-medium text-gray-900 line-clamp-1 max-w-xs" title={displayTitle}>
+                                  {displayTitle}
                                 </div>
                                 <div className="text-xs text-gray-400 mt-1 font-mono">{task.id.slice(0, 8)}</div>
                               </div>
@@ -242,7 +248,8 @@ export default function Tasks() {
                             )}
                           </td>
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

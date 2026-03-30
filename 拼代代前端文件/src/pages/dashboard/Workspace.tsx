@@ -34,6 +34,8 @@ interface HumanizeJob {
 interface Task {
   id: string;
   title: string;
+  paper_title?: string;
+  research_question?: string;
   stage: string;
   status: string;
   failure_reason?: string;
@@ -65,6 +67,8 @@ function reshapeTaskResponse(raw: Record<string, unknown>): TaskData {
     task: {
       id: raw.id as string,
       title: raw.title as string,
+      paper_title: raw.paper_title as string | undefined,
+      research_question: raw.research_question as string | undefined,
       stage: raw.stage as string,
       status: raw.status as string,
       failure_reason: raw.failure_reason as string | undefined,
@@ -443,7 +447,14 @@ export default function Workspace() {
     try {
       const rawTask = await api.createTask(files, title, specialRequirements);
       const data: TaskData = {
-        task: { id: rawTask.id, title: rawTask.title, stage: rawTask.stage, status: rawTask.status },
+        task: {
+          id: rawTask.id,
+          title: rawTask.title,
+          paper_title: rawTask.paper_title,
+          research_question: rawTask.research_question,
+          stage: rawTask.stage,
+          status: rawTask.status,
+        },
       };
       setTaskData(data);
       // Backend starts outline generation async -- poll for it

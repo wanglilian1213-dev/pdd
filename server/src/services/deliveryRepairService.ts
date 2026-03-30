@@ -19,6 +19,7 @@ interface RepairTaskDeliveryDeps {
   loadTaskMeta: (taskId: string) => Promise<{
     id: string;
     title: string;
+    paperTitle: string | null;
     citationStyle: string;
     courseCode: string | null;
   } | null>;
@@ -36,11 +37,16 @@ interface RepairTaskDeliveryDeps {
   getRetentionDays: () => Promise<number>;
 }
 
+export interface RepairTaskDeliveryOptions {
+  finalTextOverride?: string;
+  preserveHumanizedDoc?: boolean;
+}
+
 const defaultRepairTaskDeliveryDeps: RepairTaskDeliveryDeps = {
   loadTaskMeta: async (taskId) => {
     const { data, error } = await supabaseAdmin
       .from('tasks')
-      .select('id, title, citation_style, course_code')
+      .select('id, title, paper_title, citation_style, course_code')
       .eq('id', taskId)
       .single();
 
@@ -51,24 +57,42 @@ const defaultRepairTaskDeliveryDeps: RepairTaskDeliveryDeps = {
     return {
       id: data.id as string,
       title: String(data.title || ''),
+      paperTitle: data.paper_title ? String(data.paper_title) : null,
       citationStyle: String(data.citation_style || 'APA 7'),
       courseCode: data.course_code ? String(data.course_code) : null,
     };
   },
   loadDeliveryContent: async (taskId) => {
-    const { data, error } = await supabaseAdmin
-      .from('document_versions')
-      .select('content, version')
-      .eq('task_id', taskId)
-      .eq('stage', 'final')
-      .order('version', { ascending: true });
+    const [
+      { data: latestVerified, error: verifiedError },
+      { data: latestFinal, error: finalError },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from('document_versions')
+        .select('content, version')
+        .eq('task_id', taskId)
+        .eq('stage', 'verified')
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabaseAdmin
+        .from('document_versions')
+        .select('content, version')
+        .eq('task_id', taskId)
+        .eq('stage', 'final')
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
 
-    if (error || !data || data.length === 0) {
-      throw new AppError(404, '找不到可用于重做交付文件的正文内容。');
+    if (verifiedError || finalError) {
+      throw new AppError(500, '读取正文内容失败。');
     }
 
-    const finalText = String(data[0]?.content || '').trim();
-    const humanizedText = data.length > 1 ? String(data[data.length - 1]?.content || '').trim() : null;
+    const finalText = String(latestVerified?.content || latestFinal?.content || '').trim();
+    const verifiedVersion = typeof latestVerified?.version === 'number' ? latestVerified.version : -1;
+    const finalVersion = typeof latestFinal?.version === 'number' ? latestFinal.version : -1;
+    const humanizedText = finalVersion > verifiedVersion ? String(latestFinal?.content || '').trim() : null;
 
     if (!finalText) {
       throw new AppError(400, '原始正文内容为空，无法重做交付文件。');
@@ -118,6 +142,7 @@ function buildExpiryIso(now: Date, retentionDays: number) {
 export async function repairTaskDeliveryFilesWithDeps(
   taskId: string,
   deps: RepairTaskDeliveryDeps,
+  options: RepairTaskDeliveryOptions = {},
 ) {
   const task = await deps.loadTaskMeta(taskId);
   if (!task) {
@@ -127,7 +152,7 @@ export async function repairTaskDeliveryFilesWithDeps(
   const deliveryContent = await deps.loadDeliveryContent(taskId);
   const existingFiles = await deps.listGeneratedFiles(taskId);
   const existingByCategory = new Map(existingFiles.map((file) => [file.category, file]));
-  const displayTitle = normalizeDeliveryPaperTitle(task.title, 'Academic Essay');
+  const displayTitle = normalizeDeliveryPaperTitle(task.paperTitle || task.title, 'Academic Essay');
   const retentionDays = await deps.getRetentionDays();
   const now = deps.now();
   const expiresAtIso = buildExpiryIso(now, retentionDays);
@@ -136,11 +161,13 @@ export async function repairTaskDeliveryFilesWithDeps(
     await deps.removeGeneratedFile(file);
   }
 
-  const docBuffer = await deps.buildWordBuffer(deliveryContent.finalText, {
+  const finalText = options.finalTextOverride || deliveryContent.finalText;
+
+  const docBuffer = await deps.buildWordBuffer(finalText, {
     paperTitle: displayTitle,
     courseCode: task.courseCode,
   });
-  const finalDocName = buildDocxFileName(task.title, 'Academic Essay');
+  const finalDocName = buildDocxFileName(task.paperTitle || task.title, 'Academic Essay');
 
   await deps.storeGeneratedTaskFile({
     taskId,
@@ -154,7 +181,7 @@ export async function repairTaskDeliveryFilesWithDeps(
   });
 
   const citationReportData = await deps.buildCitationReportData(
-    deliveryContent.finalText,
+    finalText,
     task.citationStyle,
     displayTitle,
   );
@@ -170,7 +197,9 @@ export async function repairTaskDeliveryFilesWithDeps(
     body: reportBuffer,
   });
 
-  if (existingByCategory.has('humanized_doc') && deliveryContent.humanizedText) {
+  const preserveHumanizedDoc = options.preserveHumanizedDoc ?? true;
+
+  if (preserveHumanizedDoc && existingByCategory.has('humanized_doc') && deliveryContent.humanizedText) {
     const existingHumanized = existingByCategory.get('humanized_doc');
     const humanizedBuffer = await deps.buildWordBuffer(deliveryContent.humanizedText, {
       paperTitle: displayTitle,
@@ -190,6 +219,6 @@ export async function repairTaskDeliveryFilesWithDeps(
   }
 }
 
-export async function repairTaskDeliveryFiles(taskId: string) {
-  return repairTaskDeliveryFilesWithDeps(taskId, defaultRepairTaskDeliveryDeps);
+export async function repairTaskDeliveryFiles(taskId: string, options: RepairTaskDeliveryOptions = {}) {
+  return repairTaskDeliveryFilesWithDeps(taskId, defaultRepairTaskDeliveryDeps, options);
 }

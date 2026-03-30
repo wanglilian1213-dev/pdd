@@ -25,21 +25,42 @@ import {
   extractCourseCodeByRegex,
   parseCourseCodeExtraction,
 } from './courseCodeService';
+import { assessOutlineReadiness as assessOutlineReadinessInternal } from './paperQualityService';
 import {
   ensureValidOutlineBulletCounts,
   formatOutlineBulletViolations,
 } from './outlineStructureService';
 
 interface ParsedOutlineResponse {
+  paper_title: string;
+  research_question: string;
   outline: string;
   target_words: number;
   citation_style: string;
 }
 
+export interface UsableOutlineResult {
+  outlineContent: string;
+  paperTitle: string;
+  researchQuestion: string;
+  targetWords: number;
+  citationStyle: string;
+  courseCode: string | null;
+}
+
+export const assessOutlineReadiness = assessOutlineReadinessInternal;
+
 function parseOutlineJson(content: string, fallback: ParsedOutlineResponse): ParsedOutlineResponse {
   try {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
-    return JSON.parse(jsonMatch ? jsonMatch[0] : content);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content) as Partial<ParsedOutlineResponse>;
+    return {
+      paper_title: typeof parsed.paper_title === 'string' ? parsed.paper_title : fallback.paper_title,
+      research_question: typeof parsed.research_question === 'string' ? parsed.research_question : fallback.research_question,
+      outline: typeof parsed.outline === 'string' ? parsed.outline : fallback.outline,
+      target_words: typeof parsed.target_words === 'number' ? parsed.target_words : fallback.target_words,
+      citation_style: typeof parsed.citation_style === 'string' ? parsed.citation_style : fallback.citation_style,
+    };
   } catch {
     return fallback;
   }
@@ -80,11 +101,77 @@ async function repairOutlineBulletCounts(
     const repaired = parseOutlineJson(response.output_text, currentPayload);
 
     return {
+      paper_title: repaired.paper_title || currentPayload.paper_title,
+      research_question: repaired.research_question || currentPayload.research_question,
       outline: repaired.outline,
       target_words: repaired.target_words || currentPayload.target_words,
       citation_style: repaired.citation_style || currentPayload.citation_style,
     };
   });
+}
+
+async function repairOutlineReadiness(
+  stage: 'outline_generation' | 'outline_regeneration',
+  payload: ParsedOutlineResponse,
+  options: {
+    specialRequirements?: string | null;
+    editInstruction?: string | null;
+    fileNames?: string[];
+    materialParts?: MaterialInputPart[];
+  },
+) {
+  const assessment = assessOutlineReadiness(payload, {
+    blockedFileTitles: options.fileNames,
+  });
+
+  if (assessment.valid) {
+    return payload;
+  }
+
+  const prompt = buildRepairOutlinePrompt({
+    currentOutline: payload.outline,
+    currentPaperTitle: payload.paper_title,
+    currentResearchQuestion: payload.research_question,
+    currentTargetWords: payload.target_words,
+    currentCitationStyle: payload.citation_style,
+    specialRequirements: options.specialRequirements,
+    editInstruction: options.editInstruction,
+    violationSummary: 'None',
+    qualityIssueSummary: assessment.reasons.join(', '),
+  });
+
+  const response = await openai.responses.create({
+    ...buildMainOpenAIResponsesOptions(stage),
+    input: [
+      {
+        role: 'system' as const,
+        content: prompt.systemPrompt,
+      },
+      {
+        role: 'user' as const,
+        content: options.materialParts
+          ? [
+              {
+                type: 'input_text',
+                text: prompt.userPrompt,
+              },
+              ...options.materialParts,
+            ]
+          : prompt.userPrompt,
+      },
+    ],
+  });
+
+  const repaired = parseOutlineJson(response.output_text, payload);
+  const repairedAssessment = assessOutlineReadiness(repaired, {
+    blockedFileTitles: options.fileNames,
+  });
+
+  if (!repairedAssessment.valid) {
+    throw new AppError(500, '大纲生成失败，请稍后重试。');
+  }
+
+  return repaired;
 }
 
 export function mapOutlineGenerationError(err: unknown) {
@@ -192,6 +279,156 @@ async function extractCourseCodeForTask(options: {
   }
 }
 
+function sameOutlinePayload(left: ParsedOutlineResponse, right: ParsedOutlineResponse) {
+  return (
+    left.paper_title === right.paper_title &&
+    left.research_question === right.research_question &&
+    left.outline === right.outline &&
+    left.target_words === right.target_words &&
+    normalizeCitationStyle(left.citation_style) === normalizeCitationStyle(right.citation_style)
+  );
+}
+
+export async function ensureUsableOutlineForTask(taskId: string): Promise<UsableOutlineResult> {
+  const { data: task } = await supabaseAdmin
+    .from('tasks')
+    .select('*')
+    .eq('id', taskId)
+    .single();
+
+  if (!task) {
+    throw new AppError(404, '任务不存在。');
+  }
+
+  const { data: latestOutline } = await supabaseAdmin
+    .from('outline_versions')
+    .select('*')
+    .eq('task_id', taskId)
+    .order('version', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (!latestOutline) {
+    throw new AppError(404, '找不到可用大纲。');
+  }
+
+  const { data: files } = await supabaseAdmin
+    .from('task_files')
+    .select('original_name, storage_path, mime_type')
+    .eq('task_id', taskId)
+    .eq('category', 'material');
+
+  if (!files || files.length === 0) {
+    throw new AppError(400, '没有找到任务材料，无法修复大纲。');
+  }
+
+  let uploadedFileIds: string[] = [];
+  try {
+    const materialContent = await buildMaterialContentFromStorage(files);
+    uploadedFileIds = materialContent.uploadedFileIds;
+
+    const currentPayload: ParsedOutlineResponse = {
+      paper_title: String(latestOutline.paper_title || task.paper_title || ''),
+      research_question: String(latestOutline.research_question || task.research_question || ''),
+      outline: String(latestOutline.content || ''),
+      target_words: Number(latestOutline.target_words || task.target_words || 1000),
+      citation_style: normalizeCitationStyle(String(latestOutline.citation_style || task.citation_style || 'APA 7')),
+    };
+
+    const courseCode = await extractCourseCodeForTask({
+      taskTitle: task.title,
+      specialRequirements: task.special_requirements,
+      existingCourseCode: task.course_code,
+      fileNames: files.map((file) => file.original_name),
+      materialParts: materialContent.parts,
+    });
+
+    const bulletFixed = await repairOutlineBulletCounts(
+      'outline_regeneration',
+      currentPayload,
+      {
+        specialRequirements: task.special_requirements,
+      },
+    );
+
+    const repaired = await repairOutlineReadiness(
+      'outline_regeneration',
+      bulletFixed,
+      {
+        specialRequirements: task.special_requirements,
+        fileNames: files.map((file) => file.original_name),
+        materialParts: materialContent.parts,
+      },
+    );
+
+    const normalized: ParsedOutlineResponse = {
+      paper_title: repaired.paper_title,
+      research_question: repaired.research_question,
+      outline: repaired.outline,
+      target_words: repaired.target_words || currentPayload.target_words,
+      citation_style: normalizeCitationStyle(repaired.citation_style || currentPayload.citation_style),
+    };
+
+    const needsNewOutlineVersion = !sameOutlinePayload(currentPayload, normalized);
+    const needsTaskSync = (
+      task.paper_title !== normalized.paper_title ||
+      task.research_question !== normalized.research_question ||
+      Number(task.target_words || 0) !== normalized.target_words ||
+      normalizeCitationStyle(String(task.citation_style || 'APA 7')) !== normalized.citation_style ||
+      String(task.course_code || '') !== String(courseCode || '')
+    );
+
+    if (needsNewOutlineVersion) {
+      await supabaseAdmin.from('outline_versions').insert({
+        task_id: taskId,
+        version: Number(latestOutline.version || 1) + 1,
+        content: normalized.outline,
+        paper_title: normalized.paper_title,
+        research_question: normalized.research_question,
+        edit_instruction: 'SYSTEM_AUTO_REPAIR',
+        target_words: normalized.target_words,
+        citation_style: normalized.citation_style,
+      });
+
+      await supabaseAdmin.from('task_events').insert({
+        task_id: taskId,
+        event_type: 'outline_auto_repaired',
+        detail: {
+          paper_title: normalized.paper_title,
+          research_question: normalized.research_question,
+          target_words: normalized.target_words,
+          citation_style: normalized.citation_style,
+        },
+      });
+    }
+
+    if (needsTaskSync) {
+      await supabaseAdmin
+        .from('tasks')
+        .update({
+          paper_title: normalized.paper_title,
+          research_question: normalized.research_question,
+          target_words: normalized.target_words,
+          citation_style: normalized.citation_style,
+          course_code: courseCode,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', taskId);
+    }
+
+    return {
+      outlineContent: normalized.outline,
+      paperTitle: normalized.paper_title,
+      researchQuestion: normalized.research_question,
+      targetWords: normalized.target_words,
+      citationStyle: normalized.citation_style,
+      courseCode: courseCode || null,
+    };
+  } finally {
+    await cleanupOpenAIFiles(uploadedFileIds);
+  }
+}
+
 export async function generateOutline(taskId: string, userId: string) {
   // 读取材料
   const { data: files } = await supabaseAdmin
@@ -250,11 +487,26 @@ export async function generateOutline(taskId: string, userId: string) {
 
     const content = response.output_text;
 
-    const parsed = await repairOutlineBulletCounts(
+    const bulletFixed = await repairOutlineBulletCounts(
       'outline_generation',
-      parseOutlineJson(content, { outline: content, target_words: 1000, citation_style: 'APA 7' }),
+      parseOutlineJson(content, {
+        paper_title: '',
+        research_question: '',
+        outline: content,
+        target_words: 1000,
+        citation_style: 'APA 7',
+      }),
       {
         specialRequirements: task?.special_requirements,
+      },
+    );
+    const parsed = await repairOutlineReadiness(
+      'outline_generation',
+      bulletFixed,
+      {
+        specialRequirements: task?.special_requirements,
+        fileNames: files.map((file) => file.original_name),
+        materialParts: materialContent.parts,
       },
     );
 
@@ -267,6 +519,8 @@ export async function generateOutline(taskId: string, userId: string) {
         task_id: taskId,
         version: 1,
         content: parsed.outline,
+        paper_title: parsed.paper_title,
+        research_question: parsed.research_question,
         target_words: targetWords,
         citation_style: citationStyle,
       })
@@ -278,6 +532,8 @@ export async function generateOutline(taskId: string, userId: string) {
     }
 
     await updateTaskStage(taskId, 'outline_ready', {
+      paper_title: parsed.paper_title,
+      research_question: parsed.research_question,
       target_words: targetWords,
       citation_style: citationStyle,
       course_code: courseCode,
@@ -286,7 +542,13 @@ export async function generateOutline(taskId: string, userId: string) {
     await supabaseAdmin.from('task_events').insert({
       task_id: taskId,
       event_type: 'outline_generated',
-      detail: { version: 1, target_words: targetWords, citation_style: citationStyle },
+      detail: {
+        version: 1,
+        paper_title: parsed.paper_title,
+        research_question: parsed.research_question,
+        target_words: targetWords,
+        citation_style: citationStyle,
+      },
     });
 
     return outline;
@@ -336,6 +598,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
 
     const prompt = buildRegenerateOutlinePrompt({
       currentOutline: latestOutline.content,
+      currentPaperTitle: latestOutline.paper_title,
+      currentResearchQuestion: latestOutline.research_question,
       currentTargetWords: latestOutline.target_words,
       currentCitationStyle: latestOutline.citation_style,
       specialRequirements: task.special_requirements,
@@ -357,13 +621,23 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     });
 
     const content = response.output_text;
-    const parsed = await repairOutlineBulletCounts(
+    const bulletFixed = await repairOutlineBulletCounts(
       'outline_regeneration',
       parseOutlineJson(content, {
+        paper_title: latestOutline.paper_title || '',
+        research_question: latestOutline.research_question || '',
         outline: content,
         target_words: latestOutline.target_words,
         citation_style: latestOutline.citation_style,
       }),
+      {
+        specialRequirements: task.special_requirements,
+        editInstruction,
+      },
+    );
+    const parsed = await repairOutlineReadiness(
+      'outline_regeneration',
+      bulletFixed,
       {
         specialRequirements: task.special_requirements,
         editInstruction,
@@ -378,6 +652,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
         task_id: taskId,
         version: newVersion,
         content: parsed.outline,
+        paper_title: parsed.paper_title,
+        research_question: parsed.research_question,
         edit_instruction: editInstruction,
         target_words: parsed.target_words || latestOutline.target_words,
         citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
@@ -388,6 +664,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     await supabaseAdmin
       .from('tasks')
       .update({
+        paper_title: parsed.paper_title,
+        research_question: parsed.research_question,
         target_words: parsed.target_words || latestOutline.target_words,
         citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
         updated_at: new Date().toISOString(),

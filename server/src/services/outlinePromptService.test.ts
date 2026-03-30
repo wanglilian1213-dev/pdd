@@ -19,11 +19,15 @@ test('buildInitialOutlinePrompt includes outline length rules and JSON response 
   assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
   assert.match(prompt.systemPrompt, /each bullet point should stay on a single line starting with "- "/i);
   assert.match(prompt.systemPrompt, /"outline"/i);
+  assert.match(prompt.systemPrompt, /"paper_title"/i);
+  assert.match(prompt.systemPrompt, /"research_question"/i);
   assert.match(prompt.systemPrompt, /"target_words"/i);
   assert.match(prompt.systemPrompt, /"citation_style"/i);
   assert.match(prompt.systemPrompt, /extract the citation style from the material files and instructions/i);
   assert.match(prompt.systemPrompt, /return one final citation_style only/i);
   assert.match(prompt.systemPrompt, /do not combine multiple citation styles/i);
+  assert.match(prompt.systemPrompt, /generate a concrete english paper title/i);
+  assert.match(prompt.systemPrompt, /generate a concrete research question/i);
 
   assert.match(prompt.userPrompt, /Focus on urban logistics/i);
   assert.match(prompt.userPrompt, /read every uploaded material file/i);
@@ -43,6 +47,8 @@ test('buildRegenerateOutlinePrompt includes previous outline, old requirements, 
   assert.match(prompt.systemPrompt, /4000 words.*5 sections/i);
   assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
   assert.match(prompt.systemPrompt, /if older instructions and newer instructions conflict, decide the final target_words yourself/i);
+  assert.match(prompt.systemPrompt, /"paper_title"/i);
+  assert.match(prompt.systemPrompt, /"research_question"/i);
 
   assert.match(prompt.userPrompt, /I\. Introduction/);
   assert.match(prompt.userPrompt, /2500/);

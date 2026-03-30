@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AppError } from '../lib/errors';
 import { mapOutlineGenerationError } from './outlineService';
 import { normalizeCitationStyle } from './citationStyleService';
+import * as outlineService from './outlineService';
 
 test('mapOutlineGenerationError keeps existing AppError untouched', () => {
   const error = new AppError(400, '原始错误');
@@ -31,4 +32,65 @@ test('normalizeCitationStyle collapses mixed APA and Harvard wording into one fi
 
 test('normalizeCitationStyle keeps a plain single style unchanged', () => {
   assert.equal(normalizeCitationStyle('Harvard'), 'Harvard');
+});
+
+test('outline results with placeholder research questions or rubric-style titles are treated as invalid', () => {
+  const assess = (outlineService as Record<string, unknown>).assessOutlineReadiness as ((payload: {
+    paper_title?: string;
+    research_question?: string;
+    outline?: string;
+  }) => { valid: boolean; reasons: string[] }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!({
+    paper_title: 'Report Marking Criteria',
+    research_question: '[Research Question]',
+    outline: 'Introduction\n- Explain the issue\nBody\n- Discuss the factors',
+  });
+
+  assert.equal(result.valid, false);
+  assert.ok(result.reasons.some((reason) => /title/i.test(reason)));
+  assert.ok(result.reasons.some((reason) => /research question/i.test(reason)));
+});
+
+test('outline results with a concrete title and research question are treated as valid', () => {
+  const assess = (outlineService as Record<string, unknown>).assessOutlineReadiness as ((payload: {
+    paper_title?: string;
+    research_question?: string;
+    outline?: string;
+  }) => { valid: boolean; reasons: string[] }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!({
+    paper_title: 'Should Small Businesses Use AI for Strategy Writing?',
+    research_question: 'To what extent should small businesses rely on AI for strategic writing tasks?',
+    outline: 'Introduction\n- Define strategic writing\n- Explain the small-business context\n- State the thesis',
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.reasons, []);
+});
+
+test('outline results that only repeat an uploaded filename without extension are treated as invalid', () => {
+  const assess = (outlineService as Record<string, unknown>).assessOutlineReadiness as ((payload: {
+    paper_title?: string;
+    research_question?: string;
+    outline?: string;
+  }, options?: { blockedFileTitles?: string[] }) => { valid: boolean; reasons: string[] }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!(
+    {
+      paper_title: 'Task Brief',
+      research_question: 'How should small businesses use AI in strategic writing tasks?',
+      outline: 'Introduction\n- Define the topic\n- Explain the context\n- State the thesis',
+    },
+    { blockedFileTitles: ['Task Brief.pdf'] },
+  );
+
+  assert.equal(result.valid, false);
+  assert.ok(result.reasons.some((reason) => /title/i.test(reason)));
 });

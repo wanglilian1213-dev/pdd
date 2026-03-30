@@ -6,6 +6,7 @@ import {
   buildCitationVerificationSystemPrompt,
   storeGeneratedTaskFile,
 } from './writingService';
+import * as writingService from './writingService';
 
 test('buildDraftGenerationSystemPrompt includes the stronger first-draft writing rules', () => {
   const prompt = buildDraftGenerationSystemPrompt(2500, 'APA 7');
@@ -82,4 +83,59 @@ test('storeGeneratedTaskFile removes uploaded file if database insert fails', as
   );
 
   assert.deepEqual(removed, ['task-1/citation-report.pdf']);
+});
+
+test('drafts that refuse to answer are treated as repairable instead of deliverable', () => {
+  const assess = (writingService as Record<string, unknown>).assessGeneratedPaper as ((text: string) => {
+    valid: boolean;
+    shouldRepair: boolean;
+    reasons: string[];
+  }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!(
+    'Please provide the topic or exact research question. A full argumentative article cannot be written responsibly without it.',
+  );
+
+  assert.equal(result.valid, false);
+  assert.equal(result.shouldRepair, true);
+  assert.ok(result.reasons.some((reason) => /refusal/i.test(reason)));
+});
+
+test('drafts without in-text citations or references are treated as repairable instead of deliverable', () => {
+  const assess = (writingService as Record<string, unknown>).assessGeneratedPaper as ((text: string) => {
+    valid: boolean;
+    shouldRepair: boolean;
+    reasons: string[];
+  }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!(
+    'Artificial intelligence is reshaping managerial writing in small businesses. The argument remains descriptive and never cites any source.\n\nConclusion\nThe article ends here.',
+  );
+
+  assert.equal(result.valid, false);
+  assert.equal(result.shouldRepair, true);
+  assert.ok(result.reasons.some((reason) => /citation/i.test(reason)));
+  assert.ok(result.reasons.some((reason) => /references/i.test(reason)));
+});
+
+test('drafts with citations and a references section are treated as deliverable', () => {
+  const assess = (writingService as Record<string, unknown>).assessGeneratedPaper as ((text: string) => {
+    valid: boolean;
+    shouldRepair: boolean;
+    reasons: string[];
+  }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!(
+    'Artificial intelligence can improve strategic writing quality when managers use it as a drafting aid rather than a substitute for judgement (Smith, 2024).\n\nReferences\nSmith, J. (2024). Strategic writing and AI. https://example.com/article',
+  );
+
+  assert.equal(result.valid, true);
+  assert.equal(result.shouldRepair, false);
+  assert.deepEqual(result.reasons, []);
 });

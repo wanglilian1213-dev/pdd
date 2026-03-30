@@ -9,6 +9,8 @@ interface InitialOutlinePromptInput {
 
 interface RegenerateOutlinePromptInput {
   currentOutline: string;
+  currentPaperTitle?: string | null;
+  currentResearchQuestion?: string | null;
   currentTargetWords?: number | null;
   currentCitationStyle?: string | null;
   specialRequirements?: string | null;
@@ -17,15 +19,20 @@ interface RegenerateOutlinePromptInput {
 
 interface RepairOutlinePromptInput {
   currentOutline: string;
+  currentPaperTitle?: string | null;
+  currentResearchQuestion?: string | null;
   currentTargetWords?: number | null;
   currentCitationStyle?: string | null;
   specialRequirements?: string | null;
   editInstruction?: string | null;
   violationSummary: string;
+  qualityIssueSummary?: string | null;
 }
 
 const OUTLINE_RESPONSE_SCHEMA = `Respond with valid JSON only in this shape:
 {
+  "paper_title": "a concrete English paper title",
+  "research_question": "a concrete English research question",
   "outline": "the full outline text",
   "target_words": number,
   "citation_style": "string"
@@ -38,6 +45,9 @@ const OUTLINE_PLANNING_RULES = `Outline planning rules:
 - Introduction and Conclusion count within the total section count.
 - Every section must contain between 3 and 5 bullet points.
 - Each bullet point should stay on a single line starting with "- ".
+- Generate a concrete English paper title that can be used directly as the final delivery title.
+- Generate a concrete research question.
+- Never use rubric names, file names, scoring guide names, or placeholders as the final paper title.
 - Extract the citation style from the material files and instructions, then return one final citation_style only.
 - Do not combine multiple citation styles into one label.
 - If one source gives a broad family and another gives a more specific format inside that family, return the more specific final format.
@@ -82,6 +92,12 @@ export function buildRegenerateOutlinePrompt(input: RegenerateOutlinePromptInput
 Current outline:
 ${normalizeText(input.currentOutline)}
 
+Current paper title:
+${normalizeText(input.currentPaperTitle)}
+
+Current research question:
+${normalizeText(input.currentResearchQuestion)}
+
 Current target words:
 ${input.currentTargetWords ?? 'Unknown'}
 
@@ -112,6 +128,12 @@ ${OUTLINE_RESPONSE_SCHEMA}`,
 Current outline:
 ${normalizeText(input.currentOutline)}
 
+Current paper title:
+${normalizeText(input.currentPaperTitle)}
+
+Current research question:
+${normalizeText(input.currentResearchQuestion)}
+
 Current target words:
 ${input.currentTargetWords ?? 'Unknown'}
 
@@ -126,6 +148,9 @@ ${normalizeText(input.editInstruction)}
 
 Sections that must be fixed:
 ${input.violationSummary}
+
+Other quality issues that must be fixed:
+${normalizeText(input.qualityIssueSummary, 'None')}
 
 Rewrite the outline so every section follows the rule exactly. Keep the bullets concise, keep each bullet on one line starting with "- ", and return JSON only.`,
   };
