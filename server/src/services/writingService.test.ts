@@ -37,6 +37,16 @@ test('buildWordCalibrationSystemPrompt also forbids markdown-style output', () =
   assert.match(prompt, /2020 onwards/i);
 });
 
+test('buildWordCalibrationSystemPrompt enforces a strict main-body-only word range', () => {
+  const prompt = buildWordCalibrationSystemPrompt(1200, 1000, 'APA 7', 5);
+
+  assert.match(prompt, /main body word count/i);
+  assert.match(prompt, /title and references do not count/i);
+  assert.match(prompt, /900/i);
+  assert.match(prompt, /1100/i);
+  assert.match(prompt, /very strict rule, must follow/i);
+});
+
 test('buildCitationVerificationSystemPrompt also forbids markdown-style output', () => {
   const prompt = buildCitationVerificationSystemPrompt('APA 7', 10);
 
@@ -233,4 +243,80 @@ test('draft generation also has a timeout guard instead of hanging forever', asy
       return true;
     },
   );
+});
+
+test('countMainBodyWords ignores the title and references section', () => {
+  const countMainBodyWords = (writingServiceTestUtils as Record<string, unknown>).countMainBodyWords as
+    | ((text: string) => number)
+    | undefined;
+
+  assert.equal(typeof countMainBodyWords, 'function');
+
+  const text = [
+    'Essay Title',
+    '',
+    'This paragraph totals exactly six words.',
+    '',
+    'References',
+    'Smith, J. (2024). Example article. https://example.com',
+  ].join('\n');
+
+  assert.equal(countMainBodyWords!(text), 6);
+});
+
+test('runWordCalibrationAttempts retries up to five times and stops once the body word count is in range', async () => {
+  const runWordCalibrationAttempts = (writingServiceTestUtils as Record<string, unknown>).runWordCalibrationAttempts as
+    | ((options: {
+        initialText: string;
+        targetWords: number;
+        maxAttempts?: number;
+        rewrite: (text: string, attempt: number) => Promise<string>;
+      }) => Promise<{ text: string; attemptsUsed: number; withinRange: boolean }>)
+    | undefined;
+
+  assert.equal(typeof runWordCalibrationAttempts, 'function');
+
+  const attempts: number[] = [];
+  const result = await runWordCalibrationAttempts!({
+    initialText: 'Title\n\n' + 'word '.repeat(1400) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com',
+    targetWords: 1000,
+    rewrite: async (_text, attempt) => {
+      attempts.push(attempt);
+      if (attempt < 3) {
+        return 'Title\n\n' + 'word '.repeat(1300) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com';
+      }
+      return 'Title\n\n' + 'word '.repeat(1000) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com';
+    },
+  });
+
+  assert.deepEqual(attempts, [1, 2, 3]);
+  assert.equal(result.attemptsUsed, 3);
+  assert.equal(result.withinRange, true);
+});
+
+test('runWordCalibrationAttempts returns the fifth rewrite even when body word count still misses the strict range', async () => {
+  const runWordCalibrationAttempts = (writingServiceTestUtils as Record<string, unknown>).runWordCalibrationAttempts as
+    | ((options: {
+        initialText: string;
+        targetWords: number;
+        maxAttempts?: number;
+        rewrite: (text: string, attempt: number) => Promise<string>;
+      }) => Promise<{ text: string; attemptsUsed: number; withinRange: boolean }>)
+    | undefined;
+
+  assert.equal(typeof runWordCalibrationAttempts, 'function');
+
+  const attempts: number[] = [];
+  const result = await runWordCalibrationAttempts!({
+    initialText: 'Title\n\n' + 'word '.repeat(1600) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com',
+    targetWords: 1000,
+    rewrite: async (_text, attempt) => {
+      attempts.push(attempt);
+      return 'Title\n\n' + 'word '.repeat(1300) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com';
+    },
+  });
+
+  assert.deepEqual(attempts, [1, 2, 3, 4, 5]);
+  assert.equal(result.attemptsUsed, 5);
+  assert.equal(result.withinRange, false);
 });

@@ -22,6 +22,7 @@ import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 export const assessGeneratedPaper = assessGeneratedPaperInternal;
 const REWRITE_STAGE_TIMEOUT_MS = 60_000;
 const DRAFT_GENERATION_TIMEOUT_MS = 600_000;
+const WORD_CALIBRATION_MAX_ATTEMPTS = 5;
 
 interface WritingContextInput {
   taskId: string;
@@ -105,10 +106,113 @@ async function withDraftGenerationTimeout<T>(
   return withRewriteStageTimeout('draft_generation', operation, timeoutMs);
 }
 
+function getWordCountRange(targetWords: number) {
+  return {
+    minWords: Math.floor(targetWords * 0.9),
+    maxWords: Math.ceil(targetWords * 1.1),
+  };
+}
+
+function stripLeadingTitleLine(text: string) {
+  const lines = text
+    .replace(/\r\n/g, '\n')
+    .split('\n');
+
+  while (lines.length > 0 && !lines[0]!.trim()) {
+    lines.shift();
+  }
+
+  const firstLine = lines[0]?.trim() || '';
+  const nextNonEmptyLine = lines.slice(1).find((line) => line.trim())?.trim() || '';
+  const looksLikeTitle = !!firstLine
+    && firstLine.length <= 160
+    && firstLine.split(/\s+/).length <= 25
+    && !/[.?!]$/.test(firstLine)
+    && !/\((19|20)\d{2}[a-z]?\)/.test(firstLine)
+    && !!nextNonEmptyLine;
+
+  if (looksLikeTitle) {
+    lines.shift();
+  }
+
+  return lines.join('\n').trim();
+}
+
+function extractMainBodyText(text: string) {
+  const withoutTitle = stripLeadingTitleLine(String(text || '').trim());
+  const lines = withoutTitle.replace(/\r\n/g, '\n').split('\n');
+  const referenceHeadingIndex = lines.findIndex((line) => /^(references|reference list|bibliography|works cited)\s*$/i.test(line.trim()));
+
+  const bodyLines = referenceHeadingIndex >= 0 ? lines.slice(0, referenceHeadingIndex) : lines;
+  return bodyLines.join('\n').trim();
+}
+
+function countMainBodyWords(text: string) {
+  return extractMainBodyText(text)
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .length;
+}
+
+function isMainBodyWordCountWithinRange(text: string, targetWords: number) {
+  const { minWords, maxWords } = getWordCountRange(targetWords);
+  const mainBodyWordCount = countMainBodyWords(text);
+
+  return {
+    mainBodyWordCount,
+    minWords,
+    maxWords,
+    withinRange: mainBodyWordCount >= minWords && mainBodyWordCount <= maxWords,
+  };
+}
+
+async function runWordCalibrationAttempts(options: {
+  initialText: string;
+  targetWords: number;
+  maxAttempts?: number;
+  rewrite: (text: string, attempt: number) => Promise<string>;
+}) {
+  let latestText = options.initialText;
+  const maxAttempts = options.maxAttempts || WORD_CALIBRATION_MAX_ATTEMPTS;
+  const initialRange = isMainBodyWordCountWithinRange(latestText, options.targetWords);
+
+  if (initialRange.withinRange) {
+    return {
+      text: latestText,
+      attemptsUsed: 0,
+      ...initialRange,
+    };
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    latestText = await options.rewrite(latestText, attempt);
+    const range = isMainBodyWordCountWithinRange(latestText, options.targetWords);
+    if (range.withinRange) {
+      return {
+        text: latestText,
+        attemptsUsed: attempt,
+        ...range,
+      };
+    }
+  }
+
+  const finalRange = isMainBodyWordCountWithinRange(latestText, options.targetWords);
+  return {
+    text: latestText,
+    attemptsUsed: maxAttempts,
+    ...finalRange,
+  };
+}
+
 export const writingServiceTestUtils = {
   withRewriteStageTimeout,
   withDraftGenerationTimeout,
   isWritingStageTimeoutError,
+  getWordCountRange,
+  countMainBodyWords,
+  isMainBodyWordCountWithinRange,
+  runWordCalibrationAttempts,
 };
 
 function deriveWritingTaskRequirements(task: {
@@ -341,7 +445,13 @@ export function buildWordCalibrationSystemPrompt(
   citationStyle: string,
   requiredReferenceCount: number,
 ) {
-  return `You are an academic writing editor. The current paper has ${currentWords} words but the target is ${targetWords} words. ${currentWords < targetWords ? 'Expand' : 'Condense'} the paper to approximately ${targetWords} words while maintaining quality and coherence.
+  const { minWords, maxWords } = getWordCountRange(targetWords);
+
+  return `You are an academic writing editor. The current main body word count is ${currentWords} words. The target main body word count is ${targetWords} words, and the allowed range is ${minWords} to ${maxWords} words. ${currentWords < minWords ? 'Expand' : 'Condense'} the paper so the main body falls inside that exact range while maintaining quality and coherence.
+This calibration is for the main body word count only.
+The title and references do not count toward the target word count.
+The main body must land within ${minWords}-${maxWords} words.
+This is a very strict rule, must follow.
 Keep ${citationStyle} citation style.
 Keep at least ${requiredReferenceCount} references.
 All references must be from 2020 onwards.
@@ -548,90 +658,101 @@ async function calibrateWordCount(
   requiredReferenceCount: number,
   versionBase = 0,
 ): Promise<string> {
-  const currentWords = draft.split(/\s+/).filter(Boolean).length;
-  const tolerance = 0.1;
+  const initialRange = isMainBodyWordCountWithinRange(draft, targetWords);
 
-  if (Math.abs(currentWords - targetWords) / targetWords <= tolerance) {
+  if (initialRange.withinRange) {
     await supabaseAdmin.from('document_versions').insert({
       task_id: taskId,
       version: versionBase + 2,
       stage: 'calibrated',
-      word_count: currentWords,
+      word_count: initialRange.mainBodyWordCount,
       content: draft,
     });
     return draft;
   }
 
-  let calibrated = draft;
+  const calibrationResult = await runWordCalibrationAttempts({
+    initialText: draft,
+    targetWords,
+    maxAttempts: WORD_CALIBRATION_MAX_ATTEMPTS,
+    rewrite: async (currentText) => {
+      const currentWords = countMainBodyWords(currentText);
+      let calibrated = currentText;
 
-  try {
-    const response = await withRewriteStageTimeout(
-      'word_calibration',
-      openai.responses.create({
-        ...buildMainOpenAIResponsesOptions('word_calibration'),
-        input: [
-          {
-            role: 'system',
-            content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
-          },
-          {
-            role: 'user',
-            content: draft,
-          },
-        ],
-      }),
-    );
+      try {
+        const response = await withRewriteStageTimeout(
+          'word_calibration',
+          openai.responses.create({
+            ...buildMainOpenAIResponsesOptions('word_calibration'),
+            input: [
+              {
+                role: 'system',
+                content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
+              },
+              {
+                role: 'user',
+                content: currentText,
+              },
+            ],
+          }),
+        );
 
-    calibrated = typeof response.output_text === 'string' ? response.output_text : draft;
-  } catch (error) {
-    if (!isWritingStageTimeoutError(error)) {
-      throw error;
-    }
-  }
-  let assessment = assessGeneratedPaper(calibrated, {
-    requiredReferenceCount,
-    citationStyle,
-  });
+        calibrated = typeof response.output_text === 'string' ? response.output_text : currentText;
+      } catch (error) {
+        if (!isWritingStageTimeoutError(error)) {
+          throw error;
+        }
+      }
 
-  if (!assessment.valid) {
-    try {
-      const repairedResponse = await withRewriteStageTimeout(
-        'word_calibration',
-        openai.responses.create({
-          ...buildMainOpenAIResponsesOptions('word_calibration'),
-          input: [
-            {
-              role: 'system',
-              content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
-            },
-            {
-              role: 'user',
-              content: buildStageRepairUserPrompt({
-                lastGoodText: draft,
-                brokenText: calibrated,
-                reasons: assessment.reasons,
-                stage: 'word_calibration',
-              }),
-            },
-          ],
-        }),
-      );
-
-      const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : draft;
-      assessment = assessGeneratedPaper(repaired, {
+      let assessment = assessGeneratedPaper(calibrated, {
         requiredReferenceCount,
         citationStyle,
       });
-      calibrated = assessment.valid ? repaired : draft;
-    } catch (error) {
-      if (!isWritingStageTimeoutError(error)) {
-        throw error;
-      }
-      calibrated = draft;
-    }
-  }
 
-  const newWordCount = calibrated.split(/\s+/).filter(Boolean).length;
+      if (!assessment.valid) {
+        try {
+          const repairedResponse = await withRewriteStageTimeout(
+            'word_calibration',
+            openai.responses.create({
+              ...buildMainOpenAIResponsesOptions('word_calibration'),
+              input: [
+                {
+                  role: 'system',
+                  content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
+                },
+                {
+                  role: 'user',
+                  content: buildStageRepairUserPrompt({
+                    lastGoodText: currentText,
+                    brokenText: calibrated,
+                    reasons: assessment.reasons,
+                    stage: 'word_calibration',
+                  }),
+                },
+              ],
+            }),
+          );
+
+          const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : currentText;
+          assessment = assessGeneratedPaper(repaired, {
+            requiredReferenceCount,
+            citationStyle,
+          });
+          calibrated = assessment.valid ? repaired : currentText;
+        } catch (error) {
+          if (!isWritingStageTimeoutError(error)) {
+            throw error;
+          }
+          calibrated = currentText;
+        }
+      }
+
+      return calibrated;
+    },
+  });
+
+  const calibrated = calibrationResult.text;
+  const newWordCount = calibrationResult.mainBodyWordCount;
 
   await supabaseAdmin.from('document_versions').insert({
     task_id: taskId,
