@@ -94,3 +94,38 @@ test('outline results that only repeat an uploaded filename without extension ar
   assert.equal(result.valid, false);
   assert.ok(result.reasons.some((reason) => /title/i.test(reason)));
 });
+
+test('outline results with three multiline sections stay valid when three sections are required', () => {
+  const assess = (outlineService as Record<string, unknown>).assessOutlineReadiness as ((payload: {
+    paper_title?: string;
+    research_question?: string;
+    outline?: string;
+  }, options?: { requiredSectionCount?: number }) => { valid: boolean; reasons: string[] }) | undefined;
+
+  assert.equal(typeof assess, 'function');
+
+  const result = assess!(
+    {
+      paper_title: 'Social Media Use and Adolescent Mental Health: Risks, Benefits, and Policy Responses',
+      research_question: 'To what extent does social media use affect adolescent mental health, and what measures can families, schools, platforms, and policymakers take to reduce harm?',
+      outline: [
+        'Introduction',
+        '- Explain why adolescent mental health is a growing public concern.',
+        '- Introduce social media as both a risk factor and a source of support.',
+        '- State the thesis and the focus of the discussion.',
+        'Main Body: Effects, Causes, and Responses',
+        '- Analyse the negative mental health risks associated with intensive social media use.',
+        '- Consider arguments about the benefits of social media for connection and support.',
+        '- Evaluate policy, family, school, and platform responses that may reduce harm.',
+        'Conclusion',
+        '- Summarise the overall argument about risks, benefits, and responses.',
+        '- Reaffirm the thesis in relation to the research question.',
+        '- Highlight the most effective practical response.',
+      ].join('\n'),
+    },
+    { requiredSectionCount: 3 },
+  );
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.reasons, []);
+});

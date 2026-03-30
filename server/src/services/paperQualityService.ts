@@ -247,6 +247,7 @@ export function assessOutlineReadiness(
   const reasons: string[] = [];
   const paperTitle = normalize(payload.paper_title);
   const researchQuestion = normalize(payload.research_question);
+  const rawOutline = String(payload.outline || '').trim();
   const outline = normalize(payload.outline);
   const blockedFileTitles = (options.blockedFileTitles || []).map((value) => normalize(value)).filter(Boolean);
 
@@ -268,8 +269,8 @@ export function assessOutlineReadiness(
     reasons.push('outline still contains placeholder text');
   }
 
-  if (outline && typeof options.requiredSectionCount === 'number') {
-    const sectionCount = getOutlineSectionCount(outline);
+  if (rawOutline && typeof options.requiredSectionCount === 'number') {
+    const sectionCount = getOutlineSectionCount(rawOutline);
     if (sectionCount !== options.requiredSectionCount) {
       reasons.push(`section count mismatch (${sectionCount}/${options.requiredSectionCount})`);
     }
