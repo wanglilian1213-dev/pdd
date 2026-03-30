@@ -5,6 +5,7 @@ import {
   buildWordCalibrationSystemPrompt,
   buildCitationVerificationSystemPrompt,
   storeGeneratedTaskFile,
+  writingServiceTestUtils,
 } from './writingService';
 import * as writingService from './writingService';
 
@@ -138,4 +139,29 @@ test('drafts with citations and a references section are treated as deliverable'
   assert.equal(result.valid, true);
   assert.equal(result.shouldRepair, false);
   assert.deepEqual(result.reasons, []);
+});
+
+test('withRewriteStageTimeout returns the original result when the stage finishes in time', async () => {
+  const result = await writingServiceTestUtils.withRewriteStageTimeout(
+    'citation_verification',
+    Promise.resolve('ok'),
+    20,
+  );
+
+  assert.equal(result, 'ok');
+});
+
+test('withRewriteStageTimeout raises a timeout error when the stage takes too long', async () => {
+  await assert.rejects(
+    () =>
+      writingServiceTestUtils.withRewriteStageTimeout(
+        'citation_verification',
+        new Promise<string>(() => {}),
+        5,
+      ),
+    (error: unknown) => {
+      assert.equal(writingServiceTestUtils.isWritingStageTimeoutError(error), true);
+      return true;
+    },
+  );
 });

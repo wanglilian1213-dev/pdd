@@ -15,6 +15,7 @@ import {
 } from './citationReportTemplateService';
 
 export const assessGeneratedPaper = assessGeneratedPaperInternal;
+const REWRITE_STAGE_TIMEOUT_MS = 60_000;
 
 interface WritingContextInput {
   taskId: string;
@@ -57,6 +58,43 @@ interface StoreGeneratedTaskFileDeps {
   }) => Promise<{ error: Error | null }>;
   removeFromStorage: (storagePath: string) => Promise<void>;
 }
+
+class WritingStageTimeoutError extends Error {
+  constructor(stage: 'word_calibration' | 'citation_verification', timeoutMs: number) {
+    super(`${stage} timed out after ${timeoutMs}ms`);
+    this.name = 'WritingStageTimeoutError';
+  }
+}
+
+async function withRewriteStageTimeout<T>(
+  stage: 'word_calibration' | 'citation_verification',
+  operation: Promise<T>,
+  timeoutMs = REWRITE_STAGE_TIMEOUT_MS,
+): Promise<T> {
+  let timeoutId: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new WritingStageTimeoutError(stage, timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function isWritingStageTimeoutError(error: unknown) {
+  return error instanceof WritingStageTimeoutError;
+}
+
+export const writingServiceTestUtils = {
+  withRewriteStageTimeout,
+  isWritingStageTimeoutError,
+};
 
 export async function storeGeneratedTaskFile(
   payload: GeneratedTaskFilePayload,
@@ -425,46 +463,67 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
     return draft;
   }
 
-  const response = await openai.responses.create({
-    ...buildMainOpenAIResponsesOptions('word_calibration'),
-    input: [
-      {
-        role: 'system',
-        content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
-      },
-      {
-        role: 'user',
-        content: draft,
-      },
-    ],
-  });
+  let calibrated = draft;
 
-  let calibrated = typeof response.output_text === 'string' ? response.output_text : draft;
+  try {
+    const response = await withRewriteStageTimeout(
+      'word_calibration',
+      openai.responses.create({
+        ...buildMainOpenAIResponsesOptions('word_calibration'),
+        input: [
+          {
+            role: 'system',
+            content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
+          },
+          {
+            role: 'user',
+            content: draft,
+          },
+        ],
+      }),
+    );
+
+    calibrated = typeof response.output_text === 'string' ? response.output_text : draft;
+  } catch (error) {
+    if (!isWritingStageTimeoutError(error)) {
+      throw error;
+    }
+  }
   let assessment = assessGeneratedPaper(calibrated);
 
   if (!assessment.valid) {
-    const repairedResponse = await openai.responses.create({
-      ...buildMainOpenAIResponsesOptions('word_calibration'),
-      input: [
-        {
-          role: 'system',
-          content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
-        },
-        {
-          role: 'user',
-          content: buildStageRepairUserPrompt({
-            lastGoodText: draft,
-            brokenText: calibrated,
-            reasons: assessment.reasons,
-            stage: 'word_calibration',
-          }),
-        },
-      ],
-    });
+    try {
+      const repairedResponse = await withRewriteStageTimeout(
+        'word_calibration',
+        openai.responses.create({
+          ...buildMainOpenAIResponsesOptions('word_calibration'),
+          input: [
+            {
+              role: 'system',
+              content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
+            },
+            {
+              role: 'user',
+              content: buildStageRepairUserPrompt({
+                lastGoodText: draft,
+                brokenText: calibrated,
+                reasons: assessment.reasons,
+                stage: 'word_calibration',
+              }),
+            },
+          ],
+        }),
+      );
 
-    const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : draft;
-    assessment = assessGeneratedPaper(repaired);
-    calibrated = assessment.valid ? repaired : draft;
+      const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : draft;
+      assessment = assessGeneratedPaper(repaired);
+      calibrated = assessment.valid ? repaired : draft;
+    } catch (error) {
+      if (!isWritingStageTimeoutError(error)) {
+        throw error;
+      }
+      calibrated = draft;
+    }
   }
 
   const newWordCount = calibrated.split(/\s+/).filter(Boolean).length;
@@ -481,46 +540,67 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
 }
 
 async function verifyCitations(taskId: string, text: string, citationStyle: string, versionBase = 0): Promise<string> {
-  const response = await openai.responses.create({
-    ...buildMainOpenAIResponsesOptions('citation_verification'),
-    input: [
-      {
-        role: 'system',
-        content: buildCitationVerificationSystemPrompt(citationStyle),
-      },
-      {
-        role: 'user',
-        content: text,
-      },
-    ],
-  });
+  let verified = text;
 
-  let verified = typeof response.output_text === 'string' ? response.output_text : text;
+  try {
+    const response = await withRewriteStageTimeout(
+      'citation_verification',
+      openai.responses.create({
+        ...buildMainOpenAIResponsesOptions('citation_verification'),
+        input: [
+          {
+            role: 'system',
+            content: buildCitationVerificationSystemPrompt(citationStyle),
+          },
+          {
+            role: 'user',
+            content: text,
+          },
+        ],
+      }),
+    );
+
+    verified = typeof response.output_text === 'string' ? response.output_text : text;
+  } catch (error) {
+    if (!isWritingStageTimeoutError(error)) {
+      throw error;
+    }
+  }
   let assessment = assessGeneratedPaper(verified);
 
   if (!assessment.valid) {
-    const repairedResponse = await openai.responses.create({
-      ...buildMainOpenAIResponsesOptions('citation_verification'),
-      input: [
-        {
-          role: 'system',
-          content: buildCitationVerificationSystemPrompt(citationStyle),
-        },
-        {
-          role: 'user',
-          content: buildStageRepairUserPrompt({
-            lastGoodText: text,
-            brokenText: verified,
-            reasons: assessment.reasons,
-            stage: 'citation_verification',
-          }),
-        },
-      ],
-    });
+    try {
+      const repairedResponse = await withRewriteStageTimeout(
+        'citation_verification',
+        openai.responses.create({
+          ...buildMainOpenAIResponsesOptions('citation_verification'),
+          input: [
+            {
+              role: 'system',
+              content: buildCitationVerificationSystemPrompt(citationStyle),
+            },
+            {
+              role: 'user',
+              content: buildStageRepairUserPrompt({
+                lastGoodText: text,
+                brokenText: verified,
+                reasons: assessment.reasons,
+                stage: 'citation_verification',
+              }),
+            },
+          ],
+        }),
+      );
 
-    const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : text;
-    assessment = assessGeneratedPaper(repaired);
-    verified = assessment.valid ? repaired : text;
+      const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : text;
+      assessment = assessGeneratedPaper(repaired);
+      verified = assessment.valid ? repaired : text;
+    } catch (error) {
+      if (!isWritingStageTimeoutError(error)) {
+        throw error;
+      }
+      verified = text;
+    }
   }
 
   const wordCount = verified.split(/\s+/).filter(Boolean).length;
