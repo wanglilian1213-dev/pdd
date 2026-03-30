@@ -1,5 +1,7 @@
 # Document Delivery Format Implementation Plan
 
+> **Update on 2026-03-30:** This older implementation note now needs to be read together with `docs/plans/2026-03-30-cover-reference-pdf.md`. The current real behavior already includes: automatic course-code extraction, a dedicated cover page, body starting on page 2, `Reference` on a new page, task-title-based Word filenames, and PDF report re-layout to avoid long-text overlap.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Deliver a properly formatted Word paper and a professional PDF citation validation report instead of the current plain-text style outputs.

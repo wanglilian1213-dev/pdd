@@ -95,6 +95,10 @@ npx -y @aisuite/chub annotate --list
 - 业务接口：Railway 上的 Express 服务
 - AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
+- 交付排版规则：最终正文 `Word` 必须自动套固定论文模板，第 1 页是封面（课号 + 任务标题），正文从第 2 页开始，`Reference` 必须另起一页，正文和参考文献统一 `Times New Roman 12`、`1.5 倍行距`
+- 课号规则：不加新的输入框；系统在第一次生成大纲时自动从任务标题、特殊要求、材料文件里提取课号，提不出来就留空继续
+- 文件命名规则：最终正文下载文件名固定用任务标题；只做文件名安全清洗，不改封面上显示的标题文字
+- 核验报告规则：引用核验报告继续交付 `PDF`，但必须按真实内容自动长高和分页，不能再出现文字重叠、压线、卡片高度写死的问题
 - 工作台状态规则：第 6 步只是“交付阶段”，只有真正 `completed + completed` 才算交付完成；`delivering + processing` 仍然要继续轮询并显示“正在整理交付文件”
 - 下载规则：任务列表里的单个“下载”按钮固定代表“下载主文稿”，优先顺序是 `humanized_doc` → `final_doc` → `citation_report`
 - 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败

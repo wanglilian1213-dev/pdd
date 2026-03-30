@@ -40,6 +40,16 @@ interface StoreGeneratedTaskFileDeps {
   removeFromStorage: (storagePath: string) => Promise<void>;
 }
 
+function sanitizeFilenameBase(value: string | null | undefined, fallback: string) {
+  const trimmed = String(value || '').trim();
+  const safe = trimmed
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return safe || fallback;
+}
+
 export async function storeGeneratedTaskFile(
   payload: GeneratedTaskFilePayload,
   deps: StoreGeneratedTaskFileDeps = {
@@ -296,6 +306,8 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
   const retentionDays = (await getConfig('result_file_retention_days')) || 3;
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + retentionDays);
+  const displayTitle = String(task.title || '').trim() || 'Academic Essay';
+  const safeFileTitle = sanitizeFilenameBase(displayTitle, 'Academic Essay');
 
   await supabaseAdmin.from('document_versions').insert({
     task_id: taskId,
@@ -305,13 +317,17 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     content: finalText,
   });
 
-  const docBuffer = await buildFormattedPaperDocBuffer(finalText);
-  const docPath = `${taskId}/final-paper.docx`;
+  const docBuffer = await buildFormattedPaperDocBuffer(finalText, {
+    paperTitle: displayTitle,
+    courseCode: task.course_code,
+  });
+  const finalDocName = `${safeFileTitle}.docx`;
+  const docPath = `${taskId}/${finalDocName}`;
 
   await storeGeneratedTaskFile({
     taskId,
     category: 'final_doc',
-    originalName: 'final-paper.docx',
+    originalName: finalDocName,
     storagePath: docPath,
     fileSize: docBuffer.length,
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -319,12 +335,12 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     body: docBuffer,
   });
 
-  const citationReport = await generateCitationReport(finalText, task.citation_style, task.title || 'Academic Essay');
+  const citationReport = await generateCitationReport(finalText, task.citation_style, displayTitle);
   const reportBuffer = await renderCitationReportPdf({
     citationStyle: task.citation_style,
     reportId: buildCitationReportId(new Date()),
     generatedAt: new Date().toISOString().slice(0, 10),
-    essayTitle: task.title || 'Academic Essay',
+    essayTitle: displayTitle,
     ...citationReport,
   });
   const reportPath = `${taskId}/citation-report.pdf`;

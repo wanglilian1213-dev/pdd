@@ -1,0 +1,2 @@
+ALTER TABLE tasks
+ADD COLUMN IF NOT EXISTS course_code TEXT;

@@ -241,16 +241,46 @@ function statusColor(status: CitationStatus | CriterionStatus) {
   }
 }
 
+const PAGE_LEFT = 50;
+const CONTENT_WIDTH = 495;
+const SECTION_GAP = 18;
+
+function drawTextHeight(doc: PDFKit.PDFDocument, text: string, width: number, font = 'Helvetica', fontSize = 10) {
+  return doc.font(font).fontSize(fontSize).heightOfString(text, { width, align: 'left' });
+}
+
+function drawSectionTitle(doc: PDFKit.PDFDocument, title: string) {
+  ensureSpace(doc, 28);
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(15)
+    .fillColor(COLORS.text)
+    .text(title, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+  doc.moveDown(0.5);
+}
+
+function drawMetricCard(doc: PDFKit.PDFDocument, x: number, y: number, width: number, title: string, value: string, accent: string) {
+  drawRoundedCard(doc, x, y, width, 72, COLORS.white);
+  doc.save();
+  doc.roundedRect(x, y, width, 72, 14).stroke(COLORS.border);
+  doc.restore();
+  doc.save();
+  doc.roundedRect(x, y, width, 6, 6).fill(accent);
+  doc.restore();
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9).text(title, x + 14, y + 18, { width: width - 28 });
+  doc.fillColor(COLORS.text).font('Helvetica-Bold').fontSize(18).text(value, x + 14, y + 36, { width: width - 28 });
+}
+
 function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
   doc.save();
-  doc.rect(0, 0, doc.page.width, 88).fill(COLORS.navy);
+  doc.rect(0, 0, doc.page.width, 92).fill(COLORS.navy);
   doc.restore();
 
   doc
     .fillColor(COLORS.white)
     .font('Helvetica-Bold')
     .fontSize(20)
-    .text('VeritasScan', 50, 28);
+    .text('VeritasScan', PAGE_LEFT, 28, { width: 220 });
 
   doc
     .font('Helvetica')
@@ -260,163 +290,243 @@ function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
       align: 'center',
     });
 
-  doc.y = 112;
+  doc.y = 116;
   doc
     .fillColor(COLORS.text)
     .font('Helvetica-Bold')
     .fontSize(22)
-    .text('Academic Misconduct Risk Assessment Report');
+    .text('Academic Misconduct Risk Assessment Report', PAGE_LEFT, doc.y, {
+      width: CONTENT_WIDTH,
+    });
+  doc.moveDown(0.2);
   doc
-    .moveDown(0.2)
     .font('Helvetica')
     .fontSize(10)
     .fillColor(COLORS.muted)
-    .text(`Report generated on ${data.generatedAt}`);
-  doc
-    .moveDown(0.2)
-    .text(`Essay title: ${data.essayTitle}`);
-  doc
-    .moveDown(0.2)
-    .text(`Citation style reviewed: ${data.citationStyle}`);
+    .text(`Report generated on ${data.generatedAt}`, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+  doc.moveDown(0.15);
+  doc.text(`Essay title: ${data.essayTitle}`, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
+  doc.moveDown(0.15);
+  doc.text(`Citation style reviewed: ${data.citationStyle}`, PAGE_LEFT, doc.y, { width: CONTENT_WIDTH });
   doc.moveDown(1);
 }
 
 function renderExecutiveSummary(doc: PDFKit.PDFDocument, data: CitationReportData) {
-  ensureSpace(doc, 180);
+  const findingsHeight = data.keyFindings
+    .slice(0, 4)
+    .reduce((sum, finding) => sum + drawTextHeight(doc, `• ${finding}`, 220, 'Helvetica', 10) + 6, 0);
+  const cardHeight = Math.max(190, 112 + findingsHeight);
+  ensureSpace(doc, cardHeight + 8);
   const top = doc.y;
-  drawRoundedCard(doc, 50, top, 495, 140, COLORS.softBlue);
+
+  drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, COLORS.softBlue);
+  doc.save();
+  doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, 14).stroke(COLORS.border);
+  doc.restore();
 
   doc
-    .fillColor(COLORS.text)
     .font('Helvetica-Bold')
     .fontSize(16)
-    .text('Executive Summary', 70, top + 18);
-
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(28)
-    .fillColor(COLORS.indigo)
-    .text(`${data.overallScore}%`, 75, top + 55);
-
-  doc
-    .font('Helvetica')
-    .fontSize(11)
-    .fillColor(COLORS.muted)
-    .text('Overall validation score', 78, top + 92);
-
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(12)
     .fillColor(COLORS.text)
-    .text(`Total citations: ${data.totalCitations}`, 210, top + 52);
+    .text('Executive Summary', PAGE_LEFT + 20, top + 18);
+
+  drawMetricCard(doc, PAGE_LEFT + 20, top + 52, 120, 'Overall score', `${data.overallScore}%`, COLORS.indigo);
+  drawMetricCard(doc, PAGE_LEFT + 156, top + 52, 120, 'Total citations', String(data.totalCitations), COLORS.success);
+  drawMetricCard(doc, PAGE_LEFT + 292, top + 52, 120, 'Reliability', data.reliabilityLabel, statusColor(data.reliabilityLabel.toLowerCase() as CitationStatus));
+
+  let findingsY = top + 52;
   doc
     .font('Helvetica-Bold')
-    .fontSize(12)
-    .text(`Reliability: ${data.reliabilityLabel}`, 210, top + 74);
+    .fontSize(11)
+    .fillColor(COLORS.text)
+    .text('Key findings', PAGE_LEFT + 430, findingsY, { width: 95 });
+  findingsY += 20;
 
-  let findingsY = top + 30;
-  for (const finding of data.keyFindings.slice(0, 3)) {
+  for (const finding of data.keyFindings.slice(0, 4)) {
+    const bullet = `• ${finding}`;
+    const height = drawTextHeight(doc, bullet, 95, 'Helvetica', 9);
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor(COLORS.text)
+      .text(bullet, PAGE_LEFT + 430, findingsY, { width: 95 });
+    findingsY += height + 6;
+  }
+
+  doc.y = top + cardHeight + SECTION_GAP;
+}
+
+function renderBreakdownTable(doc: PDFKit.PDFDocument, data: CitationReportData) {
+  drawSectionTitle(doc, 'Validation Overview');
+
+  const startX = PAGE_LEFT;
+  const widths = [205, 50, 72, 96, 72];
+  const headers = ['Category', 'Count', 'Percentage', 'Visual Bar', 'Status'];
+
+  const renderHeaderRow = () => {
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(COLORS.muted);
+    let x = startX;
+    headers.forEach((header, index) => {
+      doc.text(header, x, doc.y, { width: widths[index] });
+      x += widths[index];
+    });
+    doc.moveDown(0.6);
+  };
+
+  renderHeaderRow();
+
+  data.breakdown.forEach((row, index) => {
+    const rowHeight = 26;
+    ensureSpace(doc, rowHeight + 6);
+    const y = doc.y;
+
+    if (index % 2 === 0) {
+      drawRoundedCard(doc, startX, y - 2, CONTENT_WIDTH, rowHeight, COLORS.light);
+    }
+
+    doc.font('Helvetica').fontSize(10).fillColor(COLORS.text);
+    doc.text(row.label, startX + 10, y + 6, { width: widths[0] - 10 });
+    doc.text(String(row.count), startX + widths[0], y + 6, { width: widths[1] });
+    doc.text(`${row.percentage}%`, startX + widths[0] + widths[1], y + 6, { width: widths[2] });
+
+    const barX = startX + widths[0] + widths[1] + widths[2];
+    doc.save();
+    doc.roundedRect(barX, y + 12, 80, 8, 4).fill('#E5EAF6');
+    doc.roundedRect(barX, y + 12, Math.max(4, row.percentage * 0.8), 8, 4).fill(statusColor(row.status));
+    doc.restore();
+
+    doc
+      .fillColor(statusColor(row.status))
+      .font('Helvetica-Bold')
+      .text(row.status.toUpperCase(), startX + widths[0] + widths[1] + widths[2] + widths[3], y + 6, {
+        width: widths[4],
+      });
+
+    doc.y = y + rowHeight + 4;
+  });
+
+  doc.moveDown(0.8);
+}
+
+function renderLabeledBox(doc: PDFKit.PDFDocument, label: string, text: string, options: { fillColor?: string; borderColor?: string } = {}) {
+  const height = 16 + drawTextHeight(doc, text, CONTENT_WIDTH - 32, 'Helvetica', 10) + 18;
+  ensureSpace(doc, height + 4);
+  const top = doc.y;
+  drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, height, options.fillColor || COLORS.white);
+  doc.save();
+  doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, height, 12).stroke(options.borderColor || COLORS.border);
+  doc.restore();
+  doc.font('Helvetica-Bold').fontSize(10).fillColor(COLORS.muted).text(label, PAGE_LEFT + 16, top + 12, { width: CONTENT_WIDTH - 32 });
+  doc.font('Helvetica').fontSize(10).fillColor(COLORS.text).text(text, PAGE_LEFT + 16, top + 30, { width: CONTENT_WIDTH - 32 });
+  doc.y = top + height + 8;
+}
+
+function renderCitationDetailTable(doc: PDFKit.PDFDocument, details: CitationDetail[]) {
+  const columnWidths = [110, 110, 165, 70];
+  const startX = PAGE_LEFT;
+
+  const renderTableHeader = () => {
+    ensureSpace(doc, 24);
+    const top = doc.y;
+    drawRoundedCard(doc, startX, top, CONTENT_WIDTH, 24, COLORS.light);
+    const headers = ['Criterion', 'Expected', 'Found', 'Status'];
+    let x = startX + 10;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.muted);
+    headers.forEach((header, index) => {
+      doc.text(header, x, top + 8, { width: columnWidths[index] - 10 });
+      x += columnWidths[index];
+    });
+    doc.y = top + 30;
+  };
+
+  renderTableHeader();
+
+  details.forEach((detail) => {
+    const cells = [
+      detail.criterion,
+      detail.expected,
+      detail.found,
+      detail.status.toUpperCase(),
+    ];
+    const rowHeight = Math.max(
+      22,
+      ...cells.map((cell, index) => drawTextHeight(
+        doc,
+        cell,
+        columnWidths[index] - 12,
+        index === 3 ? 'Helvetica-Bold' : 'Helvetica',
+        9,
+      ) + 12),
+    );
+
+    if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+      doc.addPage();
+      renderTableHeader();
+    }
+
+    const top = doc.y;
+    doc.save();
+    doc.roundedRect(startX, top, CONTENT_WIDTH, rowHeight, 8).fill(COLORS.white).stroke(COLORS.border);
+    doc.restore();
+
+    let x = startX + 10;
+    cells.forEach((cell, index) => {
+      doc
+        .font(index === 3 ? 'Helvetica-Bold' : 'Helvetica')
+        .fontSize(9)
+        .fillColor(index === 3 ? statusColor(detail.status) : COLORS.text)
+        .text(cell, x, top + 6, { width: columnWidths[index] - 12 });
+      x += columnWidths[index];
+    });
+
+    doc.y = top + rowHeight + 6;
+  });
+}
+
+function renderCitationSection(doc: PDFKit.PDFDocument, citation: CitationEntry, index: number) {
+  ensureSpace(doc, 48);
+  const headerTop = doc.y;
+  drawRoundedCard(doc, PAGE_LEFT, headerTop, CONTENT_WIDTH, 32, COLORS.indigo);
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(11)
+    .fillColor(COLORS.white)
+    .text(`Citation ${index + 1}: ${citation.citationLabel}`, PAGE_LEFT + 16, headerTop + 10, {
+      width: 350,
+    });
+  doc
+    .font('Helvetica-Bold')
+    .fontSize(16)
+    .fillColor(COLORS.white)
+    .text(`${citation.score}%`, PAGE_LEFT + 400, headerTop + 8, {
+      width: 70,
+      align: 'right',
+    });
+  doc.y = headerTop + 42;
+
+  renderLabeledBox(doc, 'Source text', citation.sourceText, { fillColor: COLORS.white });
+  renderLabeledBox(doc, 'Assessment', citation.assessment, { fillColor: COLORS.softBlue });
+  renderCitationDetailTable(doc, citation.details);
+  doc.moveDown(0.6);
+}
+
+function renderRecommendations(doc: PDFKit.PDFDocument, data: CitationReportData) {
+  drawSectionTitle(doc, 'Recommendations');
+
+  data.recommendations.forEach((recommendation) => {
+    const height = 16 + drawTextHeight(doc, `• ${recommendation}`, CONTENT_WIDTH - 32, 'Helvetica', 10) + 16;
+    ensureSpace(doc, height + 4);
+    const top = doc.y;
+    drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, height, COLORS.light);
+    doc.save();
+    doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, height, 12).stroke(COLORS.border);
+    doc.restore();
     doc
       .font('Helvetica')
       .fontSize(10)
       .fillColor(COLORS.text)
-      .text(`• ${finding}`, 335, findingsY, { width: 180 });
-    findingsY += 28;
-  }
-
-  doc.y = top + 160;
-}
-
-function renderBreakdownTable(doc: PDFKit.PDFDocument, data: CitationReportData) {
-  ensureSpace(doc, 160);
-  doc.font('Helvetica-Bold').fontSize(15).fillColor(COLORS.text).text('Validation Overview');
-  doc.moveDown(0.5);
-
-  const startX = 50;
-  const widths = [210, 60, 70, 80, 75];
-  const headers = ['Category', 'Count', 'Percentage', 'Visual Bar', 'Status'];
-  let x = startX;
-  doc.font('Helvetica-Bold').fontSize(10).fillColor(COLORS.muted);
-  headers.forEach((header, index) => {
-    doc.text(header, x, doc.y, { width: widths[index] });
-    x += widths[index];
-  });
-  doc.moveDown(0.8);
-
-  data.breakdown.forEach((row) => {
-    ensureSpace(doc, 28);
-    const rowY = doc.y;
-    doc.font('Helvetica').fontSize(10).fillColor(COLORS.text).text(row.label, startX, rowY, { width: widths[0] });
-    doc.text(String(row.count), startX + widths[0], rowY, { width: widths[1] });
-    doc.text(`${row.percentage}%`, startX + widths[0] + widths[1], rowY, { width: widths[2] });
-
-    const barX = startX + widths[0] + widths[1] + widths[2];
-    doc.save();
-    doc.roundedRect(barX, rowY + 4, 65, 8, 4).fill('#E5EAF6');
-    doc.roundedRect(barX, rowY + 4, Math.max(4, row.percentage * 0.65), 8, 4).fill(statusColor(row.status));
-    doc.restore();
-
-    doc.fillColor(statusColor(row.status)).text(row.status.toUpperCase(), startX + widths[0] + widths[1] + widths[2] + widths[3], rowY, { width: widths[4] });
-    doc.y = rowY + 22;
-  });
-
-  doc.moveDown(1);
-}
-
-function renderCitationCard(doc: PDFKit.PDFDocument, citation: CitationEntry, index: number) {
-  ensureSpace(doc, 200);
-  const top = doc.y;
-  const cardHeight = 150 + (citation.details.length * 18);
-  drawRoundedCard(doc, 50, top, 495, cardHeight, COLORS.white);
-  doc.save();
-  doc.roundedRect(50, top, 495, cardHeight, 14).stroke(COLORS.border);
-  doc.restore();
-
-  doc.save();
-  doc.roundedRect(50, top, 495, 26, 14).fill(COLORS.indigo);
-  doc.restore();
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(COLORS.white).text(`Citation ${index + 1}: ${citation.citationLabel}`, 64, top + 8);
-
-  let y = top + 38;
-  doc.fillColor(COLORS.text).font('Helvetica-Bold').fontSize(11).text('Source text', 64, y);
-  y += 16;
-  doc.font('Helvetica').fontSize(10).fillColor(COLORS.text).text(citation.sourceText, 64, y, { width: 360 });
-  doc.font('Helvetica-Bold').fontSize(22).fillColor(statusColor(citation.status)).text(`${citation.score}%`, 450, y - 10, { width: 70, align: 'right' });
-  y += 34;
-
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(COLORS.text).text('Assessment', 64, y);
-  y += 16;
-  doc.font('Helvetica').fontSize(10).text(citation.assessment, 64, y, { width: 460 });
-  y += 28;
-
-  doc.font('Helvetica-Bold').fontSize(10).fillColor(COLORS.muted).text('Criterion', 64, y);
-  doc.text('Expected', 190, y);
-  doc.text('Found', 320, y);
-  doc.text('Status', 470, y);
-  y += 16;
-
-  citation.details.forEach((detail) => {
-    doc.font('Helvetica').fontSize(9).fillColor(COLORS.text).text(detail.criterion, 64, y, { width: 110 });
-    doc.text(detail.expected, 190, y, { width: 110 });
-    doc.text(detail.found, 320, y, { width: 130 });
-    doc.fillColor(statusColor(detail.status)).text(detail.status.toUpperCase(), 470, y, { width: 50 });
-    y += 18;
-  });
-
-  doc.y = top + cardHeight + 18;
-}
-
-function renderRecommendations(doc: PDFKit.PDFDocument, data: CitationReportData) {
-  ensureSpace(doc, 140);
-  doc.font('Helvetica-Bold').fontSize(15).fillColor(COLORS.text).text('Recommendations');
-  doc.moveDown(0.5);
-
-  data.recommendations.forEach((recommendation) => {
-    ensureSpace(doc, 48);
-    const top = doc.y;
-    drawRoundedCard(doc, 50, top, 495, 36, COLORS.light);
-    doc.font('Helvetica').fontSize(10).fillColor(COLORS.text).text(`• ${recommendation}`, 64, top + 11, { width: 460 });
-    doc.y = top + 48;
+      .text(`• ${recommendation}`, PAGE_LEFT + 16, top + 12, { width: CONTENT_WIDTH - 32 });
+    doc.y = top + height + 8;
   });
 }
 
@@ -439,9 +549,8 @@ export async function renderCitationReportPdf(data: CitationReportData): Promise
     renderHeader(doc, data);
     renderExecutiveSummary(doc, data);
     renderBreakdownTable(doc, data);
-    doc.font('Helvetica-Bold').fontSize(15).fillColor(COLORS.text).text('Detailed Analysis');
-    doc.moveDown(0.5);
-    data.citations.forEach((citation, index) => renderCitationCard(doc, citation, index));
+    drawSectionTitle(doc, 'Detailed Analysis');
+    data.citations.forEach((citation, index) => renderCitationSection(doc, citation, index));
     renderRecommendations(doc, data);
     doc.end();
   });

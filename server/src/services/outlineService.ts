@@ -4,7 +4,11 @@ import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask } from './taskService';
 import { getConfig } from './configService';
 import { startWritingPipeline } from './writingService';
-import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialInputService';
+import {
+  buildMaterialContentFromStorage,
+  cleanupOpenAIFiles,
+  type MaterialInputPart,
+} from './materialInputService';
 import {
   confirmOutlineTaskAtomic,
   releaseOutlineEditAtomic,
@@ -16,6 +20,11 @@ import { normalizeCitationStyle } from './citationStyleService';
 import { validateTargetWords } from './requestValidationService';
 import { recordAuditLog } from './auditLogService';
 import { captureError } from '../lib/errorMonitor';
+import {
+  buildCourseCodeExtractionPrompt,
+  extractCourseCodeByRegex,
+  parseCourseCodeExtraction,
+} from './courseCodeService';
 import {
   ensureValidOutlineBulletCounts,
   formatOutlineBulletViolations,
@@ -129,6 +138,60 @@ export function mapOutlineGenerationError(err: unknown) {
   return new AppError(500, '大纲生成失败，请稍后重试。', detail);
 }
 
+async function extractCourseCodeForTask(options: {
+  taskTitle?: string | null;
+  specialRequirements?: string | null;
+  existingCourseCode?: string | null;
+  fileNames: string[];
+  materialParts: MaterialInputPart[];
+}) {
+  if (options.existingCourseCode) {
+    return options.existingCourseCode;
+  }
+
+  const regexResult = extractCourseCodeByRegex(
+    options.taskTitle,
+    options.specialRequirements,
+    ...options.fileNames,
+  );
+
+  if (regexResult) {
+    return regexResult;
+  }
+
+  const prompt = buildCourseCodeExtractionPrompt({
+    taskTitle: options.taskTitle,
+    specialRequirements: options.specialRequirements,
+    fileNames: options.fileNames,
+  });
+
+  try {
+    const response = await openai.responses.create({
+      ...buildMainOpenAIResponsesOptions('outline_generation'),
+      input: [
+        {
+          role: 'system',
+          content: prompt.systemPrompt,
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: prompt.userPrompt,
+            },
+            ...options.materialParts,
+          ],
+        },
+      ],
+    });
+
+    return parseCourseCodeExtraction(typeof response.output_text === 'string' ? response.output_text : '');
+  } catch {
+    return null;
+  }
+}
+
 export async function generateOutline(taskId: string, userId: string) {
   // 读取材料
   const { data: files } = await supabaseAdmin
@@ -144,7 +207,7 @@ export async function generateOutline(taskId: string, userId: string) {
 
   const { data: task } = await supabaseAdmin
     .from('tasks')
-    .select('special_requirements')
+    .select('title, special_requirements, course_code')
     .eq('id', taskId)
     .single();
 
@@ -154,6 +217,13 @@ export async function generateOutline(taskId: string, userId: string) {
   try {
     const materialContent = await buildMaterialContentFromStorage(files);
     uploadedFileIds = materialContent.uploadedFileIds;
+    const courseCode = await extractCourseCodeForTask({
+      taskTitle: task?.title,
+      specialRequirements: task?.special_requirements,
+      existingCourseCode: task?.course_code,
+      fileNames: files.map((file) => file.original_name),
+      materialParts: materialContent.parts,
+    });
     const prompt = buildInitialOutlinePrompt({
       specialRequirements: task?.special_requirements,
     });
@@ -210,6 +280,7 @@ export async function generateOutline(taskId: string, userId: string) {
     await updateTaskStage(taskId, 'outline_ready', {
       target_words: targetWords,
       citation_style: citationStyle,
+      course_code: courseCode,
     });
 
     await supabaseAdmin.from('task_events').insert({

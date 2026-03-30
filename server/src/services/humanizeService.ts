@@ -24,6 +24,7 @@ interface ExecuteHumanizeDeps {
   refundCredits: (userId: string, amount: number, refType: string, refId: string, note: string) => Promise<unknown>;
   updateHumanizeJob: (jobId: string, payload: Record<string, unknown>) => Promise<void>;
   updateTask: (taskId: string, payload: Record<string, unknown>) => Promise<void>;
+  loadTaskMeta: (taskId: string) => Promise<{ title: string; course_code: string | null } | null>;
   insertTaskEvent: (payload: {
     task_id: string;
     event_type: string;
@@ -46,6 +47,14 @@ const defaultExecuteHumanizeDeps: ExecuteHumanizeDeps = {
   },
   updateTask: async (taskId, payload) => {
     await supabaseAdmin.from('tasks').update(payload).eq('id', taskId);
+  },
+  loadTaskMeta: async (taskId) => {
+    const { data } = await supabaseAdmin
+      .from('tasks')
+      .select('title, course_code')
+      .eq('id', taskId)
+      .single();
+    return data || null;
   },
   insertTaskEvent: async (payload) => {
     await supabaseAdmin.from('task_events').insert(payload);
@@ -141,6 +150,7 @@ export async function executeHumanize(
     const { documentId, output } = await deps.humanizeText(inputText);
     const humanized = output;
     const newWordCount = humanized.split(/\s+/).filter(Boolean).length;
+    const taskMeta = await deps.loadTaskMeta(taskId);
 
     await deps.insertDocumentVersion({
       task_id: taskId,
@@ -154,7 +164,10 @@ export async function executeHumanize(
     const expiresAt = deps.now();
     expiresAt.setDate(expiresAt.getDate() + retentionDays);
 
-    const docBuffer = await buildFormattedPaperDocBuffer(humanized);
+    const docBuffer = await buildFormattedPaperDocBuffer(humanized, {
+      paperTitle: taskMeta?.title || 'Academic Essay',
+      courseCode: taskMeta?.course_code || null,
+    });
     const docPath = `${taskId}/humanized-${deps.now().getTime()}.docx`;
 
     await deps.storeGeneratedTaskFile({

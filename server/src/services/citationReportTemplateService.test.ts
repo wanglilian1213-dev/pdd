@@ -77,3 +77,53 @@ test('renderCitationReportPdf returns a real PDF buffer', async () => {
   assert.equal(pdfBuffer.subarray(0, 4).toString(), '%PDF');
   assert.equal(pdfBuffer.length > 1000, true);
 });
+
+test('renderCitationReportPdf paginates cleanly for long citation analysis content', async () => {
+  const longParagraph = 'This assessment keeps expanding to simulate a long validation explanation with multiple observations, caveats, and evidence statements. '.repeat(12);
+  const pdfBuffer = await renderCitationReportPdf({
+    reportId: 'V532-9999-3003',
+    generatedAt: '2026-03-30',
+    essayTitle: 'A Very Long Essay Title About Educational Policy and Institutional Reform',
+    citationStyle: 'APA 7',
+    overallScore: 63,
+    totalCitations: 6,
+    reliabilityLabel: 'Acceptable',
+    keyFindings: [
+      longParagraph,
+      longParagraph,
+      longParagraph,
+    ],
+    breakdown: [
+      { label: 'Excellent (90-100%)', count: 1, percentage: 17, status: 'excellent' },
+      { label: 'Good (70-89%)', count: 2, percentage: 33, status: 'good' },
+      { label: 'Acceptable (50-69%)', count: 2, percentage: 33, status: 'acceptable' },
+      { label: 'Problematic (<50%)', count: 1, percentage: 17, status: 'problematic' },
+    ],
+    citations: Array.from({ length: 4 }, (_, index) => ({
+      citationLabel: `Citation ${index + 1}`,
+      sourceText: `${longParagraph}${longParagraph}`,
+      score: 60 + index,
+      status: 'acceptable' as const,
+      assessment: `${longParagraph}${longParagraph}`,
+      details: [
+        { criterion: 'Author(s)', expected: longParagraph, found: longParagraph, status: 'warning' as const },
+        { criterion: 'Year', expected: '2024', found: '2024', status: 'pass' as const },
+        { criterion: 'Title', expected: longParagraph, found: longParagraph, status: 'warning' as const },
+        { criterion: 'Journal/Source', expected: longParagraph, found: longParagraph, status: 'warning' as const },
+        { criterion: 'DOI', expected: 'https://doi.org/10.1234/example-long-doi-entry', found: 'https://doi.org/10.1234/example-long-doi-entry', status: 'pass' as const },
+        { criterion: 'Relevance', expected: longParagraph, found: longParagraph, status: 'warning' as const },
+      ],
+    })),
+    recommendations: [
+      longParagraph,
+      longParagraph,
+      longParagraph,
+    ],
+  });
+
+  const pdfText = pdfBuffer.toString('latin1');
+  const pageMarkers = pdfText.match(/\/Type \/Page\b/g) ?? [];
+
+  assert.equal(pdfBuffer.subarray(0, 4).toString(), '%PDF');
+  assert.equal(pageMarkers.length > 1, true);
+});

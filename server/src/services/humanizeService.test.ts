@@ -49,6 +49,10 @@ test('executeHumanize uses Undetectable output and stores humanized doc on succe
         updateTask: async (_taskId, payload) => {
           taskUpdates.push(payload);
         },
+        loadTaskMeta: async () => ({
+          title: 'Humanized Energy Essay',
+          course_code: 'BUSI1001',
+        }),
         insertTaskEvent: async (payload) => {
           events.push(payload);
         },
@@ -103,6 +107,10 @@ test('executeHumanize refunds credits and marks failure when Undetectable call f
       updateTask: async (_taskId, payload) => {
         taskUpdates.push(payload);
       },
+      loadTaskMeta: async () => ({
+        title: 'Humanized Energy Essay',
+        course_code: 'BUSI1001',
+      }),
       insertTaskEvent: async (payload) => {
         events.push(payload);
       },

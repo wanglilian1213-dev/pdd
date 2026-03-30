@@ -7,7 +7,13 @@ import {
   TextRun,
 } from 'docx';
 
-export type PaperParagraphKind = 'title' | 'heading' | 'body' | 'reference_heading' | 'reference';
+export type PaperParagraphKind =
+  | 'cover_course_code'
+  | 'cover_title'
+  | 'heading'
+  | 'body'
+  | 'reference_heading'
+  | 'reference';
 
 export interface PaperParagraphModel {
   kind: PaperParagraphKind;
@@ -18,10 +24,16 @@ export interface PaperParagraphModel {
   alignment: 'left' | 'center';
   lineSpacing: number;
   hangingIndent: boolean;
+  pageBreakBefore: boolean;
 }
 
 interface PaperLayoutModel {
   paragraphs: PaperParagraphModel[];
+}
+
+interface PaperLayoutOptions {
+  paperTitle?: string | null;
+  courseCode?: string | null;
 }
 
 const FONT_FAMILY = 'Times New Roman';
@@ -86,67 +98,166 @@ function buildParagraph(kind: PaperParagraphKind, text: string): PaperParagraphM
     text: trimmed,
     fontFamily: FONT_FAMILY,
     fontSize: FONT_SIZE,
-    bold: kind === 'title' || kind === 'heading' || kind === 'reference_heading',
-    alignment: kind === 'title' ? 'center' : 'left',
+    bold: kind === 'cover_title' || kind === 'heading' || kind === 'reference_heading',
+    alignment: kind === 'cover_course_code' || kind === 'cover_title' ? 'center' : 'left',
     lineSpacing: LINE_SPACING,
     hangingIndent: kind === 'reference',
+    pageBreakBefore: false,
   };
 }
 
 function extractReferenceParagraphs(blocks: string[][]) {
-  if (blocks.length === 0) {
-    return [];
+  const references: string[] = [];
+
+  for (const block of blocks) {
+    const lines = block
+      .map((line) => cleanInlineFormatting(line))
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      continue;
+    }
+
+    let currentReference = '';
+    for (const line of lines) {
+      const startsNewReference = /^[A-Z][A-Za-z'`.-]+(?:\s+[A-Z][A-Za-z'`.-]+)*,\s*[A-Z]/.test(line);
+      if (!currentReference) {
+        currentReference = line;
+        continue;
+      }
+
+      if (startsNewReference) {
+        references.push(currentReference.replace(/\s+/g, ' ').trim());
+        currentReference = line;
+        continue;
+      }
+
+      currentReference = `${currentReference} ${line}`.replace(/\s+/g, ' ').trim();
+    }
+
+    if (currentReference) {
+      references.push(currentReference.replace(/\s+/g, ' ').trim());
+    }
   }
 
-  const singleLineEntries = blocks
-    .flatMap((block) => block.map((line) => cleanInlineFormatting(line)).filter(Boolean));
-
-  if (singleLineEntries.length > blocks.length) {
-    return singleLineEntries;
-  }
-
-  if (blocks.every((block) => block.length === 1)) {
-    return blocks.map((block) => block[0]!).filter(Boolean);
-  }
-
-  return blocks.map((block) => block.join(' ')).filter(Boolean);
+  return references;
 }
 
-export function buildPaperLayoutModel(text: string): PaperLayoutModel {
+function normalizeBlockText(lines: string[]) {
+  return lines
+    .map((line) => cleanInlineFormatting(line))
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function blockLooksLikeReference(lines: string[]) {
+  const text = normalizeBlockText(lines);
+  if (!text) {
+    return false;
+  }
+
+  if (isReferenceHeading(text)) {
+    return true;
+  }
+
+  if (/https?:\/\/|doi\.org|doi:/i.test(text)) {
+    return true;
+  }
+
+  return /\b(19|20)\d{2}\b/.test(text) && /^[A-Z][A-Za-z'`.-]+(?:\s+[A-Z][A-Za-z'`.-]+)*,\s*[A-Z]/.test(text);
+}
+
+function inferReferenceStart(blocks: string[][]) {
+  let firstReferenceIndex = -1;
+
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (!blockLooksLikeReference(blocks[index]!)) {
+      break;
+    }
+
+    firstReferenceIndex = index;
+  }
+
+  return firstReferenceIndex;
+}
+
+function findReferenceSections(blocks: string[][]) {
+  const explicitHeadingIndex = blocks.findIndex((block) => isReferenceHeading(normalizeBlockText(block)));
+  if (explicitHeadingIndex !== -1) {
+    return {
+      bodyBlocks: blocks.slice(0, explicitHeadingIndex),
+      referenceHeading: normalizeBlockText(blocks[explicitHeadingIndex]!),
+      referenceBlocks: blocks.slice(explicitHeadingIndex + 1),
+    };
+  }
+
+  const inferredStart = inferReferenceStart(blocks);
+  if (inferredStart === -1) {
+    return {
+      bodyBlocks: blocks,
+      referenceHeading: null,
+      referenceBlocks: [],
+    };
+  }
+
+  return {
+    bodyBlocks: blocks.slice(0, inferredStart),
+    referenceHeading: 'References',
+    referenceBlocks: blocks.slice(inferredStart),
+  };
+}
+
+export function buildPaperLayoutModel(text: string, options: PaperLayoutOptions = {}): PaperLayoutModel {
   const blocks = splitIntoBlocks(text);
-  if (blocks.length === 0) {
-    return { paragraphs: [] };
-  }
-
-  const [titleBlock, ...remainingBlocks] = blocks;
   const paragraphs: PaperParagraphModel[] = [];
+  const paperTitle = cleanInlineFormatting(options.paperTitle || normalizeBlockText(blocks[0] || ['Untitled Paper']));
+  const courseCode = cleanInlineFormatting(options.courseCode || '');
 
-  paragraphs.push(buildParagraph('title', titleBlock!.join(' ')));
+  paragraphs.push(buildParagraph('cover_course_code', courseCode));
+  paragraphs.push(buildParagraph('cover_title', paperTitle));
 
-  let referenceStart = remainingBlocks.findIndex((block) => isReferenceHeading(block.join(' ')));
-  if (referenceStart === -1) {
-    referenceStart = remainingBlocks.length;
+  if (blocks.length === 0) {
+    return { paragraphs };
   }
 
-  const bodyBlocks = remainingBlocks.slice(0, referenceStart);
-  const referenceBlocks = remainingBlocks.slice(referenceStart);
+  const normalizedTitleBlock = normalizeBlockText(blocks[0]!);
+  const remainingBlocks = normalizedTitleBlock.localeCompare(paperTitle, undefined, { sensitivity: 'accent' }) === 0
+    ? blocks.slice(1)
+    : blocks.slice();
+
+  const { bodyBlocks, referenceHeading, referenceBlocks } = findReferenceSections(remainingBlocks);
+  let bodyStarted = false;
 
   for (const block of bodyBlocks) {
     if (isHeadingBlock(block)) {
-      paragraphs.push(buildParagraph('heading', block[0]!));
+      const paragraph = buildParagraph('heading', normalizeBlockText(block));
+      if (!bodyStarted) {
+        paragraph.pageBreakBefore = true;
+        bodyStarted = true;
+      }
+      paragraphs.push(paragraph);
       continue;
     }
 
     for (const line of block) {
-      paragraphs.push(buildParagraph('body', line));
+      const paragraph = buildParagraph('body', line);
+      if (!bodyStarted) {
+        paragraph.pageBreakBefore = true;
+        bodyStarted = true;
+      }
+      paragraphs.push(paragraph);
     }
   }
 
-  if (referenceBlocks.length > 0) {
-    const [referenceHeadingBlock, ...referenceContentBlocks] = referenceBlocks;
-    paragraphs.push(buildParagraph('reference_heading', referenceHeadingBlock!.join(' ')));
+  const normalizedReferenceEntries = extractReferenceParagraphs(referenceBlocks);
+  if (referenceHeading || normalizedReferenceEntries.length > 0) {
+    const headingParagraph = buildParagraph('reference_heading', referenceHeading || 'References');
+    headingParagraph.pageBreakBefore = true;
+    paragraphs.push(headingParagraph);
 
-    for (const referenceText of extractReferenceParagraphs(referenceContentBlocks)) {
+    for (const referenceText of normalizedReferenceEntries) {
       paragraphs.push(buildParagraph('reference', referenceText));
     }
   }
@@ -161,11 +272,16 @@ function toDocxAlignment(alignment: 'left' | 'center') {
 function toDocxParagraph(model: PaperParagraphModel) {
   return new Paragraph({
     alignment: toDocxAlignment(model.alignment),
+    pageBreakBefore: model.pageBreakBefore,
     spacing: {
       line: DOCX_LINE_SPACING,
       lineRule: LineRuleType.AUTO,
-      after: model.kind === 'title' ? 240 : 120,
-      before: model.kind === 'heading' || model.kind === 'reference_heading' ? 120 : 0,
+      after: model.kind === 'cover_title' ? 240 : 120,
+      before: model.kind === 'cover_course_code'
+        ? 3600
+        : (model.kind === 'cover_title'
+          ? 240
+          : (model.kind === 'heading' || model.kind === 'reference_heading' ? 120 : 0)),
     },
     indent: model.hangingIndent ? { left: HANGING_INDENT_TWIPS, hanging: HANGING_INDENT_TWIPS } : undefined,
     children: [
@@ -179,8 +295,8 @@ function toDocxParagraph(model: PaperParagraphModel) {
   });
 }
 
-export function buildFormattedPaperDocument(text: string) {
-  const model = buildPaperLayoutModel(text);
+export function buildFormattedPaperDocument(text: string, options: PaperLayoutOptions = {}) {
+  const model = buildPaperLayoutModel(text, options);
 
   return new Document({
     sections: [{
@@ -190,6 +306,6 @@ export function buildFormattedPaperDocument(text: string) {
   });
 }
 
-export async function buildFormattedPaperDocBuffer(text: string) {
-  return Packer.toBuffer(buildFormattedPaperDocument(text));
+export async function buildFormattedPaperDocBuffer(text: string, options: PaperLayoutOptions = {}) {
+  return Packer.toBuffer(buildFormattedPaperDocument(text, options));
 }
