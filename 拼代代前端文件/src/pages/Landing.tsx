@@ -133,7 +133,15 @@ export default function Landing() {
                         </div>
                         <div>
                           <div className="text-[10px] text-gray-400 mb-0.5">引用格式</div>
-                          <div className="text-sm font-semibold text-gray-800">APA 7th Edition</div>
+                          <div className="text-sm font-semibold text-gray-800">按任务文件提取，缺省为 APA 7</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-gray-400 mb-0.5">最少引用</div>
+                          <div className="text-sm font-semibold text-gray-800">15 条（按 2500 字换算）</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-gray-400 mb-0.5">章节数量</div>
+                          <div className="text-sm font-semibold text-gray-800">5 章（含开头和结尾）</div>
                         </div>
                         <div>
                           <div className="text-[10px] text-gray-400 mb-0.5">核心指令</div>
@@ -231,7 +239,7 @@ export default function Landing() {
                           <div className="flex items-center gap-2 text-sm text-gray-700">
                             <CheckCircle2 className="w-4 h-4 text-emerald-500" /> 引用数量
                           </div>
-                          <span className="text-xs font-medium text-gray-600">12/12 篇</span>
+                          <span className="text-xs font-medium text-gray-600">15/15 篇</span>
                         </div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2 text-sm text-gray-700">
@@ -376,7 +384,7 @@ export default function Landing() {
                 <div>
                   <h3 className="text-xl font-semibold mb-2">多模态要求精准解析引擎</h3>
                   <p className="text-gray-400 leading-relaxed">
-                    面对复杂的 Rubric、评分标准和教授的零散要求，我们的多模态解析引擎能够从 PDF、PPT 甚至图片中精准提取核心得分点，并将其转化为硬性约束条件，确保生成的文章 100% 贴合任务要求，不偏题、不漏点。
+                    面对复杂的 Rubric、评分标准和教授的零散要求，系统会先从任务文件里提取字数、引用格式等硬条件，再自动换算出最少引用数量和章节数量，后面的大纲、正文、核验和报告都统一按这一套规则执行，避免前后打架。
                   </p>
                 </div>
               </div>
@@ -388,7 +396,7 @@ export default function Landing() {
                 <div>
                   <h3 className="text-xl font-semibold mb-2">动态引用网络与格式自适应</h3>
                   <p className="text-gray-400 leading-relaxed">
-                    彻底解决 AI 伪造引用的痛点。我们的算法内置了动态文献检索与交叉验证机制，确保每一处引用都真实可查。同时，模型能够完美自适应 APA、MLA、Harvard、Chicago 等复杂引用格式，细节无懈可击。
+                    系统会先从任务要求里提取引用格式；如果文件里没写，就默认按 APA 7 走。后面的正文生成和引用核验会共同遵守同一套规则：每 1000 字至少 5 条引用，向上取整；引用必须使用 2020 年之后的学术论文，不能用 book，并在最终交付时附上一份独立 PDF 核验报告。
                   </p>
                 </div>
               </div>
@@ -717,7 +725,7 @@ export default function Landing() {
               { q: '支持上传哪些格式的参考文件？', a: '支持 txt, md, docx, pdf, ppt, pptx 等常见文档格式。我们的多模态解析引擎能够同时处理多份文件，自动提取其中的 Rubric 评分标准、Syllabus 课程大纲以及 Reading Materials 的核心观点，确保写作方向完全契合要求。' },
               { q: '大纲先行模式具体是怎么操作的？', a: '这是拼代代的核心特色。在您上传要求后，系统不会直接生成正文，而是先输出一份结构清晰、逻辑严密的英文大纲。您可以将这份大纲直接发给客户确认，或者根据自己的理解提出修改意见。只有在大纲完全锁定后，系统才会开始生成正文，从根本上杜绝了“结构不对”导致的推翻重写。' },
               { q: '生成的文章能通过 Turnitin 等查重和 AI 检测吗？', a: '我们的 Academic-RLHF™ 算法专为学术场景微调，生成的文本在语言风格上高度接近人类专业写手。同时，我们提供“智能降AI”功能，针对 Turnitin 和 GPTZero 等主流检测工具进行了专门优化，能够有效降低 AI 痕迹。' },
-              { q: '引用的文献是真实的吗？格式准确吗？', a: '绝对真实。系统内置了动态文献检索网络，自动匹配真实存在的学术资源，并严格按照您指定的格式（如 APA 7th, MLA 9th, Harvard, Chicago 等）进行排版。最终交付时，还会同步输出一份独立的 PDF 格式引用核验报告，证明文献的真实性。' },
+              { q: '引用的文献是真实的吗？格式准确吗？', a: '系统会先从任务要求文件里提取引用格式；如果没写，就默认按 APA 7。正文阶段会按字数自动换算最少引用数量，并要求引用必须来自 2020 年之后的学术论文，不能用 book。最终交付时，会同步输出一份独立的 PDF 引用核验报告，把数量、年份、类型和格式的检查结果直接列出来。' },
               { q: '自动降AI功能是如何计费的？', a: '如果您对初稿的 AI 痕迹有顾虑，可以使用“自动降AI”功能。系统会重写部分文本，增加人类写作特有的长短句交错和逻辑转折。每次使用该功能将根据处理字数扣除相应积分。' },
               { q: '如何购买额度和进行充值？', a: '平台采用安全的“额度激活码”充值模式，无需您在网站上绑定任何支付方式。请通过页面底部的微信或邮箱联系我们的官方销售团队购买激活码。登录账户后，在工作台输入激活码即可完成充值。' },
               { q: '激活码有使用期限或限制吗？', a: '激活码一次一用，不可重复兑换。但同一个账户可以多次购买并兑换不同的激活码，额度会自动叠加，且长期有效，不会按月清零。' },

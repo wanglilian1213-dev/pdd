@@ -17,7 +17,6 @@ import {
 import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt, buildRepairOutlinePrompt } from './outlinePromptService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { normalizeCitationStyle } from './citationStyleService';
-import { validateTargetWords } from './requestValidationService';
 import { recordAuditLog } from './auditLogService';
 import { captureError } from '../lib/errorMonitor';
 import {
@@ -30,6 +29,12 @@ import {
   ensureValidOutlineBulletCounts,
   formatOutlineBulletViolations,
 } from './outlineStructureService';
+import {
+  buildTaskRequirementExtractionPrompt,
+  deriveUnifiedTaskRequirements,
+  normalizeExtractedTaskRequirements,
+  type UnifiedTaskRequirements,
+} from './taskRequirementService';
 
 interface ParsedOutlineResponse {
   paper_title: string;
@@ -45,6 +50,8 @@ export interface UsableOutlineResult {
   researchQuestion: string;
   targetWords: number;
   citationStyle: string;
+  requiredReferenceCount: number;
+  requiredSectionCount: number;
   courseCode: string | null;
 }
 
@@ -66,12 +73,70 @@ function parseOutlineJson(content: string, fallback: ParsedOutlineResponse): Par
   }
 }
 
+function deriveStoredUnifiedRequirements(source: {
+  target_words?: number | null;
+  citation_style?: string | null;
+  required_reference_count?: number | null;
+  required_section_count?: number | null;
+}) {
+  const unified = deriveUnifiedTaskRequirements({
+    targetWords: typeof source.target_words === 'number' ? source.target_words : undefined,
+    citationStyle: typeof source.citation_style === 'string' ? source.citation_style : undefined,
+  });
+
+  return {
+    targetWords: unified.targetWords,
+    citationStyle: unified.citationStyle,
+    requiredReferenceCount: Number(source.required_reference_count || unified.requiredReferenceCount),
+    requiredSectionCount: Number(source.required_section_count || unified.requiredSectionCount),
+  };
+}
+
+async function extractUnifiedTaskRequirementsForOutlineGeneration(options: {
+  specialRequirements?: string | null;
+  materialParts: MaterialInputPart[];
+}): Promise<UnifiedTaskRequirements> {
+  const prompt = buildTaskRequirementExtractionPrompt({
+    specialRequirements: options.specialRequirements,
+  });
+
+  try {
+    const response = await openai.responses.create({
+      ...buildMainOpenAIResponsesOptions('outline_generation'),
+      input: [
+        {
+          role: 'system' as const,
+          content: prompt.systemPrompt,
+        },
+        {
+          role: 'user' as const,
+          content: [
+            {
+              type: 'input_text',
+              text: prompt.userPrompt,
+            },
+            ...options.materialParts,
+          ],
+        },
+      ],
+    });
+
+    return deriveUnifiedTaskRequirements(
+      normalizeExtractedTaskRequirements(typeof response.output_text === 'string' ? response.output_text : ''),
+    );
+  } catch {
+    return deriveUnifiedTaskRequirements({});
+  }
+}
+
 async function repairOutlineBulletCounts(
   stage: 'outline_generation' | 'outline_regeneration',
   payload: ParsedOutlineResponse,
   options: {
     specialRequirements?: string | null;
     editInstruction?: string | null;
+    requiredSectionCount: number;
+    requiredReferenceCount: number;
   },
 ) {
   return ensureValidOutlineBulletCounts(payload, async (currentPayload, violations) => {
@@ -79,6 +144,8 @@ async function repairOutlineBulletCounts(
       currentOutline: currentPayload.outline,
       currentTargetWords: currentPayload.target_words,
       currentCitationStyle: currentPayload.citation_style,
+      requiredSectionCount: options.requiredSectionCount,
+      requiredReferenceCount: options.requiredReferenceCount,
       specialRequirements: options.specialRequirements,
       editInstruction: options.editInstruction,
       violationSummary: formatOutlineBulletViolations(violations),
@@ -118,10 +185,13 @@ async function repairOutlineReadiness(
     editInstruction?: string | null;
     fileNames?: string[];
     materialParts?: MaterialInputPart[];
+    requiredSectionCount: number;
+    requiredReferenceCount: number;
   },
 ) {
   const assessment = assessOutlineReadiness(payload, {
     blockedFileTitles: options.fileNames,
+    requiredSectionCount: options.requiredSectionCount,
   });
 
   if (assessment.valid) {
@@ -134,6 +204,8 @@ async function repairOutlineReadiness(
     currentResearchQuestion: payload.research_question,
     currentTargetWords: payload.target_words,
     currentCitationStyle: payload.citation_style,
+    requiredSectionCount: options.requiredSectionCount,
+    requiredReferenceCount: options.requiredReferenceCount,
     specialRequirements: options.specialRequirements,
     editInstruction: options.editInstruction,
     violationSummary: 'None',
@@ -165,6 +237,7 @@ async function repairOutlineReadiness(
   const repaired = parseOutlineJson(response.output_text, payload);
   const repairedAssessment = assessOutlineReadiness(repaired, {
     blockedFileTitles: options.fileNames,
+    requiredSectionCount: options.requiredSectionCount,
   });
 
   if (!repairedAssessment.valid) {
@@ -279,13 +352,18 @@ async function extractCourseCodeForTask(options: {
   }
 }
 
-function sameOutlinePayload(left: ParsedOutlineResponse, right: ParsedOutlineResponse) {
+function sameOutlinePayload(
+  left: ParsedOutlineResponse & { required_reference_count?: number; required_section_count?: number },
+  right: ParsedOutlineResponse & { required_reference_count?: number; required_section_count?: number },
+) {
   return (
     left.paper_title === right.paper_title &&
     left.research_question === right.research_question &&
     left.outline === right.outline &&
     left.target_words === right.target_words &&
-    normalizeCitationStyle(left.citation_style) === normalizeCitationStyle(right.citation_style)
+    normalizeCitationStyle(left.citation_style) === normalizeCitationStyle(right.citation_style) &&
+    Number(left.required_reference_count || 0) === Number(right.required_reference_count || 0) &&
+    Number(left.required_section_count || 0) === Number(right.required_section_count || 0)
   );
 }
 
@@ -326,13 +404,23 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
   try {
     const materialContent = await buildMaterialContentFromStorage(files);
     uploadedFileIds = materialContent.uploadedFileIds;
+    const unifiedRequirements = deriveStoredUnifiedRequirements({
+      target_words: typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words,
+      citation_style: typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style,
+      required_reference_count: typeof latestOutline.required_reference_count === 'number'
+        ? latestOutline.required_reference_count
+        : task.required_reference_count,
+      required_section_count: typeof latestOutline.required_section_count === 'number'
+        ? latestOutline.required_section_count
+        : task.required_section_count,
+    });
 
     const currentPayload: ParsedOutlineResponse = {
       paper_title: String(latestOutline.paper_title || task.paper_title || ''),
       research_question: String(latestOutline.research_question || task.research_question || ''),
       outline: String(latestOutline.content || ''),
-      target_words: Number(latestOutline.target_words || task.target_words || 1000),
-      citation_style: normalizeCitationStyle(String(latestOutline.citation_style || task.citation_style || 'APA 7')),
+      target_words: unifiedRequirements.targetWords,
+      citation_style: unifiedRequirements.citationStyle,
     };
 
     const courseCode = await extractCourseCodeForTask({
@@ -348,6 +436,8 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
       currentPayload,
       {
         specialRequirements: task.special_requirements,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
 
@@ -358,6 +448,8 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
         specialRequirements: task.special_requirements,
         fileNames: files.map((file) => file.original_name),
         materialParts: materialContent.parts,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
 
@@ -365,16 +457,29 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
       paper_title: repaired.paper_title,
       research_question: repaired.research_question,
       outline: repaired.outline,
-      target_words: repaired.target_words || currentPayload.target_words,
-      citation_style: normalizeCitationStyle(repaired.citation_style || currentPayload.citation_style),
+      target_words: unifiedRequirements.targetWords,
+      citation_style: unifiedRequirements.citationStyle,
     };
 
-    const needsNewOutlineVersion = !sameOutlinePayload(currentPayload, normalized);
+    const needsNewOutlineVersion = !sameOutlinePayload(
+      {
+        ...currentPayload,
+        required_reference_count: latestOutline.required_reference_count,
+        required_section_count: latestOutline.required_section_count,
+      },
+      {
+        ...normalized,
+        required_reference_count: unifiedRequirements.requiredReferenceCount,
+        required_section_count: unifiedRequirements.requiredSectionCount,
+      },
+    );
     const needsTaskSync = (
       task.paper_title !== normalized.paper_title ||
       task.research_question !== normalized.research_question ||
-      Number(task.target_words || 0) !== normalized.target_words ||
-      normalizeCitationStyle(String(task.citation_style || 'APA 7')) !== normalized.citation_style ||
+      Number(task.target_words || 0) !== unifiedRequirements.targetWords ||
+      normalizeCitationStyle(String(task.citation_style || 'APA 7')) !== unifiedRequirements.citationStyle ||
+      Number(task.required_reference_count || 0) !== unifiedRequirements.requiredReferenceCount ||
+      Number(task.required_section_count || 0) !== unifiedRequirements.requiredSectionCount ||
       String(task.course_code || '') !== String(courseCode || '')
     );
 
@@ -386,8 +491,10 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
         paper_title: normalized.paper_title,
         research_question: normalized.research_question,
         edit_instruction: 'SYSTEM_AUTO_REPAIR',
-        target_words: normalized.target_words,
-        citation_style: normalized.citation_style,
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
+        required_reference_count: unifiedRequirements.requiredReferenceCount,
+        required_section_count: unifiedRequirements.requiredSectionCount,
       });
 
       await supabaseAdmin.from('task_events').insert({
@@ -396,8 +503,10 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
         detail: {
           paper_title: normalized.paper_title,
           research_question: normalized.research_question,
-          target_words: normalized.target_words,
-          citation_style: normalized.citation_style,
+          target_words: unifiedRequirements.targetWords,
+          citation_style: unifiedRequirements.citationStyle,
+          required_reference_count: unifiedRequirements.requiredReferenceCount,
+          required_section_count: unifiedRequirements.requiredSectionCount,
         },
       });
     }
@@ -408,8 +517,10 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
         .update({
           paper_title: normalized.paper_title,
           research_question: normalized.research_question,
-          target_words: normalized.target_words,
-          citation_style: normalized.citation_style,
+          target_words: unifiedRequirements.targetWords,
+          citation_style: unifiedRequirements.citationStyle,
+          required_reference_count: unifiedRequirements.requiredReferenceCount,
+          required_section_count: unifiedRequirements.requiredSectionCount,
           course_code: courseCode,
           updated_at: new Date().toISOString(),
         })
@@ -420,8 +531,10 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
       outlineContent: normalized.outline,
       paperTitle: normalized.paper_title,
       researchQuestion: normalized.research_question,
-      targetWords: normalized.target_words,
-      citationStyle: normalized.citation_style,
+      targetWords: unifiedRequirements.targetWords,
+      citationStyle: unifiedRequirements.citationStyle,
+      requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      requiredSectionCount: unifiedRequirements.requiredSectionCount,
       courseCode: courseCode || null,
     };
   } finally {
@@ -454,6 +567,10 @@ export async function generateOutline(taskId: string, userId: string) {
   try {
     const materialContent = await buildMaterialContentFromStorage(files);
     uploadedFileIds = materialContent.uploadedFileIds;
+    const unifiedRequirements = await extractUnifiedTaskRequirementsForOutlineGeneration({
+      specialRequirements: task?.special_requirements,
+      materialParts: materialContent.parts,
+    });
     const courseCode = await extractCourseCodeForTask({
       taskTitle: task?.title,
       specialRequirements: task?.special_requirements,
@@ -463,6 +580,10 @@ export async function generateOutline(taskId: string, userId: string) {
     });
     const prompt = buildInitialOutlinePrompt({
       specialRequirements: task?.special_requirements,
+      targetWords: unifiedRequirements.targetWords,
+      citationStyle: unifiedRequirements.citationStyle,
+      requiredSectionCount: unifiedRequirements.requiredSectionCount,
+      requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
     });
 
     const response = await openai.responses.create({
@@ -493,11 +614,13 @@ export async function generateOutline(taskId: string, userId: string) {
         paper_title: '',
         research_question: '',
         outline: content,
-        target_words: 1000,
-        citation_style: 'APA 7',
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
       }),
       {
         specialRequirements: task?.special_requirements,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
     const parsed = await repairOutlineReadiness(
@@ -507,11 +630,10 @@ export async function generateOutline(taskId: string, userId: string) {
         specialRequirements: task?.special_requirements,
         fileNames: files.map((file) => file.original_name),
         materialParts: materialContent.parts,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
-
-    const targetWords = parsed.target_words || 1000;
-    const citationStyle = normalizeCitationStyle(parsed.citation_style);
 
     const { data: outline, error } = await supabaseAdmin
       .from('outline_versions')
@@ -521,8 +643,10 @@ export async function generateOutline(taskId: string, userId: string) {
         content: parsed.outline,
         paper_title: parsed.paper_title,
         research_question: parsed.research_question,
-        target_words: targetWords,
-        citation_style: citationStyle,
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
+        required_reference_count: unifiedRequirements.requiredReferenceCount,
+        required_section_count: unifiedRequirements.requiredSectionCount,
       })
       .select()
       .single();
@@ -534,8 +658,10 @@ export async function generateOutline(taskId: string, userId: string) {
     await updateTaskStage(taskId, 'outline_ready', {
       paper_title: parsed.paper_title,
       research_question: parsed.research_question,
-      target_words: targetWords,
-      citation_style: citationStyle,
+      target_words: unifiedRequirements.targetWords,
+      citation_style: unifiedRequirements.citationStyle,
+      required_reference_count: unifiedRequirements.requiredReferenceCount,
+      required_section_count: unifiedRequirements.requiredSectionCount,
       course_code: courseCode,
     });
 
@@ -546,8 +672,10 @@ export async function generateOutline(taskId: string, userId: string) {
         version: 1,
         paper_title: parsed.paper_title,
         research_question: parsed.research_question,
-        target_words: targetWords,
-        citation_style: citationStyle,
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
+        required_reference_count: unifiedRequirements.requiredReferenceCount,
+        required_section_count: unifiedRequirements.requiredSectionCount,
       },
     });
 
@@ -595,13 +723,25 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
   try {
     await reserveOutlineEditAtomic(taskId, userId, maxEdits);
     reservedEdit = true;
+    const unifiedRequirements = deriveStoredUnifiedRequirements({
+      target_words: typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words,
+      citation_style: typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style,
+      required_reference_count: typeof latestOutline.required_reference_count === 'number'
+        ? latestOutline.required_reference_count
+        : task.required_reference_count,
+      required_section_count: typeof latestOutline.required_section_count === 'number'
+        ? latestOutline.required_section_count
+        : task.required_section_count,
+    });
 
     const prompt = buildRegenerateOutlinePrompt({
       currentOutline: latestOutline.content,
       currentPaperTitle: latestOutline.paper_title,
       currentResearchQuestion: latestOutline.research_question,
-      currentTargetWords: latestOutline.target_words,
-      currentCitationStyle: latestOutline.citation_style,
+      currentTargetWords: unifiedRequirements.targetWords,
+      currentCitationStyle: unifiedRequirements.citationStyle,
+      requiredSectionCount: unifiedRequirements.requiredSectionCount,
+      requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       specialRequirements: task.special_requirements,
       editInstruction,
     });
@@ -627,12 +767,14 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
         paper_title: latestOutline.paper_title || '',
         research_question: latestOutline.research_question || '',
         outline: content,
-        target_words: latestOutline.target_words,
-        citation_style: latestOutline.citation_style,
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
       }),
       {
         specialRequirements: task.special_requirements,
         editInstruction,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
     const parsed = await repairOutlineReadiness(
@@ -641,6 +783,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       {
         specialRequirements: task.special_requirements,
         editInstruction,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
 
@@ -655,8 +799,10 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
         paper_title: parsed.paper_title,
         research_question: parsed.research_question,
         edit_instruction: editInstruction,
-        target_words: parsed.target_words || latestOutline.target_words,
-        citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
+        required_reference_count: unifiedRequirements.requiredReferenceCount,
+        required_section_count: unifiedRequirements.requiredSectionCount,
       })
       .select()
       .single();
@@ -666,8 +812,10 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       .update({
         paper_title: parsed.paper_title,
         research_question: parsed.research_question,
-        target_words: parsed.target_words || latestOutline.target_words,
-        citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
+        target_words: unifiedRequirements.targetWords,
+        citation_style: unifiedRequirements.citationStyle,
+        required_reference_count: unifiedRequirements.requiredReferenceCount,
+        required_section_count: unifiedRequirements.requiredSectionCount,
         updated_at: new Date().toISOString(),
       })
       .eq('id', taskId);
@@ -682,7 +830,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
   }
 }
 
-export async function confirmOutline(taskId: string, userId: string, targetWords?: number, citationStyle?: string) {
+export async function confirmOutline(taskId: string, userId: string) {
   const { data: task } = await supabaseAdmin
     .from('tasks')
     .select('*')
@@ -703,8 +851,8 @@ export async function confirmOutline(taskId: string, userId: string, targetWords
 
   if (!latestOutline) throw new AppError(500, '找不到大纲。');
 
-  const finalWords = validateTargetWords(targetWords || latestOutline.target_words || 1000);
-  const finalStyle = normalizeCitationStyle(citationStyle || latestOutline.citation_style || 'APA 7');
+  const finalWords = Number(latestOutline.target_words || task.target_words || 1000);
+  const finalStyle = normalizeCitationStyle(String(latestOutline.citation_style || task.citation_style || 'APA 7'));
 
   const pricePerThousand = (await getConfig('writing_price_per_1000')) || 250;
   const units = Math.ceil(finalWords / 1000);

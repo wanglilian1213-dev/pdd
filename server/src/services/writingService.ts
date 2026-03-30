@@ -7,12 +7,17 @@ import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
 import { buildMaterialContentFromStorage, cleanupOpenAIFiles, type StoredMaterialFile } from './materialInputService';
-import { assessGeneratedPaper as assessGeneratedPaperInternal } from './paperQualityService';
+import {
+  assessGeneratedPaper as assessGeneratedPaperInternal,
+  summarizeReferenceCompliance,
+} from './paperQualityService';
 import {
   buildCitationReportPrompt,
   parseCitationReportData,
   renderCitationReportPdf,
+  type CitationReportData,
 } from './citationReportTemplateService';
+import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 
 export const assessGeneratedPaper = assessGeneratedPaperInternal;
 const REWRITE_STAGE_TIMEOUT_MS = 60_000;
@@ -25,6 +30,7 @@ interface WritingContextInput {
   researchQuestion: string;
   targetWords: number;
   citationStyle: string;
+  requiredReferenceCount: number;
   requirements: string;
   courseCode?: string | null;
   versionBase?: number;
@@ -96,6 +102,23 @@ export const writingServiceTestUtils = {
   isWritingStageTimeoutError,
 };
 
+function deriveWritingTaskRequirements(task: {
+  target_words?: number | null;
+  citation_style?: string | null;
+  required_reference_count?: number | null;
+}) {
+  const derived = deriveUnifiedTaskRequirements({
+    targetWords: typeof task.target_words === 'number' ? task.target_words : undefined,
+    citationStyle: typeof task.citation_style === 'string' ? task.citation_style : undefined,
+  });
+
+  return {
+    targetWords: derived.targetWords,
+    citationStyle: derived.citationStyle,
+    requiredReferenceCount: Number(task.required_reference_count || derived.requiredReferenceCount),
+  };
+}
+
 export async function storeGeneratedTaskFile(
   payload: GeneratedTaskFilePayload,
   deps: StoreGeneratedTaskFileDeps = {
@@ -165,6 +188,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
     const paperTitle = String(latestOutline.paper_title || task.paper_title || task.title || '').trim();
     const researchQuestion = String(latestOutline.research_question || task.research_question || '').trim();
     const versionBase = await getDocumentVersionBase(taskId);
+    const unifiedRequirements = deriveWritingTaskRequirements(task);
 
     // Step 1: Draft
     await updateTaskStage(taskId, 'writing');
@@ -174,23 +198,42 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       outline: latestOutline.content,
       paperTitle,
       researchQuestion,
-      targetWords: task.target_words,
-      citationStyle: task.citation_style,
+      targetWords: unifiedRequirements.targetWords,
+      citationStyle: unifiedRequirements.citationStyle,
+      requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       requirements: task.special_requirements,
       versionBase,
     });
 
     // Step 2: Calibrate
     await updateTaskStage(taskId, 'word_calibrating');
-    const calibrated = await calibrateWordCount(taskId, draft, task.target_words, versionBase);
+    const calibrated = await calibrateWordCount(
+      taskId,
+      draft,
+      unifiedRequirements.targetWords,
+      unifiedRequirements.citationStyle,
+      unifiedRequirements.requiredReferenceCount,
+      versionBase,
+    );
 
     // Step 3: Citation check
     await updateTaskStage(taskId, 'citation_checking');
-    const verified = await verifyCitations(taskId, calibrated, task.citation_style, versionBase);
+    const verified = await verifyCitations(
+      taskId,
+      calibrated,
+      unifiedRequirements.citationStyle,
+      unifiedRequirements.requiredReferenceCount,
+      versionBase,
+    );
 
     // Step 4: Deliver
     await updateTaskStage(taskId, 'delivering');
-    await deliverResults(taskId, userId, verified, task, versionBase);
+    await deliverResults(taskId, userId, verified, {
+      ...task,
+      target_words: unifiedRequirements.targetWords,
+      citation_style: unifiedRequirements.citationStyle,
+      required_reference_count: unifiedRequirements.requiredReferenceCount,
+    }, versionBase);
 
     // Success: settle
     await settleCredits(userId, task.frozen_credits);
@@ -237,7 +280,11 @@ async function getDocumentVersionBase(taskId: string) {
   return typeof data?.version === 'number' ? data.version : 0;
 }
 
-export function buildDraftGenerationSystemPrompt(targetWords: number, citationStyle: string) {
+export function buildDraftGenerationSystemPrompt(
+  targetWords: number,
+  citationStyle: string,
+  requiredReferenceCount: number,
+) {
   return `You are an academic writing expert.
 
 Write the entire article at once.
@@ -246,6 +293,10 @@ The target word count is approximately ${targetWords} words.
 Use ${citationStyle} citation style.
 Write only the paper content, with no meta-commentary.
 Include proper in-text citations and a references section.
+Use at least ${requiredReferenceCount} references.
+Every reference must be from 2020 onwards.
+Every reference must be an academic scholar paper.
+Do not use book sources. References must be academic scholar papers, not books.
 
 The reasoning effort should be high.
 Think very hard and deep.
@@ -275,14 +326,28 @@ Return clean academic prose only.
 each references should come with proper link.`;
 }
 
-export function buildWordCalibrationSystemPrompt(currentWords: number, targetWords: number) {
-  return `You are an academic writing editor. The current paper has ${currentWords} words but the target is ${targetWords} words. ${currentWords < targetWords ? 'Expand' : 'Condense'} the paper to approximately ${targetWords} words while maintaining quality and coherence. Output only the revised paper.
+export function buildWordCalibrationSystemPrompt(
+  currentWords: number,
+  targetWords: number,
+  citationStyle: string,
+  requiredReferenceCount: number,
+) {
+  return `You are an academic writing editor. The current paper has ${currentWords} words but the target is ${targetWords} words. ${currentWords < targetWords ? 'Expand' : 'Condense'} the paper to approximately ${targetWords} words while maintaining quality and coherence.
+Keep ${citationStyle} citation style.
+Keep at least ${requiredReferenceCount} references.
+All references must be from 2020 onwards.
+All references must remain academic scholar paper sources, not book sources.
+Output only the revised paper.
 Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
 Return clean academic prose only.`;
 }
 
-export function buildCitationVerificationSystemPrompt(citationStyle: string) {
-  return `You are a citation verification expert. Review the paper and ensure all citations follow ${citationStyle} format. Fix any formatting issues. Output the corrected paper text only.
+export function buildCitationVerificationSystemPrompt(citationStyle: string, requiredReferenceCount: number) {
+  return `You are a citation verification expert. Review the paper and ensure all citations follow ${citationStyle} format.
+Keep at least ${requiredReferenceCount} references.
+All references must be from 2020 onwards.
+All references must remain academic scholar paper sources, not book sources.
+Fix any formatting issues. Output the corrected paper text only.
 Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
 Return clean academic prose only.`;
 }
@@ -368,7 +433,11 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
       input: [
         {
           role: 'system',
-          content: buildDraftGenerationSystemPrompt(input.targetWords, input.citationStyle),
+          content: buildDraftGenerationSystemPrompt(
+            input.targetWords,
+            input.citationStyle,
+            input.requiredReferenceCount,
+          ),
         },
         {
           role: 'user',
@@ -389,7 +458,10 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
     });
 
     let content = typeof response.output_text === 'string' ? response.output_text : '';
-    let assessment = assessGeneratedPaper(content);
+    let assessment = assessGeneratedPaper(content, {
+      requiredReferenceCount: input.requiredReferenceCount,
+      citationStyle: input.citationStyle,
+    });
 
     if (!assessment.valid) {
       const repairedResponse = await openai.responses.create({
@@ -397,7 +469,11 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
         input: [
           {
             role: 'system',
-            content: buildDraftGenerationSystemPrompt(input.targetWords, input.citationStyle),
+            content: buildDraftGenerationSystemPrompt(
+              input.targetWords,
+              input.citationStyle,
+              input.requiredReferenceCount,
+            ),
           },
           {
             role: 'user',
@@ -420,7 +496,10 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
       });
 
       content = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : content;
-      assessment = assessGeneratedPaper(content);
+      assessment = assessGeneratedPaper(content, {
+        requiredReferenceCount: input.requiredReferenceCount,
+        citationStyle: input.citationStyle,
+      });
       if (!assessment.valid) {
         throw new Error(`draft_invalid:${assessment.reasons.join(',')}`);
       }
@@ -448,7 +527,14 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
   }
 }
 
-async function calibrateWordCount(taskId: string, draft: string, targetWords: number, versionBase = 0): Promise<string> {
+async function calibrateWordCount(
+  taskId: string,
+  draft: string,
+  targetWords: number,
+  citationStyle: string,
+  requiredReferenceCount: number,
+  versionBase = 0,
+): Promise<string> {
   const currentWords = draft.split(/\s+/).filter(Boolean).length;
   const tolerance = 0.1;
 
@@ -473,7 +559,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
         input: [
           {
             role: 'system',
-            content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
+            content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
           },
           {
             role: 'user',
@@ -489,7 +575,10 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
       throw error;
     }
   }
-  let assessment = assessGeneratedPaper(calibrated);
+  let assessment = assessGeneratedPaper(calibrated, {
+    requiredReferenceCount,
+    citationStyle,
+  });
 
   if (!assessment.valid) {
     try {
@@ -500,7 +589,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
           input: [
             {
               role: 'system',
-              content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
+              content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
             },
             {
               role: 'user',
@@ -516,7 +605,10 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
       );
 
       const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : draft;
-      assessment = assessGeneratedPaper(repaired);
+      assessment = assessGeneratedPaper(repaired, {
+        requiredReferenceCount,
+        citationStyle,
+      });
       calibrated = assessment.valid ? repaired : draft;
     } catch (error) {
       if (!isWritingStageTimeoutError(error)) {
@@ -539,7 +631,13 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
   return calibrated;
 }
 
-async function verifyCitations(taskId: string, text: string, citationStyle: string, versionBase = 0): Promise<string> {
+async function verifyCitations(
+  taskId: string,
+  text: string,
+  citationStyle: string,
+  requiredReferenceCount: number,
+  versionBase = 0,
+): Promise<string> {
   let verified = text;
 
   try {
@@ -550,7 +648,7 @@ async function verifyCitations(taskId: string, text: string, citationStyle: stri
         input: [
           {
             role: 'system',
-            content: buildCitationVerificationSystemPrompt(citationStyle),
+            content: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
           },
           {
             role: 'user',
@@ -566,7 +664,10 @@ async function verifyCitations(taskId: string, text: string, citationStyle: stri
       throw error;
     }
   }
-  let assessment = assessGeneratedPaper(verified);
+  let assessment = assessGeneratedPaper(verified, {
+    requiredReferenceCount,
+    citationStyle,
+  });
 
   if (!assessment.valid) {
     try {
@@ -577,7 +678,7 @@ async function verifyCitations(taskId: string, text: string, citationStyle: stri
           input: [
             {
               role: 'system',
-              content: buildCitationVerificationSystemPrompt(citationStyle),
+              content: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
             },
             {
               role: 'user',
@@ -593,7 +694,10 @@ async function verifyCitations(taskId: string, text: string, citationStyle: stri
       );
 
       const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : text;
-      assessment = assessGeneratedPaper(repaired);
+      assessment = assessGeneratedPaper(repaired, {
+        requiredReferenceCount,
+        citationStyle,
+      });
       verified = assessment.valid ? repaired : text;
     } catch (error) {
       if (!isWritingStageTimeoutError(error)) {
@@ -649,14 +753,13 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     body: docBuffer,
   });
 
-  const citationReport = await generateCitationReport(finalText, task.citation_style, displayTitle);
-  const reportBuffer = await renderCitationReportPdf({
-    citationStyle: task.citation_style,
-    reportId: buildCitationReportId(new Date()),
-    generatedAt: new Date().toISOString().slice(0, 10),
-    essayTitle: displayTitle,
-    ...citationReport,
-  });
+  const citationReport = await generateCitationReport(
+    finalText,
+    task.citation_style,
+    displayTitle,
+    Number(task.required_reference_count || deriveWritingTaskRequirements(task).requiredReferenceCount),
+  );
+  const reportBuffer = await renderCitationReportPdf(citationReport);
   const reportPath = `${taskId}/citation-report.pdf`;
 
   await storeGeneratedTaskFile({
@@ -674,8 +777,21 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
 export async function regenerateDeliverableContent(input: WritingContextInput) {
   const versionBase = input.versionBase ?? await getDocumentVersionBase(input.taskId);
   const draft = await generateDraft({ ...input, versionBase });
-  const calibrated = await calibrateWordCount(input.taskId, draft, input.targetWords, versionBase);
-  return verifyCitations(input.taskId, calibrated, input.citationStyle, versionBase);
+  const calibrated = await calibrateWordCount(
+    input.taskId,
+    draft,
+    input.targetWords,
+    input.citationStyle,
+    input.requiredReferenceCount,
+    versionBase,
+  );
+  return verifyCitations(
+    input.taskId,
+    calibrated,
+    input.citationStyle,
+    input.requiredReferenceCount,
+    versionBase,
+  );
 }
 
 function buildCitationReportId(now: Date) {
@@ -685,8 +801,20 @@ function buildCitationReportId(now: Date) {
   return `Report ID: V532-${random}-${day}${month}`;
 }
 
-export async function generateCitationReport(text: string, citationStyle: string, essayTitle: string) {
-  const prompt = buildCitationReportPrompt(text, citationStyle);
+export async function generateCitationReport(
+  text: string,
+  citationStyle: string,
+  essayTitle: string,
+  requiredReferenceCount: number,
+): Promise<CitationReportData> {
+  const compliance = summarizeReferenceCompliance(text);
+  const prompt = buildCitationReportPrompt(text, citationStyle, {
+    requiredReferenceCount,
+    actualReferenceCount: compliance.totalReferences,
+    compliant2020Count: compliance.referencesFrom2020Onward,
+    suspectedBookCount: compliance.suspectedBookCount,
+    suspectedNonAcademicCount: compliance.suspectedNonAcademicCount,
+  });
 
   // Keep report generation on the same tuning as citation verification until we
   // have a concrete need to split them into separate stages.
@@ -704,5 +832,20 @@ export async function generateCitationReport(text: string, citationStyle: string
     ],
   });
 
-  return parseCitationReportData(typeof response.output_text === 'string' ? response.output_text : '', citationStyle);
+  const parsed = parseCitationReportData(typeof response.output_text === 'string' ? response.output_text : '', citationStyle);
+  const now = new Date();
+
+  return {
+    reportId: buildCitationReportId(now),
+    generatedAt: now.toISOString().slice(0, 10),
+    essayTitle,
+    citationStyle,
+    ...parsed,
+    keyFindings: [
+      `This task requires at least ${requiredReferenceCount} references. The essay currently contains ${compliance.totalReferences}.`,
+      `${compliance.referencesFrom2020Onward} references appear to be from 2020 onwards.`,
+      `${compliance.suspectedBookCount} references look like books and ${compliance.suspectedNonAcademicCount} look non-compliant with the academic paper rule.`,
+      ...parsed.keyFindings,
+    ],
+  };
 }

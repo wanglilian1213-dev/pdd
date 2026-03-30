@@ -5,6 +5,7 @@ import { renderCitationReportPdf } from './citationReportTemplateService';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 import { getConfig } from './configService';
+import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 
 type GeneratedCategory = 'final_doc' | 'citation_report' | 'humanized_doc';
 
@@ -21,6 +22,7 @@ interface RepairTaskDeliveryDeps {
     title: string;
     paperTitle: string | null;
     citationStyle: string;
+    requiredReferenceCount: number;
     courseCode: string | null;
   } | null>;
   loadDeliveryContent: (taskId: string) => Promise<{
@@ -30,7 +32,12 @@ interface RepairTaskDeliveryDeps {
   listGeneratedFiles: (taskId: string) => Promise<ExistingGeneratedFile[]>;
   removeGeneratedFile: (file: ExistingGeneratedFile) => Promise<void>;
   buildWordBuffer: (text: string, options: { paperTitle: string; courseCode: string | null }) => Promise<Buffer>;
-  buildCitationReportData: (text: string, citationStyle: string, essayTitle: string) => Promise<any>;
+  buildCitationReportData: (
+    text: string,
+    citationStyle: string,
+    essayTitle: string,
+    requiredReferenceCount: number,
+  ) => Promise<any>;
   buildCitationReportPdf: (reportData: any) => Promise<Buffer>;
   storeGeneratedTaskFile: typeof storeGeneratedTaskFile;
   now: () => Date;
@@ -46,7 +53,7 @@ const defaultRepairTaskDeliveryDeps: RepairTaskDeliveryDeps = {
   loadTaskMeta: async (taskId) => {
     const { data, error } = await supabaseAdmin
       .from('tasks')
-      .select('id, title, paper_title, citation_style, course_code')
+      .select('id, title, paper_title, citation_style, target_words, required_reference_count, course_code')
       .eq('id', taskId)
       .single();
 
@@ -54,11 +61,17 @@ const defaultRepairTaskDeliveryDeps: RepairTaskDeliveryDeps = {
       return null;
     }
 
+    const unifiedRequirements = deriveUnifiedTaskRequirements({
+      targetWords: Number(data.target_words || 1000),
+      citationStyle: String(data.citation_style || 'APA 7'),
+    });
+
     return {
       id: data.id as string,
       title: String(data.title || ''),
       paperTitle: data.paper_title ? String(data.paper_title) : null,
-      citationStyle: String(data.citation_style || 'APA 7'),
+      citationStyle: unifiedRequirements.citationStyle,
+      requiredReferenceCount: Number(data.required_reference_count || unifiedRequirements.requiredReferenceCount),
       courseCode: data.course_code ? String(data.course_code) : null,
     };
   },
@@ -126,7 +139,8 @@ const defaultRepairTaskDeliveryDeps: RepairTaskDeliveryDeps = {
     await supabaseAdmin.from('task_files').delete().eq('id', file.id);
   },
   buildWordBuffer: async (text, options) => buildFormattedPaperDocBuffer(text, options),
-  buildCitationReportData: async (text, citationStyle, essayTitle) => generateCitationReport(text, citationStyle, essayTitle),
+  buildCitationReportData: async (text, citationStyle, essayTitle, requiredReferenceCount) =>
+    generateCitationReport(text, citationStyle, essayTitle, requiredReferenceCount),
   buildCitationReportPdf: async (reportData) => renderCitationReportPdf(reportData),
   storeGeneratedTaskFile,
   now: () => new Date(),
@@ -184,6 +198,7 @@ export async function repairTaskDeliveryFilesWithDeps(
     finalText,
     task.citationStyle,
     displayTitle,
+    task.requiredReferenceCount,
   );
   const reportBuffer = await deps.buildCitationReportPdf(citationReportData);
   await deps.storeGeneratedTaskFile({

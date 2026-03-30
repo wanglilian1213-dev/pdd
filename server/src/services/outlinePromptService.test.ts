@@ -9,23 +9,23 @@ import {
 test('buildInitialOutlinePrompt includes outline length rules and JSON response contract', () => {
   const prompt = buildInitialOutlinePrompt({
     specialRequirements: 'Focus on urban logistics and keep the tone formal.',
+    targetWords: 2500,
+    citationStyle: 'Harvard',
+    requiredSectionCount: 5,
+    requiredReferenceCount: 15,
   });
 
-  assert.match(prompt.systemPrompt, /default to 1000 words/i);
-  assert.match(prompt.systemPrompt, /1000 words.*3 sections/i);
-  assert.match(prompt.systemPrompt, /2500 words.*4 sections/i);
-  assert.match(prompt.systemPrompt, /4000 words.*5 sections/i);
-  assert.match(prompt.systemPrompt, /introduction and conclusion count within the total section count/i);
+  assert.match(prompt.systemPrompt, /fixed task requirements/i);
+  assert.match(prompt.systemPrompt, /target_words.*2500/i);
+  assert.match(prompt.systemPrompt, /citation_style.*harvard/i);
+  assert.match(prompt.systemPrompt, /required_section_count.*5/i);
+  assert.match(prompt.systemPrompt, /required_reference_count.*15/i);
   assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
   assert.match(prompt.systemPrompt, /each bullet point should stay on a single line starting with "- "/i);
   assert.match(prompt.systemPrompt, /"outline"/i);
   assert.match(prompt.systemPrompt, /"paper_title"/i);
   assert.match(prompt.systemPrompt, /"research_question"/i);
-  assert.match(prompt.systemPrompt, /"target_words"/i);
-  assert.match(prompt.systemPrompt, /"citation_style"/i);
-  assert.match(prompt.systemPrompt, /extract the citation style from the material files and instructions/i);
-  assert.match(prompt.systemPrompt, /return one final citation_style only/i);
-  assert.match(prompt.systemPrompt, /do not combine multiple citation styles/i);
+  assert.doesNotMatch(prompt.systemPrompt, /decide the final target_words yourself/i);
   assert.match(prompt.systemPrompt, /generate a concrete english paper title/i);
   assert.match(prompt.systemPrompt, /generate a concrete research question/i);
 
@@ -38,17 +38,20 @@ test('buildRegenerateOutlinePrompt includes previous outline, old requirements, 
     currentOutline: 'I. Introduction\n- Background\nII. Main Discussion\n- Point A',
     currentTargetWords: 2500,
     currentCitationStyle: 'APA 7',
+    requiredSectionCount: 5,
+    requiredReferenceCount: 15,
     specialRequirements: 'Use transportation policy examples.',
     editInstruction: 'Change the paper to 4000 words and add a section on drone delivery.',
   });
 
-  assert.match(prompt.systemPrompt, /default to 1000 words/i);
-  assert.match(prompt.systemPrompt, /2500 words.*4 sections/i);
-  assert.match(prompt.systemPrompt, /4000 words.*5 sections/i);
+  assert.match(prompt.systemPrompt, /fixed task requirements/i);
+  assert.match(prompt.systemPrompt, /2500/i);
+  assert.match(prompt.systemPrompt, /APA 7/i);
+  assert.match(prompt.systemPrompt, /15/i);
   assert.match(prompt.systemPrompt, /must contain between 3 and 5 bullet points/i);
-  assert.match(prompt.systemPrompt, /if older instructions and newer instructions conflict, decide the final target_words yourself/i);
   assert.match(prompt.systemPrompt, /"paper_title"/i);
   assert.match(prompt.systemPrompt, /"research_question"/i);
+  assert.doesNotMatch(prompt.systemPrompt, /decide the final target_words yourself/i);
 
   assert.match(prompt.userPrompt, /I\. Introduction/);
   assert.match(prompt.userPrompt, /2500/);
@@ -62,6 +65,8 @@ test('buildRegenerateOutlinePrompt keeps original requirements even when blank e
     currentOutline: 'Outline text',
     currentTargetWords: 1000,
     currentCitationStyle: 'MLA 9',
+    requiredSectionCount: 3,
+    requiredReferenceCount: 5,
     specialRequirements: 'Keep a concise comparative structure.',
     editInstruction: 'Please make the second section stronger.',
   });
@@ -75,6 +80,8 @@ test('buildRepairOutlinePrompt explicitly fixes sections that break the 3 to 5 b
     currentOutline: 'I. Introduction\n- One\n- Two',
     currentTargetWords: 1000,
     currentCitationStyle: 'APA 7',
+    requiredSectionCount: 3,
+    requiredReferenceCount: 5,
     specialRequirements: 'Keep the tone formal.',
     editInstruction: 'None',
     violationSummary: '- I. Introduction: 2 bullet points',

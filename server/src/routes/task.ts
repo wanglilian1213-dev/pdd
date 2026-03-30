@@ -10,7 +10,6 @@ import { captureError } from '../lib/errorMonitor';
 import { deriveTaskTitle } from '../services/paperTitleService';
 import {
   validateEditInstruction,
-  validateOptionalTargetWords,
   validateTaskListStatus,
 } from '../services/requestValidationService';
 
@@ -122,13 +121,7 @@ router.post('/:id/outline/regenerate', async (req: AuthRequest, res: Response) =
 // POST /api/task/:id/outline/confirm
 router.post('/:id/outline/confirm', async (req: AuthRequest, res: Response) => {
   try {
-    const { targetWords, citationStyle } = req.body;
-    const result = await confirmOutline(
-      req.params.id as string,
-      req.userId!,
-      validateOptionalTargetWords(targetWords),
-      citationStyle,
-    );
+    const result = await confirmOutline(req.params.id as string, req.userId!);
     res.json({ success: true, data: result });
   } catch (err: unknown) {
     const appErr = err as { statusCode?: number; userMessage?: string };

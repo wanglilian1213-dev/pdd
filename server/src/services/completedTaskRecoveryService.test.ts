@@ -14,6 +14,8 @@ test('title-only dirty completed task only rebuilds delivery files with formal t
       specialRequirements: '',
       targetWords: 1000,
       citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
+      requiredSectionCount: 3,
       courseCode: null,
       status: 'completed',
       stage: 'completed',
@@ -26,10 +28,25 @@ test('title-only dirty completed task only rebuilds delivery files with formal t
       researchQuestion: 'To what extent should small businesses use AI in strategy writing?',
       targetWords: 1000,
       citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
+      requiredSectionCount: 3,
     }),
     loadMaterialFiles: async () => [],
     loadCurrentDeliveryContent: async () => ({
-      finalText: 'Body text with citation (Smith, 2024).\n\nReferences\nSmith, J. (2024). Example. https://example.com',
+      finalText: [
+        'Body text with citations (Smith, 2024; Jones, 2023; Lee, 2022; Brown, 2021; Khan, 2020).',
+        '',
+        'References',
+        'Smith, J. (2024). Strategic writing and AI. Journal of Business Writing, 12(2), 1-10. https://doi.org/10.1000/test1',
+        '',
+        'Jones, A. (2023). Managing evidence in academic reports. Studies in Higher Education, 18(1), 11-20. https://doi.org/10.1000/test2',
+        '',
+        'Lee, M. (2022). Critical analysis in short reports. Academic Review, 7(3), 21-30. https://doi.org/10.1000/test3',
+        '',
+        'Brown, T. (2021). Source integration in university writing. Journal of Writing Studies, 9(4), 31-40. https://doi.org/10.1000/test4',
+        '',
+        'Khan, R. (2020). Citation practice in undergraduate assessment. Education Quarterly, 5(2), 41-50. https://doi.org/10.1000/test5',
+      ].join('\n'),
       humanizedText: null,
     }),
     ensureUsableOutline: async (task, outline) => {
@@ -41,6 +58,8 @@ test('title-only dirty completed task only rebuilds delivery files with formal t
         researchQuestion: 'To what extent should small businesses use AI in strategy writing?',
         targetWords: 1000,
         citationStyle: 'APA 7',
+        requiredReferenceCount: 5,
+        requiredSectionCount: 3,
         courseCode: null,
       };
     },
@@ -58,7 +77,7 @@ test('title-only dirty completed task only rebuilds delivery files with formal t
   assert.deepEqual(calls, [
     'ensure-outline',
     'sync:task-1:Should Small Businesses Use AI for Strategy Writing?',
-    'rebuild:task-1:true:true',
+    'rebuild:task-1:false:true',
   ]);
 });
 
@@ -74,6 +93,8 @@ test('content-bad completed task reruns content with repaired outline and rebuil
       specialRequirements: 'Focus on small businesses.',
       targetWords: 1000,
       citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
+      requiredSectionCount: 3,
       courseCode: null,
       status: 'completed',
       stage: 'completed',
@@ -86,6 +107,8 @@ test('content-bad completed task reruns content with repaired outline and rebuil
       researchQuestion: '[Research Question]',
       targetWords: 1000,
       citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
+      requiredSectionCount: 3,
     }),
     loadMaterialFiles: async () => ([
       { original_name: 'Report Marking Criteria.pdf', storage_path: 'task-2/rubric.pdf', mime_type: 'application/pdf' },
@@ -103,6 +126,8 @@ test('content-bad completed task reruns content with repaired outline and rebuil
         researchQuestion: 'To what extent should small businesses use AI in strategy writing?',
         targetWords: 1000,
         citationStyle: 'APA 7',
+        requiredReferenceCount: 5,
+        requiredSectionCount: 3,
         courseCode: 'BUSI1001',
       };
     },

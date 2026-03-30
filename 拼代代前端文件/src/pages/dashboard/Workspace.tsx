@@ -24,6 +24,8 @@ interface Outline {
   content: string;
   target_words?: number;
   citation_style?: string;
+  required_reference_count?: number;
+  required_section_count?: number;
 }
 
 interface HumanizeJob {
@@ -512,11 +514,7 @@ export default function Workspace() {
     setIsConfirmingOutline(true);
 
     try {
-      const data = await api.confirmOutline(
-        taskData.task.id,
-        taskData.outline?.target_words,
-        taskData.outline?.citation_style,
-      );
+      const data = await api.confirmOutline(taskData.task.id);
       setTaskData(prev => prev ? { ...prev, task: data.task ?? { ...prev.task, stage: 'writing' } } : prev);
       setStep(3);
       await refreshBalance();
@@ -736,7 +734,7 @@ export default function Workspace() {
                 <label className="text-sm font-medium text-gray-900">特殊要求补充（选填）</label>
                 <textarea
                   className="w-full h-32 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-700 focus:border-transparent resize-none"
-                  placeholder="例如：请使用 APA 7th 引用格式，字数控制在 2000 字左右，重点分析第三个案例..."
+                  placeholder="例如：重点分析第三个案例，强调方法部分和局限性，对第二章增加批判性讨论..."
                   value={specialRequirements}
                   onChange={e => setSpecialRequirements(e.target.value)}
                 ></textarea>
@@ -799,6 +797,12 @@ export default function Workspace() {
                   )}
                   {taskData.outline.citation_style && (
                     <div className="text-gray-500">引用格式: <span className="font-medium text-gray-900">{taskData.outline.citation_style}</span></div>
+                  )}
+                  {taskData.outline.required_reference_count && (
+                    <div className="text-gray-500">最少引用数量: <span className="font-medium text-gray-900">{taskData.outline.required_reference_count} 条</span></div>
+                  )}
+                  {taskData.outline.required_section_count && (
+                    <div className="text-gray-500">章节数量: <span className="font-medium text-gray-900">{taskData.outline.required_section_count} 章</span></div>
                   )}
                 </div>
               )}

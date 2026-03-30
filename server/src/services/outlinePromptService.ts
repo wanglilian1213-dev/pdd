@@ -5,6 +5,10 @@ interface OutlinePrompt {
 
 interface InitialOutlinePromptInput {
   specialRequirements?: string | null;
+  targetWords: number;
+  citationStyle: string;
+  requiredSectionCount: number;
+  requiredReferenceCount: number;
 }
 
 interface RegenerateOutlinePromptInput {
@@ -13,6 +17,8 @@ interface RegenerateOutlinePromptInput {
   currentResearchQuestion?: string | null;
   currentTargetWords?: number | null;
   currentCitationStyle?: string | null;
+  requiredSectionCount: number;
+  requiredReferenceCount: number;
   specialRequirements?: string | null;
   editInstruction: string;
 }
@@ -23,6 +29,8 @@ interface RepairOutlinePromptInput {
   currentResearchQuestion?: string | null;
   currentTargetWords?: number | null;
   currentCitationStyle?: string | null;
+  requiredSectionCount: number;
+  requiredReferenceCount: number;
   specialRequirements?: string | null;
   editInstruction?: string | null;
   violationSummary: string;
@@ -38,34 +46,55 @@ const OUTLINE_RESPONSE_SCHEMA = `Respond with valid JSON only in this shape:
   "citation_style": "string"
 }`;
 
+function buildFixedRequirementBlock(input: {
+  targetWords: number;
+  citationStyle: string;
+  requiredSectionCount: number;
+  requiredReferenceCount: number;
+}) {
+  return `Fixed task requirements:
+- target_words: ${input.targetWords}
+- citation_style: ${input.citationStyle}
+- required_section_count: ${input.requiredSectionCount}
+- required_reference_count: ${input.requiredReferenceCount}
+
+These values are already decided by the system.
+Do not change them.
+Return the same target_words and citation_style values in the JSON response.`;
+}
+
 const OUTLINE_PLANNING_RULES = `Outline planning rules:
-- If the materials and instructions do not clearly specify a word count, default to 1000 words.
-- Use these section-count anchors as planning guidance: 1000 words -> 3 sections total, 2500 words -> 4 sections total, 4000 words -> 5 sections total.
-- Scale the total section count upward as the target word count increases, using the same progression as the anchors above.
+- The outline must contain exactly the required_section_count sections.
 - Introduction and Conclusion count within the total section count.
 - Every section must contain between 3 and 5 bullet points.
 - Each bullet point should stay on a single line starting with "- ".
 - Generate a concrete English paper title that can be used directly as the final delivery title.
 - Generate a concrete research question.
 - Never use rubric names, file names, scoring guide names, or placeholders as the final paper title.
-- Extract the citation style from the material files and instructions, then return one final citation_style only.
-- Do not combine multiple citation styles into one label.
-- If one source gives a broad family and another gives a more specific format inside that family, return the more specific final format.
-- If the materials mention APA without a version, use APA 7 as the final citation_style.
-- If older instructions and newer instructions conflict, decide the final target_words yourself and return that chosen value in the JSON response.`;
+- Keep the outline aligned with the fixed target_words and citation_style requirements.`;
 
 function normalizeText(value: string | null | undefined, fallback = 'None') {
   const normalized = value?.trim();
   return normalized ? normalized : fallback;
 }
 
-function buildSystemPrompt(action: 'generate' | 'revise') {
+function buildSystemPrompt(
+  action: 'generate' | 'revise',
+  requirements: {
+    targetWords: number;
+    citationStyle: string;
+    requiredSectionCount: number;
+    requiredReferenceCount: number;
+  },
+) {
   const actionInstruction = action === 'generate'
     ? 'Read every attached material file directly and generate a detailed English academic paper outline.'
     : 'Revise the existing English academic paper outline using all provided old and new requirements.';
 
   return `You are an academic writing assistant.
 ${actionInstruction}
+
+${buildFixedRequirementBlock(requirements)}
 
 ${OUTLINE_PLANNING_RULES}
 
@@ -74,19 +103,24 @@ ${OUTLINE_RESPONSE_SCHEMA}`;
 
 export function buildInitialOutlinePrompt(input: InitialOutlinePromptInput): OutlinePrompt {
   return {
-    systemPrompt: buildSystemPrompt('generate'),
+    systemPrompt: buildSystemPrompt('generate', input),
     userPrompt: `Please read every uploaded material file directly and generate an English academic paper outline from the full material set.
 
 Original special requirements:
 ${normalizeText(input.specialRequirements)}
 
-Follow the outline planning rules in the system instructions, decide the final target_words yourself, and return JSON only.`,
+Follow the fixed task requirements in the system instructions and return JSON only.`,
   };
 }
 
 export function buildRegenerateOutlinePrompt(input: RegenerateOutlinePromptInput): OutlinePrompt {
   return {
-    systemPrompt: buildSystemPrompt('revise'),
+    systemPrompt: buildSystemPrompt('revise', {
+      targetWords: input.currentTargetWords ?? 1000,
+      citationStyle: normalizeText(input.currentCitationStyle, 'APA 7'),
+      requiredSectionCount: input.requiredSectionCount,
+      requiredReferenceCount: input.requiredReferenceCount,
+    }),
     userPrompt: `Revise the outline by considering the previous outline and every instruction together.
 
 Current outline:
@@ -110,7 +144,7 @@ ${normalizeText(input.specialRequirements)}
 New revision request:
 ${normalizeText(input.editInstruction)}
 
-If older instructions and newer instructions conflict, decide the final target_words yourself. Follow the outline planning rules and return JSON only.`,
+Keep the fixed task requirements unchanged. Follow the outline planning rules and return JSON only.`,
   };
 }
 
@@ -118,7 +152,14 @@ export function buildRepairOutlinePrompt(input: RepairOutlinePromptInput): Outli
   return {
     systemPrompt: `You are correcting an English academic paper outline.
 
-Keep the paper meaning, target_words, and citation_style aligned with the provided context.
+Keep the paper meaning aligned with the provided context.
+
+${buildFixedRequirementBlock({
+  targetWords: input.currentTargetWords ?? 1000,
+  citationStyle: normalizeText(input.currentCitationStyle, 'APA 7'),
+  requiredSectionCount: input.requiredSectionCount,
+  requiredReferenceCount: input.requiredReferenceCount,
+})}
 
 ${OUTLINE_PLANNING_RULES}
 
@@ -152,6 +193,6 @@ ${input.violationSummary}
 Other quality issues that must be fixed:
 ${normalizeText(input.qualityIssueSummary, 'None')}
 
-Rewrite the outline so every section follows the rule exactly. Keep the bullets concise, keep each bullet on one line starting with "- ", and return JSON only.`,
+Rewrite the outline so every section follows the rule exactly. Keep each bullet on one line starting with "- ", keep the fixed task requirements unchanged, and return JSON only.`,
   };
 }

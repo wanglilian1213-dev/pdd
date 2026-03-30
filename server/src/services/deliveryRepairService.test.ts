@@ -12,6 +12,7 @@ test('repairTaskDeliveryFilesWithDeps rebuilds final doc and citation report wit
       title: 'Essay Topic.txt',
       paperTitle: 'A Better Essay Title',
       citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
       courseCode: 'BUSI1001',
     }),
     loadDeliveryContent: async () => ({
@@ -31,10 +32,11 @@ test('repairTaskDeliveryFilesWithDeps rebuilds final doc and citation report wit
       assert.equal(options.courseCode, 'BUSI1001');
       return Buffer.from('word');
     },
-    buildCitationReportData: async (text, citationStyle, essayTitle) => {
+    buildCitationReportData: async (text, citationStyle, essayTitle, requiredReferenceCount) => {
       assert.equal(text, 'Final paper body');
       assert.equal(citationStyle, 'APA 7');
       assert.equal(essayTitle, 'A Better Essay Title');
+      assert.equal(requiredReferenceCount, 5);
       return { essayTitle, generatedAtIso: '2026-03-30T00:00:00.000Z' };
     },
     buildCitationReportPdf: async (reportData) => {

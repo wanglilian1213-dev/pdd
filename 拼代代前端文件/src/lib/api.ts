@@ -66,10 +66,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ editInstruction }),
     }),
-  confirmOutline: (taskId: string, targetWords?: number, citationStyle?: string) =>
+  confirmOutline: (taskId: string) =>
     request<any>(`/api/task/${taskId}/outline/confirm`, {
       method: 'POST',
-      body: JSON.stringify({ targetWords, citationStyle }),
+      body: JSON.stringify({}),
     }),
   discardTask: (taskId: string) =>
     request<any>(`/api/task/${taskId}/discard`, { method: 'POST' }),

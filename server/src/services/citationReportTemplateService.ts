@@ -87,7 +87,23 @@ function safeJsonParse(content: string) {
   }
 }
 
-export function buildCitationReportPrompt(text: string, citationStyle: string): CitationReportPrompt {
+export function buildCitationReportPrompt(
+  text: string,
+  citationStyle: string,
+  compliance: {
+    requiredReferenceCount: number;
+    actualReferenceCount: number;
+    compliant2020Count: number;
+    suspectedBookCount: number;
+    suspectedNonAcademicCount: number;
+  } = {
+    requiredReferenceCount: 0,
+    actualReferenceCount: 0,
+    compliant2020Count: 0,
+    suspectedBookCount: 0,
+    suspectedNonAcademicCount: 0,
+  },
+): CitationReportPrompt {
   return {
     systemPrompt: `You are an expert academic reference validator specializing in academic citation checking.
 Return valid JSON only.
@@ -119,6 +135,15 @@ Return JSON in this shape:
   "recommendations": ["string"]
 }`,
     userPrompt: `Analyze the following essay and prepare a professional citation validation report for ${citationStyle}.
+
+Task compliance requirements:
+- minimum required references: ${compliance.requiredReferenceCount}
+- actual detected references: ${compliance.actualReferenceCount}
+- references from 2020 onwards detected: ${compliance.compliant2020Count}
+- suspected book sources: ${compliance.suspectedBookCount}
+- suspected non-academic sources: ${compliance.suspectedNonAcademicCount}
+
+Judge the essay against these requirements as well as the citation formatting quality.
 
 Essay content:
 ${text}`,

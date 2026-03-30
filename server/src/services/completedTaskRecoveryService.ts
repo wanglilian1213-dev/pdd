@@ -5,6 +5,7 @@ import { ensureUsableOutlineForTask, type UsableOutlineResult } from './outlineS
 import { type StoredMaterialFile } from './materialInputService';
 import { regenerateDeliverableContent } from './writingService';
 import { assessGeneratedPaper } from './paperQualityService';
+import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 
 interface RecoveryTaskMeta {
   id: string;
@@ -14,6 +15,8 @@ interface RecoveryTaskMeta {
   specialRequirements: string;
   targetWords: number;
   citationStyle: string;
+  requiredReferenceCount: number;
+  requiredSectionCount: number;
   courseCode: string | null;
   status: string;
   stage: string;
@@ -29,6 +32,8 @@ interface RecoveryDeps {
     researchQuestion: string | null;
     targetWords: number;
     citationStyle: string;
+    requiredReferenceCount: number;
+    requiredSectionCount: number;
   } | null>;
   loadMaterialFiles: (taskId: string) => Promise<StoredMaterialFile[]>;
   loadCurrentDeliveryContent: (taskId: string) => Promise<{
@@ -48,6 +53,7 @@ interface RecoveryDeps {
     researchQuestion: string;
     targetWords: number;
     citationStyle: string;
+    requiredReferenceCount: number;
     requirements: string;
     courseCode: string | null;
   }) => Promise<string>;
@@ -56,6 +62,8 @@ interface RecoveryDeps {
     researchQuestion: string;
     targetWords: number;
     citationStyle: string;
+    requiredReferenceCount: number;
+    requiredSectionCount: number;
     courseCode: string | null;
   }) => Promise<void>;
   rebuildDeliveryFiles: (taskId: string, options: {
@@ -68,7 +76,7 @@ const defaultRecoveryDeps: RecoveryDeps = {
   loadTask: async (taskId) => {
     const { data, error } = await supabaseAdmin
       .from('tasks')
-      .select('id, title, paper_title, research_question, special_requirements, target_words, citation_style, course_code, status, stage')
+      .select('id, title, paper_title, research_question, special_requirements, target_words, citation_style, required_reference_count, required_section_count, course_code, status, stage')
       .eq('id', taskId)
       .single();
 
@@ -76,14 +84,21 @@ const defaultRecoveryDeps: RecoveryDeps = {
       return null;
     }
 
+    const unifiedRequirements = deriveUnifiedTaskRequirements({
+      targetWords: Number(data.target_words || 1000),
+      citationStyle: String(data.citation_style || 'APA 7'),
+    });
+
     return {
       id: String(data.id),
       title: String(data.title || ''),
       paperTitle: data.paper_title ? String(data.paper_title) : null,
       researchQuestion: data.research_question ? String(data.research_question) : null,
       specialRequirements: String(data.special_requirements || ''),
-      targetWords: Number(data.target_words || 1000),
-      citationStyle: String(data.citation_style || 'APA 7'),
+      targetWords: unifiedRequirements.targetWords,
+      citationStyle: unifiedRequirements.citationStyle,
+      requiredReferenceCount: Number(data.required_reference_count || unifiedRequirements.requiredReferenceCount),
+      requiredSectionCount: Number(data.required_section_count || unifiedRequirements.requiredSectionCount),
       courseCode: data.course_code ? String(data.course_code) : null,
       status: String(data.status || ''),
       stage: String(data.stage || ''),
@@ -92,7 +107,7 @@ const defaultRecoveryDeps: RecoveryDeps = {
   loadLatestOutline: async (taskId) => {
     const { data, error } = await supabaseAdmin
       .from('outline_versions')
-      .select('id, version, content, paper_title, research_question, target_words, citation_style')
+      .select('id, version, content, paper_title, research_question, target_words, citation_style, required_reference_count, required_section_count')
       .eq('task_id', taskId)
       .order('version', { ascending: false })
       .limit(1)
@@ -102,14 +117,21 @@ const defaultRecoveryDeps: RecoveryDeps = {
       return null;
     }
 
+    const unifiedRequirements = deriveUnifiedTaskRequirements({
+      targetWords: Number(data.target_words || 1000),
+      citationStyle: String(data.citation_style || 'APA 7'),
+    });
+
     return {
       id: String(data.id),
       version: Number(data.version || 1),
       content: String(data.content || ''),
       paperTitle: data.paper_title ? String(data.paper_title) : null,
       researchQuestion: data.research_question ? String(data.research_question) : null,
-      targetWords: Number(data.target_words || 1000),
-      citationStyle: String(data.citation_style || 'APA 7'),
+      targetWords: unifiedRequirements.targetWords,
+      citationStyle: unifiedRequirements.citationStyle,
+      requiredReferenceCount: Number(data.required_reference_count || unifiedRequirements.requiredReferenceCount),
+      requiredSectionCount: Number(data.required_section_count || unifiedRequirements.requiredSectionCount),
     };
   },
   loadMaterialFiles: async (taskId) => {
@@ -166,6 +188,7 @@ const defaultRecoveryDeps: RecoveryDeps = {
     researchQuestion: payload.researchQuestion,
     targetWords: payload.targetWords,
     citationStyle: payload.citationStyle,
+    requiredReferenceCount: payload.requiredReferenceCount,
     requirements: payload.requirements,
     courseCode: payload.courseCode,
   }),
@@ -177,6 +200,8 @@ const defaultRecoveryDeps: RecoveryDeps = {
         research_question: payload.researchQuestion,
         target_words: payload.targetWords,
         citation_style: payload.citationStyle,
+        required_reference_count: payload.requiredReferenceCount,
+        required_section_count: payload.requiredSectionCount,
         course_code: payload.courseCode,
         updated_at: new Date().toISOString(),
       })
@@ -217,7 +242,10 @@ export async function remediateCompletedTaskWithDeps(taskId: string, deps: Recov
   const materialFiles = await deps.loadMaterialFiles(taskId);
   const usableOutline = await deps.ensureUsableOutline(task, latestOutline, materialFiles);
   const currentDelivery = await deps.loadCurrentDeliveryContent(taskId);
-  const contentAssessment = assessGeneratedPaper(currentDelivery.finalText);
+  const contentAssessment = assessGeneratedPaper(currentDelivery.finalText, {
+    requiredReferenceCount: usableOutline.requiredReferenceCount,
+    citationStyle: usableOutline.citationStyle,
+  });
   const needsContentRecovery = !contentAssessment.valid;
 
   let finalText = currentDelivery.finalText;
@@ -230,6 +258,7 @@ export async function remediateCompletedTaskWithDeps(taskId: string, deps: Recov
       researchQuestion: usableOutline.researchQuestion,
       targetWords: usableOutline.targetWords,
       citationStyle: usableOutline.citationStyle,
+      requiredReferenceCount: usableOutline.requiredReferenceCount,
       requirements: task.specialRequirements,
       courseCode: usableOutline.courseCode,
     });
@@ -240,6 +269,8 @@ export async function remediateCompletedTaskWithDeps(taskId: string, deps: Recov
     researchQuestion: usableOutline.researchQuestion,
     targetWords: usableOutline.targetWords,
     citationStyle: usableOutline.citationStyle,
+    requiredReferenceCount: usableOutline.requiredReferenceCount,
+    requiredSectionCount: usableOutline.requiredSectionCount,
     courseCode: usableOutline.courseCode,
   });
 
