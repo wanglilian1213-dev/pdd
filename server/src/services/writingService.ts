@@ -21,7 +21,7 @@ import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 
 export const assessGeneratedPaper = assessGeneratedPaperInternal;
 const REWRITE_STAGE_TIMEOUT_MS = 60_000;
-const DRAFT_GENERATION_TIMEOUT_MS = 180_000;
+const DRAFT_GENERATION_TIMEOUT_MS = 600_000;
 
 interface WritingContextInput {
   taskId: string;
