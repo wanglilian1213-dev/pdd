@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDraftGenerationSystemPrompt, storeGeneratedTaskFile } from './writingService';
+import {
+  buildDraftGenerationSystemPrompt,
+  buildWordCalibrationSystemPrompt,
+  buildCitationVerificationSystemPrompt,
+  storeGeneratedTaskFile,
+} from './writingService';
 
 test('buildDraftGenerationSystemPrompt includes the stronger first-draft writing rules', () => {
   const prompt = buildDraftGenerationSystemPrompt(2500, 'APA 7');
@@ -14,6 +19,21 @@ test('buildDraftGenerationSystemPrompt includes the stronger first-draft writing
   assert.match(prompt, /Do not Use straight quotation marks/i);
   assert.match(prompt, /Do not use em dash/i);
   assert.match(prompt, /each references should come with proper link/i);
+  assert.match(prompt, /Do not use Markdown syntax/i);
+});
+
+test('buildWordCalibrationSystemPrompt also forbids markdown-style output', () => {
+  const prompt = buildWordCalibrationSystemPrompt(1200, 1500);
+
+  assert.match(prompt, /Output only the revised paper/i);
+  assert.match(prompt, /Do not use Markdown syntax/i);
+});
+
+test('buildCitationVerificationSystemPrompt also forbids markdown-style output', () => {
+  const prompt = buildCitationVerificationSystemPrompt('APA 7');
+
+  assert.match(prompt, /Output the corrected paper text only/i);
+  assert.match(prompt, /Do not use Markdown syntax/i);
 });
 
 test('storeGeneratedTaskFile throws when storage upload fails', async () => {

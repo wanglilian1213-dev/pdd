@@ -6,6 +6,7 @@ import {
   Paragraph,
   TextRun,
 } from 'docx';
+import { normalizeDeliveryPaperTitle } from './paperTitleService';
 
 export type PaperParagraphKind =
   | 'cover_course_code'
@@ -18,6 +19,7 @@ export type PaperParagraphKind =
 export interface PaperParagraphModel {
   kind: PaperParagraphKind;
   text: string;
+  runs: PaperTextRunModel[];
   fontFamily: string;
   fontSize: number;
   bold: boolean;
@@ -25,6 +27,12 @@ export interface PaperParagraphModel {
   lineSpacing: number;
   hangingIndent: boolean;
   pageBreakBefore: boolean;
+}
+
+export interface PaperTextRunModel {
+  text: string;
+  bold: boolean;
+  italics: boolean;
 }
 
 interface PaperLayoutModel {
@@ -44,12 +52,88 @@ const DOCX_LINE_SPACING = 360;
 const HANGING_INDENT_TWIPS = 720;
 const REFERENCE_HEADINGS = new Set(['references', 'reference list', 'bibliography', 'works cited']);
 
-function cleanInlineFormatting(value: string) {
+function stripLeadingMarkdownSyntax(value: string) {
   return value
     .replace(/^#{1,6}\s*/, '')
-    .replace(/^[-*]\s+/, '')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/__(.*?)__/g, '$1')
+    .replace(/^[-*+]\s+/, '')
+    .replace(/^\d+\.\s+/, '')
+    .trim();
+}
+
+function mergeRuns(runs: PaperTextRunModel[]) {
+  const merged: PaperTextRunModel[] = [];
+
+  for (const run of runs) {
+    if (!run.text) {
+      continue;
+    }
+
+    const previous = merged[merged.length - 1];
+    if (previous && previous.bold === run.bold && previous.italics === run.italics) {
+      previous.text += run.text;
+      continue;
+    }
+
+    merged.push({ ...run });
+  }
+
+  return merged;
+}
+
+function parseInlineRuns(value: string): PaperTextRunModel[] {
+  const source = stripLeadingMarkdownSyntax(value);
+  const pattern = /(\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|_([^_\n]+)_|`([^`\n]+)`)/g;
+  const runs: PaperTextRunModel[] = [];
+  let lastIndex = 0;
+
+  for (const match of source.matchAll(pattern)) {
+    const matchText = match[0];
+    const index = match.index ?? 0;
+
+    if (index > lastIndex) {
+      runs.push({
+        text: source.slice(lastIndex, index),
+        bold: false,
+        italics: false,
+      });
+    }
+
+    const boldText = match[2] ?? match[3];
+    const italicText = match[4] ?? match[5];
+    const codeText = match[6];
+
+    if (boldText) {
+      runs.push({ text: boldText, bold: true, italics: false });
+    } else if (italicText) {
+      runs.push({ text: italicText, bold: false, italics: true });
+    } else if (codeText) {
+      runs.push({ text: codeText, bold: false, italics: false });
+    } else if (matchText) {
+      runs.push({ text: matchText, bold: false, italics: false });
+    }
+
+    lastIndex = index + matchText.length;
+  }
+
+  if (lastIndex < source.length) {
+    runs.push({
+      text: source.slice(lastIndex),
+      bold: false,
+      italics: false,
+    });
+  }
+
+  return mergeRuns(runs.map((run) => ({
+    ...run,
+    text: run.text.replace(/\s+/g, ' '),
+  }))).filter((run) => run.text.trim().length > 0 || run.text.includes(' '));
+}
+
+function cleanInlineFormatting(value: string) {
+  return parseInlineRuns(value)
+    .map((run) => run.text)
+    .join('')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -63,7 +147,7 @@ function splitIntoBlocks(text: string) {
     .split(/\n\s*\n/)
     .map((block) => block
       .split('\n')
-      .map((line) => cleanInlineFormatting(line))
+      .map((line) => stripLeadingMarkdownSyntax(line))
       .filter(Boolean))
     .filter((lines) => lines.length > 0);
 }
@@ -91,11 +175,15 @@ function isHeadingBlock(lines: string[]) {
 }
 
 function buildParagraph(kind: PaperParagraphKind, text: string): PaperParagraphModel {
-  const trimmed = cleanInlineFormatting(text);
+  const runs = kind === 'cover_course_code' || kind === 'cover_title'
+    ? [{ text: cleanInlineFormatting(text), bold: false, italics: false }]
+    : parseInlineRuns(text);
+  const trimmed = runs.map((run) => run.text).join('').replace(/\s+/g, ' ').trim();
 
   return {
     kind,
     text: trimmed,
+    runs,
     fontFamily: FONT_FAMILY,
     fontSize: FONT_SIZE,
     bold: kind === 'cover_title' || kind === 'heading' || kind === 'reference_heading',
@@ -111,7 +199,7 @@ function extractReferenceParagraphs(blocks: string[][]) {
 
   for (const block of blocks) {
     const lines = block
-      .map((line) => cleanInlineFormatting(line))
+      .map((line) => stripLeadingMarkdownSyntax(line))
       .filter(Boolean);
 
     if (lines.length === 0) {
@@ -120,7 +208,8 @@ function extractReferenceParagraphs(blocks: string[][]) {
 
     let currentReference = '';
     for (const line of lines) {
-      const startsNewReference = /^[A-Z][A-Za-z'`.-]+(?:\s+[A-Z][A-Za-z'`.-]+)*,\s*[A-Z]/.test(line);
+      const plainLine = cleanInlineFormatting(line);
+      const startsNewReference = /^[A-Z][A-Za-z'`.-]+(?:\s+[A-Z][A-Za-z'`.-]+)*,\s*[A-Z]/.test(plainLine);
       if (!currentReference) {
         currentReference = line;
         continue;
@@ -145,7 +234,7 @@ function extractReferenceParagraphs(blocks: string[][]) {
 
 function normalizeBlockText(lines: string[]) {
   return lines
-    .map((line) => cleanInlineFormatting(line))
+    .map((line) => cleanInlineFormatting(stripLeadingMarkdownSyntax(line)))
     .filter(Boolean)
     .join(' ')
     .replace(/\s+/g, ' ')
@@ -212,7 +301,8 @@ function findReferenceSections(blocks: string[][]) {
 export function buildPaperLayoutModel(text: string, options: PaperLayoutOptions = {}): PaperLayoutModel {
   const blocks = splitIntoBlocks(text);
   const paragraphs: PaperParagraphModel[] = [];
-  const paperTitle = cleanInlineFormatting(options.paperTitle || normalizeBlockText(blocks[0] || ['Untitled Paper']));
+  const inferredTitle = options.paperTitle || normalizeBlockText(blocks[0] || ['Untitled Paper']);
+  const paperTitle = normalizeDeliveryPaperTitle(cleanInlineFormatting(inferredTitle), 'Untitled Paper');
   const courseCode = cleanInlineFormatting(options.courseCode || '');
 
   paragraphs.push(buildParagraph('cover_course_code', courseCode));
@@ -285,12 +375,13 @@ function toDocxParagraph(model: PaperParagraphModel) {
     },
     indent: model.hangingIndent ? { left: HANGING_INDENT_TWIPS, hanging: HANGING_INDENT_TWIPS } : undefined,
     children: [
-      new TextRun({
-        text: model.text,
-        bold: model.bold,
+      ...model.runs.map((run) => new TextRun({
+        text: run.text,
+        bold: model.bold || run.bold,
+        italics: run.italics,
         font: model.fontFamily,
         size: DOCX_FONT_SIZE,
-      }),
+      })),
     ],
   });
 }

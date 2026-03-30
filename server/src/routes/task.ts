@@ -7,6 +7,7 @@ import { validateFiles, uploadFiles, getDownloadUrl } from '../services/fileServ
 import { generateOutline, regenerateOutline, confirmOutline } from '../services/outlineService';
 import { startHumanize } from '../services/humanizeService';
 import { captureError } from '../lib/errorMonitor';
+import { deriveTaskTitle } from '../services/paperTitleService';
 import {
   validateEditInstruction,
   validateOptionalTargetWords,
@@ -27,7 +28,8 @@ router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: 
 
     validateFiles(files);
 
-    const task = await createTask(req.userId!, title || files[0]?.originalname || '未命名任务', specialRequirements || '');
+    const taskTitle = deriveTaskTitle(title, files[0]?.originalname, '未命名任务');
+    const task = await createTask(req.userId!, taskTitle, specialRequirements || '');
     createdTaskId = task.id;
 
     await uploadFiles(task.id, files);

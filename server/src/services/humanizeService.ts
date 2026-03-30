@@ -8,6 +8,7 @@ import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { recordAuditLog } from './auditLogService';
 import { captureError } from '../lib/errorMonitor';
+import { normalizeDeliveryPaperTitle } from './paperTitleService';
 
 interface ExecuteHumanizeDeps {
   humanizeText: (inputText: string) => Promise<HumanizeTextResult>;
@@ -163,9 +164,10 @@ export async function executeHumanize(
     const retentionDays = (await deps.getConfigValue('result_file_retention_days')) || 3;
     const expiresAt = deps.now();
     expiresAt.setDate(expiresAt.getDate() + retentionDays);
+    const displayTitle = normalizeDeliveryPaperTitle(taskMeta?.title, 'Academic Essay');
 
     const docBuffer = await buildFormattedPaperDocBuffer(humanized, {
-      paperTitle: taskMeta?.title || 'Academic Essay',
+      paperTitle: displayTitle,
       courseCode: taskMeta?.course_code || null,
     });
     const docPath = `${taskId}/humanized-${deps.now().getTime()}.docx`;

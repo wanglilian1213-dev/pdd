@@ -90,3 +90,61 @@ https://example.com/full-text-entry`, {
   assert.match(references[0]?.text ?? '', /wraps onto a second line because the model inserted a line break/i);
   assert.match(references[1]?.text ?? '', /another article with a long retrieval link https:\/\/example\.com\/full-text-entry/i);
 });
+
+test('buildPaperLayoutModel converts inline markdown emphasis into formatted runs instead of leaving raw symbols', () => {
+  const model = buildPaperLayoutModel(`Essay Topic
+
+# Discussion
+
+This paragraph keeps *book titles* in italics and **core claims** in bold.
+
+References
+
+Smith, J. (2024). *Journal of Strategy*. https://example.com/source`);
+
+  const heading = model.paragraphs.find((paragraph) => paragraph.kind === 'heading');
+  const body = model.paragraphs.find((paragraph) => paragraph.kind === 'body');
+  const reference = model.paragraphs.find((paragraph) => paragraph.kind === 'reference');
+
+  assert.equal(heading?.text, 'Discussion');
+  assert.ok(body?.runs);
+  assert.ok(reference?.runs);
+  assert.deepEqual(
+    body?.runs,
+    [
+      { text: 'This paragraph keeps ', bold: false, italics: false },
+      { text: 'book titles', bold: false, italics: true },
+      { text: ' in italics and ', bold: false, italics: false },
+      { text: 'core claims', bold: true, italics: false },
+      { text: ' in bold.', bold: false, italics: false },
+    ],
+  );
+  assert.equal(body?.text.includes('*'), false);
+  assert.equal(reference?.text.includes('*'), false);
+  assert.deepEqual(
+    reference?.runs,
+    [
+      { text: 'Smith, J. (2024). ', bold: false, italics: false },
+      { text: 'Journal of Strategy', bold: false, italics: true },
+      { text: '. https://example.com/source', bold: false, italics: false },
+    ],
+  );
+});
+
+test('buildPaperLayoutModel strips file extensions from an explicit paper title before building the cover and body layout', () => {
+  const model = buildPaperLayoutModel(`BUSI1001 Essay Topic
+
+Introduction
+
+This is the first real body paragraph.`, {
+    paperTitle: 'BUSI1001 Essay Topic.txt',
+    courseCode: 'BUSI1001',
+  });
+
+  assert.equal(model.paragraphs[1]?.kind, 'cover_title');
+  assert.equal(model.paragraphs[1]?.text, 'BUSI1001 Essay Topic');
+
+  const firstBodyParagraph = model.paragraphs.find((paragraph) => paragraph.kind === 'body');
+  assert.equal(firstBodyParagraph?.text, 'This is the first real body paragraph.');
+  assert.equal(model.paragraphs.some((paragraph) => paragraph.text.includes('.txt')), false);
+});

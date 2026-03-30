@@ -5,6 +5,7 @@ import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
+import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
 import {
   buildCitationReportPrompt,
   parseCitationReportData,
@@ -38,16 +39,6 @@ interface StoreGeneratedTaskFileDeps {
     expires_at: string;
   }) => Promise<{ error: Error | null }>;
   removeFromStorage: (storagePath: string) => Promise<void>;
-}
-
-function sanitizeFilenameBase(value: string | null | undefined, fallback: string) {
-  const trimmed = String(value || '').trim();
-  const safe = trimmed
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  return safe || fallback;
 }
 
 export async function storeGeneratedTaskFile(
@@ -190,8 +181,22 @@ Do not miss any information.
 Do not use straight quotation marks.
 Do not use em dash.
 Do not use a dependent clause followed by an independent clause separated with a comma.
+Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
+Return clean academic prose only.
 
 each references should come with proper link.`;
+}
+
+export function buildWordCalibrationSystemPrompt(currentWords: number, targetWords: number) {
+  return `You are an academic writing editor. The current paper has ${currentWords} words but the target is ${targetWords} words. ${currentWords < targetWords ? 'Expand' : 'Condense'} the paper to approximately ${targetWords} words while maintaining quality and coherence. Output only the revised paper.
+Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
+Return clean academic prose only.`;
+}
+
+export function buildCitationVerificationSystemPrompt(citationStyle: string) {
+  return `You are a citation verification expert. Review the paper and ensure all citations follow ${citationStyle} format. Fix any formatting issues. Output the corrected paper text only.
+Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
+Return clean academic prose only.`;
 }
 
 async function generateDraft(taskId: string, outline: string, targetWords: number, citationStyle: string, requirements: string): Promise<string> {
@@ -249,7 +254,7 @@ async function calibrateWordCount(taskId: string, draft: string, targetWords: nu
     input: [
       {
         role: 'system',
-        content: `You are an academic writing editor. The current paper has ${currentWords} words but the target is ${targetWords} words. ${currentWords < targetWords ? 'Expand' : 'Condense'} the paper to approximately ${targetWords} words while maintaining quality and coherence. Output only the revised paper.`,
+        content: buildWordCalibrationSystemPrompt(currentWords, targetWords),
       },
       {
         role: 'user',
@@ -278,7 +283,7 @@ async function verifyCitations(taskId: string, text: string, citationStyle: stri
     input: [
       {
         role: 'system',
-        content: `You are a citation verification expert. Review the paper and ensure all citations follow ${citationStyle} format. Fix any formatting issues. Output the corrected paper text only.`,
+        content: buildCitationVerificationSystemPrompt(citationStyle),
       },
       {
         role: 'user',
@@ -306,8 +311,7 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
   const retentionDays = (await getConfig('result_file_retention_days')) || 3;
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + retentionDays);
-  const displayTitle = String(task.title || '').trim() || 'Academic Essay';
-  const safeFileTitle = sanitizeFilenameBase(displayTitle, 'Academic Essay');
+  const displayTitle = normalizeDeliveryPaperTitle(task.title, 'Academic Essay');
 
   await supabaseAdmin.from('document_versions').insert({
     task_id: taskId,
@@ -321,7 +325,7 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     paperTitle: displayTitle,
     courseCode: task.course_code,
   });
-  const finalDocName = `${safeFileTitle}.docx`;
+  const finalDocName = buildDocxFileName(task.title, 'Academic Essay');
   const docPath = `${taskId}/${finalDocName}`;
 
   await storeGeneratedTaskFile({
@@ -364,7 +368,7 @@ function buildCitationReportId(now: Date) {
   return `Report ID: V532-${random}-${day}${month}`;
 }
 
-async function generateCitationReport(text: string, citationStyle: string, essayTitle: string) {
+export async function generateCitationReport(text: string, citationStyle: string, essayTitle: string) {
   const prompt = buildCitationReportPrompt(text, citationStyle);
 
   // Keep report generation on the same tuning as citation verification until we
