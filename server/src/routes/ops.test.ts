@@ -6,6 +6,7 @@ import opsRoutes from './ops';
 import { opsMiddleware } from '../middleware/ops';
 import { env } from '../lib/runtimeEnv';
 import { supabaseAdmin } from '../lib/supabase';
+import { __resetConfigCacheForTests } from '../services/configService';
 
 function stubSupabaseFrom(impl: (table: string) => any) {
   const originalFrom = supabaseAdmin.from;
@@ -43,6 +44,7 @@ async function withOpsServer(
   userEmail: string,
   run: (baseUrl: string) => Promise<void>,
 ) {
+  __resetConfigCacheForTests();
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -59,6 +61,7 @@ async function withOpsServer(
     const address = server.address() as AddressInfo;
     await run(`http://127.0.0.1:${address.port}`);
   } finally {
+    __resetConfigCacheForTests();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) reject(error);

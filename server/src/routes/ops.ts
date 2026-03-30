@@ -9,7 +9,9 @@ import {
   validateUuidOrThrow,
   validateVoidCodeIds,
 } from '../services/opsService';
+import { generateActivationCode } from '../services/activationCodeService';
 import { voidRechargeCodesAtomic } from '../services/atomicOpsService';
+import { recordAuditLog } from '../services/auditLogService';
 
 const router = Router();
 
@@ -57,6 +59,13 @@ router.post('/users/:id/disable', async (req: AuthRequest, res: Response) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) throw new AppError(404, '账号不存在。');
+    await recordAuditLog({
+      actorUserId: req.userId,
+      actorEmail: req.userEmail,
+      action: 'ops.user.disabled',
+      targetType: 'user',
+      targetId: userId,
+    });
     res.json({ success: true });
   } catch (err: any) {
     res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });
@@ -75,6 +84,13 @@ router.post('/users/:id/enable', async (req: AuthRequest, res: Response) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) throw new AppError(404, '账号不存在。');
+    await recordAuditLog({
+      actorUserId: req.userId,
+      actorEmail: req.userEmail,
+      action: 'ops.user.enabled',
+      targetType: 'user',
+      targetId: userId,
+    });
     res.json({ success: true });
   } catch (err: any) {
     res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });
@@ -96,7 +112,7 @@ router.post('/codes/generate', async (req: AuthRequest, res: Response) => {
 
     for (let i = 0; i < count; i++) {
       codes.push({
-        code: generateCodeString(),
+        code: generateActivationCode(),
         denomination,
         status: 'unused',
         created_by: req.userEmail!,
@@ -106,6 +122,14 @@ router.post('/codes/generate', async (req: AuthRequest, res: Response) => {
 
     const { error } = await supabaseAdmin.from('recharge_codes').insert(codes);
     if (error) throw error;
+    await recordAuditLog({
+      actorUserId: req.userId,
+      actorEmail: req.userEmail,
+      action: 'ops.recharge_codes.generated',
+      targetType: 'recharge_code_batch',
+      targetId: batchId,
+      detail: { count, denomination },
+    });
 
     res.json({ success: true, data: { batchId, count, denomination, codes: codes.map(c => c.code) } });
   } catch (err: any) {
@@ -118,6 +142,13 @@ router.post('/codes/void', async (req: AuthRequest, res: Response) => {
   try {
     const codeIds = validateVoidCodeIds(req.body?.codeIds);
     await voidRechargeCodesAtomic(codeIds);
+    await recordAuditLog({
+      actorUserId: req.userId,
+      actorEmail: req.userEmail,
+      action: 'ops.recharge_codes.voided',
+      targetType: 'recharge_code_batch',
+      detail: { codeIds },
+    });
     res.json({ success: true });
   } catch (err: any) {
     res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '操作失败。' });
@@ -197,20 +228,18 @@ router.put('/config/:key', async (req: AuthRequest, res: Response) => {
   try {
     const { value } = req.body;
     await setConfig(req.params.key as string, value, req.userEmail!);
+    await recordAuditLog({
+      actorUserId: req.userId,
+      actorEmail: req.userEmail,
+      action: 'ops.config.updated',
+      targetType: 'system_config',
+      targetId: req.params.key as string,
+      detail: { value },
+    });
     res.json({ success: true });
   } catch (err: any) {
     res.status(err.statusCode || 500).json({ success: false, error: err.userMessage || '更新配置失败。' });
   }
 });
-
-function generateCodeString(): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < 16; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
-    if (i === 3 || i === 7 || i === 11) code += '-';
-  }
-  return code;
-}
 
 export default router;

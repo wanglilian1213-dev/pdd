@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { buildSecurityHeaders } = require('./securityHeaders.cjs');
 
 const PORT = process.env.PORT || 3000;
 const DIST = path.join(__dirname, 'dist');
@@ -24,6 +25,7 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
+  const isSecureRequest = req.headers['x-forwarded-proto'] === 'https';
   let filePath = path.join(DIST, req.url === '/' ? 'index.html' : req.url);
   const ext = path.extname(filePath).toLowerCase();
 
@@ -33,6 +35,7 @@ const server = http.createServer((req, res) => {
       // SPA fallback: serve index.html for all non-file routes
       filePath = path.join(DIST, 'index.html');
       res.writeHead(200, {
+        ...buildSecurityHeaders({ isHtml: true, isSecureRequest }),
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-cache',
       });
@@ -43,6 +46,7 @@ const server = http.createServer((req, res) => {
     const mime = MIME_TYPES[ext] || 'application/octet-stream';
     const isAsset = req.url.startsWith('/assets/');
     res.writeHead(200, {
+      ...buildSecurityHeaders({ isHtml: mime.startsWith('text/html'), isSecureRequest }),
       'Content-Type': mime,
       'Cache-Control': isAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
     });

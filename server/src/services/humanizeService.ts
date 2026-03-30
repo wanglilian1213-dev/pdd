@@ -6,6 +6,8 @@ import { startHumanizeJobAtomic } from './atomicOpsService';
 import { storeGeneratedTaskFile } from './writingService';
 import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
+import { recordAuditLog } from './auditLogService';
+import { captureError } from '../lib/errorMonitor';
 
 interface ExecuteHumanizeDeps {
   humanizeText: (inputText: string) => Promise<HumanizeTextResult>;
@@ -106,9 +108,21 @@ export async function startHumanize(taskId: string, userId: string) {
 
   const result = await startHumanizeJobAtomic(taskId, userId, inputVersion.id, inputWordCount, cost);
 
+  await recordAuditLog({
+    actorUserId: userId,
+    action: 'humanize.started',
+    targetType: 'task',
+    targetId: taskId,
+    detail: {
+      jobId: result.jobId,
+      inputWordCount,
+      frozenCredits: cost,
+    },
+  });
+
   // Async execution
   executeHumanize(taskId, userId, result.jobId, inputVersion.content, inputWordCount, cost).catch(err => {
-    console.error(`Humanize failed for job ${result.jobId}:`, err);
+    captureError(err, 'humanize.execute_async', { taskId, jobId: result.jobId, userId });
   });
 
   return result;
@@ -177,6 +191,17 @@ export async function executeHumanize(
       },
     });
 
+    await recordAuditLog({
+      actorUserId: userId,
+      action: 'humanize.completed',
+      targetType: 'task',
+      targetId: taskId,
+      detail: {
+        jobId,
+        wordCount: newWordCount,
+      },
+    });
+
   } catch (err: any) {
     try {
       await deps.refundCredits(userId, frozenCredits, 'humanize_job', jobId, `降 AI 失败退款：${frozenCredits} 积分`);
@@ -202,6 +227,19 @@ export async function executeHumanize(
       task_id: taskId,
       event_type: 'humanize_failed',
       detail: { job_id: jobId, error: err.message },
+    });
+
+    await recordAuditLog({
+      actorUserId: userId,
+      action: 'humanize.failed',
+      targetType: 'task',
+      targetId: taskId,
+      detail: {
+        jobId,
+        error: err?.message || 'unknown',
+        refunded: true,
+        frozenCredits,
+      },
     });
   }
 }

@@ -5,7 +5,9 @@ import { supabaseAdmin } from '../lib/supabase';
 import {
   confirmOutlineTaskAtomic,
   freezeCreditsAtomic,
+  releaseOutlineEditAtomic,
   redeemRechargeCodeAtomic,
+  reserveOutlineEditAtomic,
   startHumanizeJobAtomic,
   voidRechargeCodesAtomic,
 } from './atomicOpsService';
@@ -147,6 +149,63 @@ test('confirmOutlineTaskAtomic uses confirm_outline_task RPC', async () => {
   }
 });
 
+test('reserveOutlineEditAtomic uses reserve_outline_edit RPC', async () => {
+  let called: { fn: string; args: Record<string, unknown> } | null = null;
+  const restore = stubRpc(async (fn: string, args: Record<string, unknown>) => {
+    called = { fn, args: args as Record<string, unknown> };
+    return {
+      data: { taskId: 'task-1', outlineEditsUsed: 2 },
+      error: null,
+      count: null,
+      status: 200,
+      statusText: 'OK',
+    } as never;
+  });
+
+  try {
+    const result = await reserveOutlineEditAtomic('task-1', 'user-1', 4);
+    assert.deepEqual(called, {
+      fn: 'reserve_outline_edit',
+      args: {
+        p_task_id: 'task-1',
+        p_user_id: 'user-1',
+        p_max_edits: 4,
+      },
+    });
+    assert.deepEqual(result, { taskId: 'task-1', outlineEditsUsed: 2 });
+  } finally {
+    restore();
+  }
+});
+
+test('releaseOutlineEditAtomic uses release_outline_edit RPC', async () => {
+  let called: { fn: string; args: Record<string, unknown> } | null = null;
+  const restore = stubRpc(async (fn: string, args: Record<string, unknown>) => {
+    called = { fn, args: args as Record<string, unknown> };
+    return {
+      data: { taskId: 'task-1', outlineEditsUsed: 1 },
+      error: null,
+      count: null,
+      status: 200,
+      statusText: 'OK',
+    } as never;
+  });
+
+  try {
+    const result = await releaseOutlineEditAtomic('task-1', 'user-1');
+    assert.deepEqual(called, {
+      fn: 'release_outline_edit',
+      args: {
+        p_task_id: 'task-1',
+        p_user_id: 'user-1',
+      },
+    });
+    assert.deepEqual(result, { taskId: 'task-1', outlineEditsUsed: 1 });
+  } finally {
+    restore();
+  }
+});
+
 test('startHumanizeJobAtomic uses start_humanize_job RPC', async () => {
   let called: { fn: string; args: Record<string, unknown> } | null = null;
   const restore = stubRpc(async (fn: string, args: Record<string, unknown>) => {
@@ -173,6 +232,31 @@ test('startHumanizeJobAtomic uses start_humanize_job RPC', async () => {
       },
     });
     assert.deepEqual(result, { jobId: 'job-1', stage: 'humanizing', frozenCredits: 250 });
+  } finally {
+    restore();
+  }
+});
+
+test('startHumanizeJobAtomic maps already-processing errors to a user-friendly message', async () => {
+  const restore = stubRpc(async () => {
+    return {
+      data: null,
+      error: { message: 'HUMANIZE_ALREADY_PROCESSING' },
+      count: null,
+      status: 400,
+      statusText: 'Bad Request',
+    } as never;
+  });
+
+  try {
+    await assert.rejects(
+      () => startHumanizeJobAtomic('task-1', 'user-1', 'doc-1', 1000, 250),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.match(error.userMessage, /处理中/);
+        return true;
+      },
+    );
   } finally {
     restore();
   }

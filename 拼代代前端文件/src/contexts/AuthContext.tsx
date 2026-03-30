@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, ReactNode } from 'react
 import { supabase } from '../lib/supabase';
 import { api } from '../lib/api';
 import type { User, Session } from '@supabase/supabase-js';
+import { LOGIN_COOLDOWN_MINUTES, sharedLoginAttemptGuard } from '../lib/authProtection';
 
 interface AuthContextType {
   user: User | null;
@@ -61,13 +62,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signIn = async (email: string, password: string) => {
     try {
       setAuthBusy(true);
+      if (!sharedLoginAttemptGuard.canAttempt()) {
+        throw new Error(`输错次数过多，请 ${LOGIN_COOLDOWN_MINUTES} 分钟后再试。`);
+      }
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
         if (error.message.includes('Invalid login credentials')) {
+          sharedLoginAttemptGuard.recordFailure();
           throw new Error('邮箱或密码错误，请重新输入。');
         }
         throw new Error(error.message);
       }
+      sharedLoginAttemptGuard.reset();
     } finally {
       setAuthBusy(false);
     }

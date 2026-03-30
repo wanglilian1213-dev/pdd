@@ -10,6 +10,7 @@ function buildRawEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     OPENAI_API_KEY: 'openai-key',
     OPENAI_MODEL: 'gpt-5.4',
     UNDETECTABLE_API_KEY: 'undetectable-key',
+    ALLOWED_ORIGINS: 'https://pindaidai.up.railway.app,http://localhost:3000',
     OPS_WHITELIST_EMAILS: 'ops@example.com',
     PORT: '3001',
     NODE_ENV: 'test',
@@ -21,6 +22,7 @@ test('parseEnv accepts OPENAI_MODEL=gpt-5.4', () => {
   const env = parseEnv(buildRawEnv());
 
   assert.equal(env.openaiModel, 'gpt-5.4');
+  assert.deepEqual(env.allowedOrigins, ['https://pindaidai.up.railway.app', 'http://localhost:3000']);
   assert.deepEqual(env.opsWhitelistEmails, ['ops@example.com']);
 });
 
@@ -42,5 +44,12 @@ test('parseEnv throws when UNDETECTABLE_API_KEY is missing', () => {
   assert.throws(
     () => parseEnv(buildRawEnv({ UNDETECTABLE_API_KEY: '' })),
     /缺少环境变量 UNDETECTABLE_API_KEY/,
+  );
+});
+
+test('parseEnv throws when ALLOWED_ORIGINS is missing', () => {
+  assert.throws(
+    () => parseEnv(buildRawEnv({ ALLOWED_ORIGINS: '' })),
+    /缺少环境变量 ALLOWED_ORIGINS/,
   );
 });

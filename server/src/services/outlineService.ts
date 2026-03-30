@@ -5,10 +5,17 @@ import { updateTaskStage, failTask } from './taskService';
 import { getConfig } from './configService';
 import { startWritingPipeline } from './writingService';
 import { buildMaterialContentFromStorage, cleanupOpenAIFiles } from './materialInputService';
-import { confirmOutlineTaskAtomic } from './atomicOpsService';
+import {
+  confirmOutlineTaskAtomic,
+  releaseOutlineEditAtomic,
+  reserveOutlineEditAtomic,
+} from './atomicOpsService';
 import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt, buildRepairOutlinePrompt } from './outlinePromptService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { normalizeCitationStyle } from './citationStyleService';
+import { validateTargetWords } from './requestValidationService';
+import { recordAuditLog } from './auditLogService';
+import { captureError } from '../lib/errorMonitor';
 import {
   ensureValidOutlineBulletCounts,
   formatOutlineBulletViolations,
@@ -237,9 +244,6 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
   }
 
   const maxEdits = (await getConfig('max_outline_edits')) || 4;
-  if (task.outline_edits_used >= maxEdits) {
-    throw new AppError(400, `大纲修改次数已用完（最多 ${maxEdits} 次）。`);
-  }
 
   const { data: latestOutline } = await supabaseAdmin
     .from('outline_versions')
@@ -253,7 +257,12 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     throw new AppError(500, '找不到当前大纲。');
   }
 
+  let reservedEdit = false;
+
   try {
+    await reserveOutlineEditAtomic(taskId, userId, maxEdits);
+    reservedEdit = true;
+
     const prompt = buildRegenerateOutlinePrompt({
       currentOutline: latestOutline.content,
       currentTargetWords: latestOutline.target_words,
@@ -308,7 +317,6 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     await supabaseAdmin
       .from('tasks')
       .update({
-        outline_edits_used: task.outline_edits_used + 1,
         target_words: parsed.target_words || latestOutline.target_words,
         citation_style: normalizeCitationStyle(parsed.citation_style || latestOutline.citation_style),
         updated_at: new Date().toISOString(),
@@ -317,6 +325,9 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
 
     return outline;
   } catch (err: any) {
+    if (reservedEdit) {
+      await releaseOutlineEditAtomic(taskId, userId).catch(() => undefined);
+    }
     if (err instanceof AppError) throw err;
     throw new AppError(500, '大纲修改失败，请稍后重试。');
   }
@@ -343,7 +354,7 @@ export async function confirmOutline(taskId: string, userId: string, targetWords
 
   if (!latestOutline) throw new AppError(500, '找不到大纲。');
 
-  const finalWords = targetWords || latestOutline.target_words || 1000;
+  const finalWords = validateTargetWords(targetWords || latestOutline.target_words || 1000);
   const finalStyle = normalizeCitationStyle(citationStyle || latestOutline.citation_style || 'APA 7');
 
   const pricePerThousand = (await getConfig('writing_price_per_1000')) || 250;
@@ -352,9 +363,21 @@ export async function confirmOutline(taskId: string, userId: string, targetWords
 
   const result = await confirmOutlineTaskAtomic(taskId, userId, finalWords, finalStyle, cost);
 
+  await recordAuditLog({
+    actorUserId: userId,
+    action: 'outline.confirmed',
+    targetType: 'task',
+    targetId: taskId,
+    detail: {
+      targetWords: finalWords,
+      citationStyle: finalStyle,
+      frozenCredits: result.frozenCredits,
+    },
+  });
+
   // Fire-and-forget: start the writing pipeline asynchronously
   startWritingPipeline(taskId, userId).catch(err => {
-    console.error(`Writing pipeline failed for task ${taskId}:`, err);
+    captureError(err, 'outline.start_writing_pipeline', { taskId, userId });
   });
 
   return result;

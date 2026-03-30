@@ -13,6 +13,7 @@ import {
   isDeliveryInProgressState,
   shouldPollWritingStage,
 } from '../../lib/workspaceStage';
+import { getPollDelayMs, hasPollingTimedOut, type PollStage } from '../../lib/polling';
 
 // ---------------------
 // Types
@@ -45,6 +46,12 @@ interface TaskData {
   document?: { id: string; word_count?: number };
   files?: TaskFile[];
   humanizeJob?: HumanizeJob;
+}
+
+interface PollState {
+  timeoutId: ReturnType<typeof setTimeout> | null;
+  startedAt: number;
+  attempt: number;
 }
 
 /** Reshape the flat backend task response into the TaskData format expected by the UI */
@@ -147,32 +154,32 @@ export default function Workspace() {
   const [isLoadingResume, setIsLoadingResume] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const outlinePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const writePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const humanizePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const outlinePollRef = useRef<PollState>({ timeoutId: null, startedAt: 0, attempt: 0 });
+  const writePollRef = useRef<PollState>({ timeoutId: null, startedAt: 0, attempt: 0 });
+  const humanizePollRef = useRef<PollState>({ timeoutId: null, startedAt: 0, attempt: 0 });
 
   // ---------------------
   // Cleanup helpers
   // ---------------------
   const clearOutlinePoll = useCallback(() => {
-    if (outlinePollRef.current) {
-      clearInterval(outlinePollRef.current);
-      outlinePollRef.current = null;
+    if (outlinePollRef.current.timeoutId) {
+      clearTimeout(outlinePollRef.current.timeoutId);
     }
+    outlinePollRef.current = { timeoutId: null, startedAt: 0, attempt: 0 };
   }, []);
 
   const clearWritePoll = useCallback(() => {
-    if (writePollRef.current) {
-      clearInterval(writePollRef.current);
-      writePollRef.current = null;
+    if (writePollRef.current.timeoutId) {
+      clearTimeout(writePollRef.current.timeoutId);
     }
+    writePollRef.current = { timeoutId: null, startedAt: 0, attempt: 0 };
   }, []);
 
   const clearHumanizePoll = useCallback(() => {
-    if (humanizePollRef.current) {
-      clearInterval(humanizePollRef.current);
-      humanizePollRef.current = null;
+    if (humanizePollRef.current.timeoutId) {
+      clearTimeout(humanizePollRef.current.timeoutId);
     }
+    humanizePollRef.current = { timeoutId: null, startedAt: 0, attempt: 0 };
   }, []);
 
   const clearAllPolls = useCallback(() => {
@@ -187,8 +194,9 @@ export default function Workspace() {
   const startOutlinePolling = useCallback((taskId: string) => {
     clearOutlinePoll();
     setIsPollingOutline(true);
+    outlinePollRef.current.startedAt = Date.now();
 
-    outlinePollRef.current = setInterval(async () => {
+    const poll = async () => {
       try {
         const raw = await api.getTask(taskId);
         const data: TaskData = reshapeTaskResponse(raw);
@@ -206,13 +214,27 @@ export default function Workspace() {
           clearOutlinePoll();
           setIsPollingOutline(false);
           setStep(2);
+          return;
         }
+
+        if (hasPollingTimedOut('outline', outlinePollRef.current.startedAt)) {
+          clearOutlinePoll();
+          setIsPollingOutline(false);
+          setError('大纲生成时间过长，请刷新页面后重试。');
+          return;
+        }
+
+        const attempt = outlinePollRef.current.attempt;
+        outlinePollRef.current.attempt += 1;
+        outlinePollRef.current.timeoutId = setTimeout(poll, getPollDelayMs('outline', attempt));
       } catch (err) {
         clearOutlinePoll();
         setIsPollingOutline(false);
         setError(err instanceof Error ? err.message : '轮询大纲状态失败');
       }
-    }, 3000);
+    };
+
+    void poll();
   }, [clearOutlinePoll]);
 
   // ---------------------
@@ -220,8 +242,9 @@ export default function Workspace() {
   // ---------------------
   const startWritePolling = useCallback((taskId: string) => {
     clearWritePoll();
+    writePollRef.current.startedAt = Date.now();
 
-    writePollRef.current = setInterval(async () => {
+    const poll = async () => {
       try {
         const raw = await api.getTask(taskId);
         const data: TaskData = reshapeTaskResponse(raw);
@@ -242,12 +265,25 @@ export default function Workspace() {
         if (data.task.stage === 'completed' && data.task.status === 'completed') {
           clearWritePoll();
           await refreshBalance();
+          return;
         }
+
+        if (hasPollingTimedOut('writing', writePollRef.current.startedAt)) {
+          clearWritePoll();
+          setError('正文生成时间过长，请刷新页面后重试。');
+          return;
+        }
+
+        const attempt = writePollRef.current.attempt;
+        writePollRef.current.attempt += 1;
+        writePollRef.current.timeoutId = setTimeout(poll, getPollDelayMs('writing', attempt));
       } catch (err) {
         clearWritePoll();
         setError(err instanceof Error ? err.message : '轮询写作状态失败');
       }
-    }, 5000);
+    };
+
+    void poll();
   }, [clearWritePoll, refreshBalance]);
 
   // ---------------------
@@ -255,8 +291,9 @@ export default function Workspace() {
   // ---------------------
   const startHumanizePolling = useCallback((taskId: string) => {
     clearHumanizePoll();
+    humanizePollRef.current.startedAt = Date.now();
 
-    humanizePollRef.current = setInterval(async () => {
+    const poll = async () => {
       try {
         const raw = await api.getTask(taskId);
         const data: TaskData = reshapeTaskResponse(raw);
@@ -273,13 +310,27 @@ export default function Workspace() {
           clearHumanizePoll();
           await refreshBalance();
           setIsStartingHumanize(false);
+          return;
         }
+
+        if (hasPollingTimedOut('humanize', humanizePollRef.current.startedAt)) {
+          clearHumanizePoll();
+          setIsStartingHumanize(false);
+          setError('降 AI 处理时间过长，请稍后刷新查看。');
+          return;
+        }
+
+        const attempt = humanizePollRef.current.attempt;
+        humanizePollRef.current.attempt += 1;
+        humanizePollRef.current.timeoutId = setTimeout(poll, getPollDelayMs('humanize', attempt));
       } catch (err) {
         clearHumanizePoll();
         setIsStartingHumanize(false);
         setError(err instanceof Error ? err.message : '轮询降AI状态失败');
       }
-    }, 5000);
+    };
+
+    void poll();
   }, [clearHumanizePoll, refreshBalance]);
 
   const resumeTaskInUi = useCallback((raw: Record<string, unknown>) => {

@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { PenLine, ArrowLeft, MessageSquare, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import CustomerSupportDialog from '../components/support/CustomerSupportDialog';
+import { validateRegistrationPassword } from '../lib/authProtection';
 
 export default function Register() {
   const [email, setEmail] = useState('');
@@ -26,8 +27,9 @@ export default function Register() {
       return;
     }
 
-    if (password.length < 6) {
-      setError('密码长度至少为 6 位。');
+    const passwordError = validateRegistrationPassword(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
 

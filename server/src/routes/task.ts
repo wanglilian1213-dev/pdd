@@ -6,6 +6,12 @@ import { createTask, getTask, getCurrentTask, getTaskList, deleteTask, discardPe
 import { validateFiles, uploadFiles, getDownloadUrl } from '../services/fileService';
 import { generateOutline, regenerateOutline, confirmOutline } from '../services/outlineService';
 import { startHumanize } from '../services/humanizeService';
+import { captureError } from '../lib/errorMonitor';
+import {
+  validateEditInstruction,
+  validateOptionalTargetWords,
+  validateTaskListStatus,
+} from '../services/requestValidationService';
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = Router();
@@ -28,14 +34,14 @@ router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: 
 
     // 异步启动大纲生成（不阻塞响应）
     generateOutline(task.id, req.userId!).catch(err => {
-      console.error(`Outline generation failed for task ${task.id}:`, err);
+      captureError(err, 'task.generate_outline', { taskId: task.id });
     });
 
     res.json({ success: true, data: task });
   } catch (err: unknown) {
     if (createdTaskId) {
       await deleteTask(createdTaskId).catch((cleanupError) => {
-        console.error(`Failed to delete half-created task ${createdTaskId}:`, cleanupError);
+        captureError(cleanupError, 'task.cleanup_half_created', { taskId: createdTaskId });
       });
     }
     const appErr = err as { statusCode?: number; userMessage?: string };
@@ -62,7 +68,7 @@ router.get('/list', async (req: AuthRequest, res: Response) => {
     const { status: taskStatus, limit, offset } = req.query;
     const result = await getTaskList(
       req.userId!,
-      taskStatus as string | undefined,
+      validateTaskListStatus(taskStatus),
       Math.min(parseInt(limit as string) || 20, 100),
       parseInt(offset as string) || 0,
     );
@@ -101,11 +107,7 @@ router.get('/:id/file/:fileId/download', async (req: AuthRequest, res: Response)
 // POST /api/task/:id/outline/regenerate
 router.post('/:id/outline/regenerate', async (req: AuthRequest, res: Response) => {
   try {
-    const { editInstruction } = req.body;
-    if (!editInstruction) {
-      res.status(400).json({ success: false, error: '请输入修改意见。' });
-      return;
-    }
+    const editInstruction = validateEditInstruction(req.body?.editInstruction);
     const outline = await regenerateOutline(req.params.id as string, req.userId!, editInstruction);
     res.json({ success: true, data: outline });
   } catch (err: unknown) {
@@ -119,7 +121,12 @@ router.post('/:id/outline/regenerate', async (req: AuthRequest, res: Response) =
 router.post('/:id/outline/confirm', async (req: AuthRequest, res: Response) => {
   try {
     const { targetWords, citationStyle } = req.body;
-    const result = await confirmOutline(req.params.id as string, req.userId!, targetWords, citationStyle);
+    const result = await confirmOutline(
+      req.params.id as string,
+      req.userId!,
+      validateOptionalTargetWords(targetWords),
+      citationStyle,
+    );
     res.json({ success: true, data: result });
   } catch (err: unknown) {
     const appErr = err as { statusCode?: number; userMessage?: string };

@@ -1,6 +1,8 @@
 import { supabase } from './supabase';
+import { getFrontendEnv } from './frontendEnv';
+import { parseApiResponse } from './httpResponse';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+const API_BASE = getFrontendEnv().apiBaseUrl;
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const { data: { session } } = await supabase.auth.getSession();
@@ -19,11 +21,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
     headers: { ...headers, ...options.headers },
   });
-  const json = await res.json();
-  if (!json.success) {
-    throw new Error(json.error || '请求失败');
-  }
-  return json.data;
+  return parseApiResponse<T>(res, '请求失败');
 }
 
 export const api = {
@@ -54,9 +52,7 @@ export const api = {
       headers: { 'Authorization': `Bearer ${session.access_token}` },
       body: formData,
     });
-    const json = await res.json();
-    if (!json.success) throw new Error(json.error || '创建任务失败');
-    return json.data;
+    return parseApiResponse<any>(res, '创建任务失败');
   },
   getCurrentTask: () => request<any>('/api/task/current'),
   getTask: (id: string) => request<any>(`/api/task/${id}`),

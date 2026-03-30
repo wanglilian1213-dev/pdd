@@ -17,6 +17,11 @@ export interface ConfirmOutlineResult {
   frozenCredits: number;
 }
 
+export interface OutlineEditReservationResult {
+  taskId: string;
+  outlineEditsUsed: number;
+}
+
 export interface StartHumanizeResult {
   jobId: string;
   stage: 'humanizing';
@@ -187,6 +192,54 @@ export async function confirmOutlineTaskAtomic(
         return new AppError(400, '当前阶段无法确认大纲，请刷新页面后重试。', message);
       }
       return mapWalletRpcError(error, '确认大纲失败，请稍后重试。');
+    },
+  );
+}
+
+export async function reserveOutlineEditAtomic(
+  taskId: string,
+  userId: string,
+  maxEdits: number,
+): Promise<OutlineEditReservationResult> {
+  return callRpc<OutlineEditReservationResult>(
+    'reserve_outline_edit',
+    {
+      p_task_id: taskId,
+      p_user_id: userId,
+      p_max_edits: maxEdits,
+    },
+    (error) => {
+      const message = getRpcErrorMessage(error);
+      if (message.includes('TASK_NOT_FOUND_OR_FORBIDDEN')) {
+        return new AppError(404, '任务不存在。', message);
+      }
+      if (message.includes('TASK_NOT_READY')) {
+        return new AppError(400, '当前阶段无法修改大纲。', message);
+      }
+      if (message.includes('OUTLINE_EDIT_LIMIT_REACHED')) {
+        return new AppError(400, `大纲修改次数已用完（最多 ${maxEdits} 次）。`, message);
+      }
+      return new AppError(500, '占用大纲修改次数失败，请稍后重试。', message);
+    },
+  );
+}
+
+export async function releaseOutlineEditAtomic(
+  taskId: string,
+  userId: string,
+): Promise<OutlineEditReservationResult> {
+  return callRpc<OutlineEditReservationResult>(
+    'release_outline_edit',
+    {
+      p_task_id: taskId,
+      p_user_id: userId,
+    },
+    (error) => {
+      const message = getRpcErrorMessage(error);
+      if (message.includes('TASK_NOT_FOUND_OR_FORBIDDEN')) {
+        return new AppError(404, '任务不存在。', message);
+      }
+      return new AppError(500, '回滚大纲修改次数失败，请稍后重试。', message);
     },
   );
 }

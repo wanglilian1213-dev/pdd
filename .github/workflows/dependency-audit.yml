@@ -1,0 +1,49 @@
+name: Dependency Audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/package.json'
+      - 'server/package-lock.json'
+      - '拼代代前端文件/package.json'
+      - '拼代代前端文件/package-lock.json'
+      - '.github/workflows/dependency-audit.yml'
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            cwd: server
+          - name: frontend
+            cwd: 拼代代前端文件
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.cwd }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.cwd }}
+        run: npm ci
+
+      - name: Run dependency audit
+        working-directory: ${{ matrix.cwd }}
+        run: npm audit --audit-level=high

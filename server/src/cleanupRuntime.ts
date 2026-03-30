@@ -4,6 +4,7 @@ import { refundCredits } from './services/walletService';
 import { failTask } from './services/taskService';
 import { deleteExpiredFiles } from './services/fileService';
 import { getConfig } from './services/configService';
+import { captureError } from './lib/errorMonitor';
 
 export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;
@@ -154,6 +155,7 @@ export async function runInitialCleanup(
     logger.log('[cleanup] Initial cleanup completed.');
   } catch (err) {
     logger.error('[cleanup] Initial cleanup failed:', err);
+    captureError(err, 'cleanup.initial');
   }
 }
 
@@ -168,6 +170,7 @@ export function scheduleCleanup(
       logger.log('[cleanup] Daily cleanup completed.');
     } catch (err) {
       logger.error('[cleanup] Cleanup failed:', err);
+      captureError(err, 'cleanup.scheduled');
     }
   });
 }
