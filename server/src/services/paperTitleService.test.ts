@@ -25,6 +25,10 @@ test('normalizeDeliveryPaperTitle strips repeated known file suffixes from old d
     normalizeDeliveryPaperTitle('BUSI1001 Essay Topic.txt.docx', 'Academic Essay'),
     'BUSI1001 Essay Topic',
   );
+  assert.equal(
+    normalizeDeliveryPaperTitle('Written Project Assessment Task Information (.pdf)(1).pdf', 'Academic Essay'),
+    'Written Project Assessment Task Information',
+  );
 });
 
 test('buildDocxFileName uses the cleaned delivery title', () => {

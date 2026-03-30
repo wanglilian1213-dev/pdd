@@ -8,6 +8,11 @@ export function stripKnownFileExtensions(value: string | null | undefined) {
   let current = normalizeWhitespace(value);
 
   while (current) {
+    current = current
+      .replace(/\s*\(\.(docx|doc|pdf|txt)\)\(\d+\)\s*$/i, '')
+      .replace(/\s*\(\.(docx|doc|pdf|txt)\)\s*$/i, '')
+      .trim();
+
     const lower = current.toLowerCase();
     const matchedExtension = KNOWN_FILE_EXTENSIONS.find((extension) => lower.endsWith(extension));
     if (!matchedExtension) {
