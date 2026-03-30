@@ -189,7 +189,7 @@ npx -y @aisuite/chub annotate --list
    - `agent.md`
    - `PLAN.md`
    - `DESIGN.md`
-   - `docs/plans/` 里和这次改动直接相关的设计/执行文档
+   - `docs/plans/2026-03-30-final-release-state.md`
 5. 每次确认改动通过后，都要把线上服务一起更新到最新，不允许只更一部分：
    - GitHub `main`
    - Railway `app`
