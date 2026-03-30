@@ -21,6 +21,7 @@ import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 
 export const assessGeneratedPaper = assessGeneratedPaperInternal;
 const REWRITE_STAGE_TIMEOUT_MS = 60_000;
+const DRAFT_GENERATION_TIMEOUT_MS = 180_000;
 
 interface WritingContextInput {
   taskId: string;
@@ -66,14 +67,14 @@ interface StoreGeneratedTaskFileDeps {
 }
 
 class WritingStageTimeoutError extends Error {
-  constructor(stage: 'word_calibration' | 'citation_verification', timeoutMs: number) {
+  constructor(stage: 'draft_generation' | 'word_calibration' | 'citation_verification', timeoutMs: number) {
     super(`${stage} timed out after ${timeoutMs}ms`);
     this.name = 'WritingStageTimeoutError';
   }
 }
 
 async function withRewriteStageTimeout<T>(
-  stage: 'word_calibration' | 'citation_verification',
+  stage: 'draft_generation' | 'word_calibration' | 'citation_verification',
   operation: Promise<T>,
   timeoutMs = REWRITE_STAGE_TIMEOUT_MS,
 ): Promise<T> {
@@ -97,8 +98,16 @@ function isWritingStageTimeoutError(error: unknown) {
   return error instanceof WritingStageTimeoutError;
 }
 
+async function withDraftGenerationTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs = DRAFT_GENERATION_TIMEOUT_MS,
+): Promise<T> {
+  return withRewriteStageTimeout('draft_generation', operation, timeoutMs);
+}
+
 export const writingServiceTestUtils = {
   withRewriteStageTimeout,
+  withDraftGenerationTimeout,
   isWritingStageTimeoutError,
 };
 
@@ -428,43 +437,8 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
   const materialContent = await buildMaterialContentFromStorage(input.materialFiles);
 
   try {
-    const response = await openai.responses.create({
-      ...buildMainOpenAIResponsesOptions('draft_generation'),
-      input: [
-        {
-          role: 'system',
-          content: buildDraftGenerationSystemPrompt(
-            input.targetWords,
-            input.citationStyle,
-            input.requiredReferenceCount,
-          ),
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: buildDraftGenerationUserPrompt({
-                paperTitle: input.paperTitle,
-                researchQuestion: input.researchQuestion,
-                outline: input.outline,
-                requirements: input.requirements,
-              }),
-            },
-            ...materialContent.parts,
-          ],
-        },
-      ],
-    });
-
-    let content = typeof response.output_text === 'string' ? response.output_text : '';
-    let assessment = assessGeneratedPaper(content, {
-      requiredReferenceCount: input.requiredReferenceCount,
-      citationStyle: input.citationStyle,
-    });
-
-    if (!assessment.valid) {
-      const repairedResponse = await openai.responses.create({
+    const response = await withDraftGenerationTimeout(
+      openai.responses.create({
         ...buildMainOpenAIResponsesOptions('draft_generation'),
         input: [
           {
@@ -480,20 +454,59 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
             content: [
               {
                 type: 'input_text',
-                text: buildDraftRepairUserPrompt({
+                text: buildDraftGenerationUserPrompt({
                   paperTitle: input.paperTitle,
                   researchQuestion: input.researchQuestion,
                   outline: input.outline,
                   requirements: input.requirements,
-                  badDraft: content,
-                  reasons: assessment.reasons,
                 }),
               },
               ...materialContent.parts,
             ],
           },
         ],
-      });
+      }),
+    );
+
+    let content = typeof response.output_text === 'string' ? response.output_text : '';
+    let assessment = assessGeneratedPaper(content, {
+      requiredReferenceCount: input.requiredReferenceCount,
+      citationStyle: input.citationStyle,
+    });
+
+    if (!assessment.valid) {
+      const repairedResponse = await withDraftGenerationTimeout(
+        openai.responses.create({
+          ...buildMainOpenAIResponsesOptions('draft_generation'),
+          input: [
+            {
+              role: 'system',
+              content: buildDraftGenerationSystemPrompt(
+                input.targetWords,
+                input.citationStyle,
+                input.requiredReferenceCount,
+              ),
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'input_text',
+                  text: buildDraftRepairUserPrompt({
+                    paperTitle: input.paperTitle,
+                    researchQuestion: input.researchQuestion,
+                    outline: input.outline,
+                    requirements: input.requirements,
+                    badDraft: content,
+                    reasons: assessment.reasons,
+                  }),
+                },
+                ...materialContent.parts,
+              ],
+            },
+          ],
+        }),
+      );
 
       content = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : content;
       assessment = assessGeneratedPaper(content, {

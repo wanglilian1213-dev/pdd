@@ -218,3 +218,19 @@ test('withRewriteStageTimeout raises a timeout error when the stage takes too lo
     },
   );
 });
+
+test('draft generation also has a timeout guard instead of hanging forever', async () => {
+  assert.equal(typeof (writingServiceTestUtils as Record<string, unknown>).withDraftGenerationTimeout, 'function');
+
+  const withDraftGenerationTimeout = (writingServiceTestUtils as Record<string, unknown>).withDraftGenerationTimeout as
+    | ((operation: Promise<string>, timeoutMs?: number) => Promise<string>)
+    | undefined;
+
+  await assert.rejects(
+    () => withDraftGenerationTimeout!(new Promise<string>(() => {}), 5),
+    (error: unknown) => {
+      assert.equal(writingServiceTestUtils.isWritingStageTimeoutError(error), true);
+      return true;
+    },
+  );
+});
