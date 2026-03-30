@@ -150,3 +150,89 @@ test('content-bad completed task reruns content with repaired outline and rebuil
     'rebuild:task-2:true:false',
   ]);
 });
+
+test('completed task reruns content when repaired outline changes the actual theme even if old body still has citations', async () => {
+  const calls: string[] = [];
+
+  await remediateCompletedTaskWithDeps('task-3', {
+    loadTask: async () => ({
+      id: 'task-3',
+      title: 'Report Marking Criteria',
+      paperTitle: 'Producing an Effective 1,000-Word Academic Research Report',
+      researchQuestion: 'How should a student structure a stronger report?',
+      specialRequirements: '',
+      targetWords: 1000,
+      citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
+      requiredSectionCount: 3,
+      courseCode: null,
+      status: 'completed',
+      stage: 'completed',
+    }),
+    loadLatestOutline: async () => ({
+      id: 'outline-3',
+      version: 2,
+      content: 'Introduction\n- Explain report-writing principles\nMain Body\n- Explain academic integrity\nConclusion\n- Summarise how to write a report',
+      paperTitle: 'Producing an Effective 1,000-Word Academic Research Report',
+      researchQuestion: 'How should a student structure a stronger report?',
+      targetWords: 1000,
+      citationStyle: 'APA 7',
+      requiredReferenceCount: 5,
+      requiredSectionCount: 3,
+    }),
+    loadMaterialFiles: async () => ([
+      { original_name: 'Report Marking Criteria.pdf', storage_path: 'task-3/rubric.pdf', mime_type: 'application/pdf' },
+      { original_name: 'Final Report Writing Guide.pdf', storage_path: 'task-3/guide.pdf', mime_type: 'application/pdf' },
+      { original_name: 'Written Project Assessment Task Information.pdf', storage_path: 'task-3/task.pdf', mime_type: 'application/pdf' },
+    ]),
+    loadCurrentDeliveryContent: async () => ({
+      finalText: [
+        'Producing an Effective 1,000-Word Academic Research Report',
+        '',
+        'Writing a strong report requires careful structure and academic integrity (Smith, 2024; Jones, 2023; Lee, 2022; Brown, 2021; Khan, 2020).',
+        '',
+        'References',
+        'Smith, J. (2024). Strategic writing and AI. Journal of Business Writing, 12(2), 1-10. https://doi.org/10.1000/test1',
+        '',
+        'Jones, A. (2023). Managing evidence in academic reports. Studies in Higher Education, 18(1), 11-20. https://doi.org/10.1000/test2',
+        '',
+        'Lee, M. (2022). Critical analysis in short reports. Academic Review, 7(3), 21-30. https://doi.org/10.1000/test3',
+        '',
+        'Brown, T. (2021). Source integration in university writing. Journal of Writing Studies, 9(4), 31-40. https://doi.org/10.1000/test4',
+        '',
+        'Khan, R. (2020). Citation practice in undergraduate assessment. Education Quarterly, 5(2), 41-50. https://doi.org/10.1000/test5',
+      ].join('\n'),
+      humanizedText: null,
+    }),
+    ensureUsableOutline: async () => {
+      calls.push('ensure-outline');
+      return {
+        outlineContent: 'Introduction\n- Explain the mental-health debate\nMain Body\n- Analyse risks and benefits\nConclusion\n- Summarise the task answer',
+        paperTitle: 'The Impact of Social Media Use on the Mental Health of University Students',
+        researchQuestion: 'To what extent does social media use affect the mental health of university students?',
+        targetWords: 1000,
+        citationStyle: 'APA 7',
+        requiredReferenceCount: 5,
+        requiredSectionCount: 3,
+        courseCode: null,
+      };
+    },
+    regenerateDeliveryContent: async (payload) => {
+      calls.push(`rerun:${payload.paperTitle}:${payload.researchQuestion}`);
+      return 'New paper text with citation (Garcia, 2024).\n\nReferences\nGarcia, M. (2024). Example. https://example.com';
+    },
+    syncTaskMetadata: async (taskId, payload) => {
+      calls.push(`sync:${taskId}:${payload.paperTitle}`);
+    },
+    rebuildDeliveryFiles: async (taskId, options) => {
+      calls.push(`rebuild:${taskId}:${options.finalText.includes('(Garcia, 2024)')}:${options.preserveHumanizedDoc}`);
+    },
+  });
+
+  assert.deepEqual(calls, [
+    'ensure-outline',
+    'rerun:The Impact of Social Media Use on the Mental Health of University Students:To what extent does social media use affect the mental health of university students?',
+    'sync:task-3:The Impact of Social Media Use on the Mental Health of University Students',
+    'rebuild:task-3:true:false',
+  ]);
+});

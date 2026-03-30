@@ -14,7 +14,12 @@ import {
   releaseOutlineEditAtomic,
   reserveOutlineEditAtomic,
 } from './atomicOpsService';
-import { buildInitialOutlinePrompt, buildRegenerateOutlinePrompt, buildRepairOutlinePrompt } from './outlinePromptService';
+import {
+  buildInitialOutlinePrompt,
+  buildOutlineThemeReviewPrompt,
+  buildRegenerateOutlinePrompt,
+  buildRepairOutlinePrompt,
+} from './outlinePromptService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { normalizeCitationStyle } from './citationStyleService';
 import { recordAuditLog } from './auditLogService';
@@ -44,6 +49,11 @@ interface ParsedOutlineResponse {
   citation_style: string;
 }
 
+interface OutlineThemeReviewResult {
+  aligned: boolean;
+  reason: string;
+}
+
 export interface UsableOutlineResult {
   outlineContent: string;
   paperTitle: string;
@@ -70,6 +80,22 @@ function parseOutlineJson(content: string, fallback: ParsedOutlineResponse): Par
     };
   } catch {
     return fallback;
+  }
+}
+
+function parseOutlineThemeReview(content: string): OutlineThemeReviewResult {
+  try {
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content) as Partial<OutlineThemeReviewResult>;
+    return {
+      aligned: parsed.aligned === true,
+      reason: typeof parsed.reason === 'string' ? parsed.reason.trim() : '',
+    };
+  } catch {
+    return {
+      aligned: false,
+      reason: 'theme review parsing failed',
+    };
   }
 }
 
@@ -241,6 +267,120 @@ async function repairOutlineReadiness(
   });
 
   if (!repairedAssessment.valid) {
+    throw new AppError(500, '大纲生成失败，请稍后重试。');
+  }
+
+  return repaired;
+}
+
+async function reviewOutlineThemeAlignment(
+  stage: 'outline_generation' | 'outline_regeneration',
+  payload: ParsedOutlineResponse,
+  options: {
+    specialRequirements?: string | null;
+    materialParts?: MaterialInputPart[];
+  },
+) {
+  if (!options.materialParts || options.materialParts.length === 0) {
+    return {
+      aligned: true,
+      reason: 'no material files supplied for theme review',
+    };
+  }
+
+  const prompt = buildOutlineThemeReviewPrompt({
+    currentOutline: payload.outline,
+    currentPaperTitle: payload.paper_title,
+    currentResearchQuestion: payload.research_question,
+    specialRequirements: options.specialRequirements,
+  });
+
+  const response = await openai.responses.create({
+    ...buildMainOpenAIResponsesOptions(stage),
+    input: [
+      {
+        role: 'system' as const,
+        content: prompt.systemPrompt,
+      },
+      {
+        role: 'user' as const,
+        content: [
+          {
+            type: 'input_text',
+            text: prompt.userPrompt,
+          },
+          ...options.materialParts,
+        ],
+      },
+    ],
+  });
+
+  return parseOutlineThemeReview(response.output_text);
+}
+
+async function repairOutlineThemeAlignment(
+  stage: 'outline_generation' | 'outline_regeneration',
+  payload: ParsedOutlineResponse,
+  options: {
+    specialRequirements?: string | null;
+    editInstruction?: string | null;
+    materialParts?: MaterialInputPart[];
+    requiredSectionCount: number;
+    requiredReferenceCount: number;
+  },
+) {
+  const review = await reviewOutlineThemeAlignment(stage, payload, {
+    specialRequirements: options.specialRequirements,
+    materialParts: options.materialParts,
+  });
+
+  if (review.aligned) {
+    return payload;
+  }
+
+  const prompt = buildRepairOutlinePrompt({
+    currentOutline: payload.outline,
+    currentPaperTitle: payload.paper_title,
+    currentResearchQuestion: payload.research_question,
+    currentTargetWords: payload.target_words,
+    currentCitationStyle: payload.citation_style,
+    requiredSectionCount: options.requiredSectionCount,
+    requiredReferenceCount: options.requiredReferenceCount,
+    specialRequirements: options.specialRequirements,
+    editInstruction: options.editInstruction,
+    violationSummary: 'None',
+    qualityIssueSummary: `Theme drift review failed: ${review.reason || 'The title, research question, and outline do not answer the actual task requirements.'}`,
+  });
+
+  const response = await openai.responses.create({
+    ...buildMainOpenAIResponsesOptions(stage),
+    input: [
+      {
+        role: 'system' as const,
+        content: prompt.systemPrompt,
+      },
+      {
+        role: 'user' as const,
+        content: options.materialParts
+          ? [
+              {
+                type: 'input_text',
+                text: prompt.userPrompt,
+              },
+              ...options.materialParts,
+            ]
+          : prompt.userPrompt,
+      },
+    ],
+  });
+
+  const repaired = parseOutlineJson(response.output_text, payload);
+  const repairedReview = await reviewOutlineThemeAlignment(stage, repaired, {
+    specialRequirements: options.specialRequirements,
+    materialParts: options.materialParts,
+  });
+
+  if (!repairedReview.aligned) {
     throw new AppError(500, '大纲生成失败，请稍后重试。');
   }
 
@@ -452,11 +592,21 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
         requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
+    const themeAligned = await repairOutlineThemeAlignment(
+      'outline_regeneration',
+      repaired,
+      {
+        specialRequirements: task.special_requirements,
+        materialParts: materialContent.parts,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      },
+    );
 
     const normalized: ParsedOutlineResponse = {
-      paper_title: repaired.paper_title,
-      research_question: repaired.research_question,
-      outline: repaired.outline,
+      paper_title: themeAligned.paper_title,
+      research_question: themeAligned.research_question,
+      outline: themeAligned.outline,
       target_words: unifiedRequirements.targetWords,
       citation_style: unifiedRequirements.citationStyle,
     };
@@ -634,15 +784,25 @@ export async function generateOutline(taskId: string, userId: string) {
         requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
     );
+    const themeAligned = await repairOutlineThemeAlignment(
+      'outline_generation',
+      parsed,
+      {
+        specialRequirements: task?.special_requirements,
+        materialParts: materialContent.parts,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      },
+    );
 
     const { data: outline, error } = await supabaseAdmin
       .from('outline_versions')
       .insert({
         task_id: taskId,
         version: 1,
-        content: parsed.outline,
-        paper_title: parsed.paper_title,
-        research_question: parsed.research_question,
+        content: themeAligned.outline,
+        paper_title: themeAligned.paper_title,
+        research_question: themeAligned.research_question,
         target_words: unifiedRequirements.targetWords,
         citation_style: unifiedRequirements.citationStyle,
         required_reference_count: unifiedRequirements.requiredReferenceCount,
@@ -656,8 +816,8 @@ export async function generateOutline(taskId: string, userId: string) {
     }
 
     await updateTaskStage(taskId, 'outline_ready', {
-      paper_title: parsed.paper_title,
-      research_question: parsed.research_question,
+      paper_title: themeAligned.paper_title,
+      research_question: themeAligned.research_question,
       target_words: unifiedRequirements.targetWords,
       citation_style: unifiedRequirements.citationStyle,
       required_reference_count: unifiedRequirements.requiredReferenceCount,
@@ -670,8 +830,8 @@ export async function generateOutline(taskId: string, userId: string) {
       event_type: 'outline_generated',
       detail: {
         version: 1,
-        paper_title: parsed.paper_title,
-        research_question: parsed.research_question,
+        paper_title: themeAligned.paper_title,
+        research_question: themeAligned.research_question,
         target_words: unifiedRequirements.targetWords,
         citation_style: unifiedRequirements.citationStyle,
         required_reference_count: unifiedRequirements.requiredReferenceCount,
@@ -718,11 +878,24 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     throw new AppError(500, '找不到当前大纲。');
   }
 
+  const { data: files } = await supabaseAdmin
+    .from('task_files')
+    .select('original_name, storage_path, mime_type')
+    .eq('task_id', taskId)
+    .eq('category', 'material');
+
+  if (!files || files.length === 0) {
+    throw new AppError(400, '没有找到任务材料，无法修改大纲。');
+  }
+
   let reservedEdit = false;
+  let uploadedFileIds: string[] = [];
 
   try {
     await reserveOutlineEditAtomic(taskId, userId, maxEdits);
     reservedEdit = true;
+    const materialContent = await buildMaterialContentFromStorage(files);
+    uploadedFileIds = materialContent.uploadedFileIds;
     const unifiedRequirements = deriveStoredUnifiedRequirements({
       target_words: typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words,
       citation_style: typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style,
@@ -755,7 +928,13 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
         },
         {
           role: 'user' as const,
-          content: prompt.userPrompt,
+          content: [
+            {
+              type: 'input_text',
+              text: prompt.userPrompt,
+            },
+            ...materialContent.parts,
+          ],
         },
       ],
     });
@@ -783,6 +962,19 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       {
         specialRequirements: task.special_requirements,
         editInstruction,
+        fileNames: files.map((file) => file.original_name),
+        materialParts: materialContent.parts,
+        requiredSectionCount: unifiedRequirements.requiredSectionCount,
+        requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      },
+    );
+    const themeAligned = await repairOutlineThemeAlignment(
+      'outline_regeneration',
+      parsed,
+      {
+        specialRequirements: task.special_requirements,
+        editInstruction,
+        materialParts: materialContent.parts,
         requiredSectionCount: unifiedRequirements.requiredSectionCount,
         requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
       },
@@ -795,9 +987,9 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       .insert({
         task_id: taskId,
         version: newVersion,
-        content: parsed.outline,
-        paper_title: parsed.paper_title,
-        research_question: parsed.research_question,
+        content: themeAligned.outline,
+        paper_title: themeAligned.paper_title,
+        research_question: themeAligned.research_question,
         edit_instruction: editInstruction,
         target_words: unifiedRequirements.targetWords,
         citation_style: unifiedRequirements.citationStyle,
@@ -810,8 +1002,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     await supabaseAdmin
       .from('tasks')
       .update({
-        paper_title: parsed.paper_title,
-        research_question: parsed.research_question,
+        paper_title: themeAligned.paper_title,
+        research_question: themeAligned.research_question,
         target_words: unifiedRequirements.targetWords,
         citation_style: unifiedRequirements.citationStyle,
         required_reference_count: unifiedRequirements.requiredReferenceCount,
@@ -827,6 +1019,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     }
     if (err instanceof AppError) throw err;
     throw new AppError(500, '大纲修改失败，请稍后重试。');
+  } finally {
+    await cleanupOpenAIFiles(uploadedFileIds);
   }
 }
 

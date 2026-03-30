@@ -3,6 +3,13 @@ interface OutlinePrompt {
   userPrompt: string;
 }
 
+interface OutlineThemeReviewPromptInput {
+  currentOutline: string;
+  currentPaperTitle?: string | null;
+  currentResearchQuestion?: string | null;
+  specialRequirements?: string | null;
+}
+
 interface InitialOutlinePromptInput {
   specialRequirements?: string | null;
   targetWords: number;
@@ -73,6 +80,17 @@ const OUTLINE_PLANNING_RULES = `Outline planning rules:
 - Never use rubric names, file names, scoring guide names, or placeholders as the final paper title.
 - Keep the outline aligned with the fixed target_words and citation_style requirements.`;
 
+const OUTLINE_TOPIC_RULES = `Topic selection rules:
+- Task requirement materials determine the actual essay topic.
+- Marking criteria and writing guides only provide supporting constraints.
+- Marking criteria, rubrics, and writing guides only provide supporting constraints such as structure, writing quality, citation requirements, and scoring priorities.
+- Do not let marking criteria or writing guides replace the task topic.
+- They must never replace the real task topic unless the task itself explicitly asks for a meta-topic such as report-writing method, academic integrity, or assessment structure.
+- If the task materials already give one clear topic, the paper title, research question, and outline must stay tightly focused on that topic.
+- If the task only gives a theme range or options, choose one concrete topic that still strictly fits the allowed scope.
+- If the task materials do not give one single fixed topic but instead provide an allowed range, options, or direction, choose one concrete topic that still strictly fits the allowed scope.
+- Do not turn the essay into a meta-discussion about how to write a report unless the task itself explicitly requires that.`;
+
 function normalizeText(value: string | null | undefined, fallback = 'None') {
   const normalized = value?.trim();
   return normalized ? normalized : fallback;
@@ -98,6 +116,8 @@ ${buildFixedRequirementBlock(requirements)}
 
 ${OUTLINE_PLANNING_RULES}
 
+${OUTLINE_TOPIC_RULES}
+
 ${OUTLINE_RESPONSE_SCHEMA}`;
 }
 
@@ -121,7 +141,7 @@ export function buildRegenerateOutlinePrompt(input: RegenerateOutlinePromptInput
       requiredSectionCount: input.requiredSectionCount,
       requiredReferenceCount: input.requiredReferenceCount,
     }),
-    userPrompt: `Revise the outline by considering the previous outline and every instruction together.
+    userPrompt: `Read every uploaded material file directly and revise the outline by considering the previous outline and every instruction together.
 
 Current outline:
 ${normalizeText(input.currentOutline)}
@@ -163,6 +183,8 @@ ${buildFixedRequirementBlock({
 
 ${OUTLINE_PLANNING_RULES}
 
+${OUTLINE_TOPIC_RULES}
+
 ${OUTLINE_RESPONSE_SCHEMA}`,
     userPrompt: `The current outline breaks the bullet-count rule in one or more sections.
 
@@ -194,5 +216,34 @@ Other quality issues that must be fixed:
 ${normalizeText(input.qualityIssueSummary, 'None')}
 
 Rewrite the outline so every section follows the rule exactly. Keep each bullet on one line starting with "- ", keep the fixed task requirements unchanged, and return JSON only.`,
+  };
+}
+
+export function buildOutlineThemeReviewPrompt(input: OutlineThemeReviewPromptInput): OutlinePrompt {
+  return {
+    systemPrompt: `You judge whether the generated title, research question, and outline truly answer the task requirements.
+
+${OUTLINE_TOPIC_RULES}
+
+Return valid JSON only in this shape:
+{
+  "aligned": true | false,
+  "reason": "short explanation"
+}`,
+    userPrompt: `Read every uploaded material file directly and decide whether the generated outline is truly answering the task itself or has drifted into rubric, marking-criteria, or writing-guide meta-talk.
+
+Current paper title:
+${normalizeText(input.currentPaperTitle)}
+
+Current research question:
+${normalizeText(input.currentResearchQuestion)}
+
+Current outline:
+${normalizeText(input.currentOutline)}
+
+Original special requirements:
+${normalizeText(input.specialRequirements)}
+
+Answer only with JSON.`,
   };
 }

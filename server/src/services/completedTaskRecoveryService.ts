@@ -224,6 +224,16 @@ function titleNeedsRepair(task: RecoveryTaskMeta, outline: UsableOutlineResult) 
   return !current || current !== outline.paperTitle;
 }
 
+function outlineNeedsContentRecovery(
+  latestOutline: NonNullable<Awaited<ReturnType<RecoveryDeps['loadLatestOutline']>>>,
+  usableOutline: UsableOutlineResult,
+) {
+  return (
+    String(latestOutline.content || '').trim() !== String(usableOutline.outlineContent || '').trim()
+    || String(latestOutline.researchQuestion || '').trim() !== String(usableOutline.researchQuestion || '').trim()
+  );
+}
+
 export async function remediateCompletedTaskWithDeps(taskId: string, deps: RecoveryDeps) {
   const task = await deps.loadTask(taskId);
   if (!task) {
@@ -246,7 +256,8 @@ export async function remediateCompletedTaskWithDeps(taskId: string, deps: Recov
     requiredReferenceCount: usableOutline.requiredReferenceCount,
     citationStyle: usableOutline.citationStyle,
   });
-  const needsContentRecovery = !contentAssessment.valid;
+  const needsContentRecovery = !contentAssessment.valid
+    || outlineNeedsContentRecovery(latestOutline, usableOutline);
 
   let finalText = currentDelivery.finalText;
   if (needsContentRecovery) {
