@@ -224,8 +224,11 @@ export function parseCitationReportData(
 }
 
 const COLORS = {
-  navy: '#243B7B',
-  indigo: '#5267D8',
+  navy: '#2B5797',
+  navyDark: '#1E3F6F',
+  indigo: '#667EEA',
+  accent: '#764BA2',
+  gold: '#CFA74E',
   softBlue: '#EDF2FF',
   border: '#D8E0F2',
   text: '#1E293B',
@@ -270,6 +273,51 @@ const PAGE_LEFT = 50;
 const CONTENT_WIDTH = 495;
 const SECTION_GAP = 18;
 
+function renderCoverPage(doc: PDFKit.PDFDocument) {
+  const pw = doc.page.width;
+  const ph = doc.page.height;
+
+  // Full-page deep blue background
+  doc.rect(0, 0, pw, ph).fill('#2B5797');
+
+  const brandX = 50;
+
+  // "Veritas" — V in gold, rest in white (Times-Bold approximates Georgia Bold)
+  doc.font('Times-Bold').fontSize(39);
+  doc.fillColor('#CFA74E').text('V', brandX, 70, { continued: true });
+  doc.fillColor('#FFFFFF').text('eritas', { continued: false });
+
+  // "Scan" — S in gold, rest in white
+  doc.font('Times-Bold').fontSize(48);
+  doc.fillColor('#CFA74E').text('S', brandX, 120, { continued: true });
+  doc.fillColor('#FFFFFF').text('can', { continued: false });
+
+  // White separator line
+  const lineY = 195;
+  doc.save();
+  doc.moveTo(brandX, lineY).lineTo(pw - 50, lineY).strokeColor('#FFFFFF').lineWidth(0.8).stroke();
+  doc.restore();
+
+  // Main title
+  doc.font('Times-Bold').fontSize(26).fillColor('#FFFFFF');
+  doc.text('Academic Misconduct', brandX, 260);
+  doc.text('Risk Assessment', brandX, 298);
+
+  // Bottom-left: "Report  Version 1.2"
+  // Use lineBreak:false to prevent auto page-break near page bottom
+  const bottomY = ph - 65;
+  doc.font('Helvetica').fontSize(12).fillColor('#FFFFFF');
+  doc.text('Report  Version 1.2', 30, bottomY, { lineBreak: false });
+
+  // Bottom-right: confidentiality notice
+  doc.font('Helvetica').fontSize(8.6).fillColor('#FFFFFF');
+  doc.text('Confidential ©VeritasScan.', 310, bottomY, { lineBreak: false });
+  doc.text('All rights reserved.', 310, bottomY + 12, { lineBreak: false });
+
+  // New page for report content
+  doc.addPage();
+}
+
 function drawTextHeight(doc: PDFKit.PDFDocument, text: string, width: number, font = 'Helvetica', fontSize = 10) {
   return doc.font(font).fontSize(fontSize).heightOfString(text, { width, align: 'left' });
 }
@@ -297,23 +345,34 @@ function drawMetricCard(doc: PDFKit.PDFDocument, x: number, y: number, width: nu
 }
 
 function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
+  const headerHeight = 92;
+  const pw = doc.page.width;
+
+  // Simulated gradient: two horizontal bands blending navy → indigo
   doc.save();
-  doc.rect(0, 0, doc.page.width, 92).fill(COLORS.navy);
+  doc.rect(0, 0, pw, headerHeight * 0.6).fill(COLORS.navy);
+  doc.rect(0, headerHeight * 0.6, pw, headerHeight * 0.4).fill(COLORS.navyDark);
   doc.restore();
 
-  doc
-    .fillColor(COLORS.white)
-    .font('Helvetica-Bold')
-    .fontSize(20)
-    .text('VeritasScan', PAGE_LEFT, 28, { width: 220 });
+  // Thin gold accent line at bottom of header
+  doc.save();
+  doc.moveTo(0, headerHeight).lineTo(pw, headerHeight).strokeColor(COLORS.gold).lineWidth(2).stroke();
+  doc.restore();
 
-  doc
-    .font('Helvetica')
-    .fontSize(10)
-    .text(data.reportId, doc.page.width - 190, 32, {
-      width: 140,
-      align: 'center',
-    });
+  // Brand name with gold V
+  doc.font('Times-Bold').fontSize(20);
+  doc.fillColor(COLORS.gold).text('V', PAGE_LEFT, 28, { continued: true });
+  doc.fillColor(COLORS.white).text('eritasScan', { continued: false });
+
+  // Report ID pill
+  const pillX = pw - 200;
+  const pillW = 150;
+  doc.save();
+  doc.roundedRect(pillX, 26, pillW, 28, 14).fill('rgba(255,255,255,0.15)');
+  doc.roundedRect(pillX, 26, pillW, 28, 14).strokeColor('rgba(255,255,255,0.3)').lineWidth(0.5).stroke();
+  doc.restore();
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.white)
+    .text(data.reportId, pillX, 34, { width: pillW, align: 'center' });
 
   doc.y = 116;
   doc
@@ -337,9 +396,14 @@ function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
 }
 
 function renderExecutiveSummary(doc: PDFKit.PDFDocument, data: CitationReportData) {
+  // --- layout constants ---
+  const metricAreaWidth = 400;  // left side: metric cards
+  const findingsWidth = 160;    // right side: key findings (wider to prevent overflow)
+  const findingsX = PAGE_LEFT + metricAreaWidth - 28;
+
   const findingsHeight = data.keyFindings
     .slice(0, 4)
-    .reduce((sum, finding) => sum + drawTextHeight(doc, `• ${finding}`, 220, 'Helvetica', 10) + 6, 0);
+    .reduce((sum, finding) => sum + drawTextHeight(doc, `• ${finding}`, findingsWidth, 'Helvetica', 9) + 6, 0);
   const cardHeight = Math.max(190, 112 + findingsHeight);
   ensureSpace(doc, cardHeight + 8);
   const top = doc.y;
@@ -355,26 +419,26 @@ function renderExecutiveSummary(doc: PDFKit.PDFDocument, data: CitationReportDat
     .fillColor(COLORS.text)
     .text('Executive Summary', PAGE_LEFT + 20, top + 18);
 
-  drawMetricCard(doc, PAGE_LEFT + 20, top + 52, 120, 'Overall score', `${data.overallScore}%`, COLORS.indigo);
-  drawMetricCard(doc, PAGE_LEFT + 156, top + 52, 120, 'Total citations', String(data.totalCitations), COLORS.success);
-  drawMetricCard(doc, PAGE_LEFT + 292, top + 52, 120, 'Reliability', data.reliabilityLabel, statusColor(data.reliabilityLabel.toLowerCase() as CitationStatus));
+  drawMetricCard(doc, PAGE_LEFT + 20, top + 52, 110, 'Overall score', `${data.overallScore}%`, COLORS.indigo);
+  drawMetricCard(doc, PAGE_LEFT + 140, top + 52, 110, 'Total citations', String(data.totalCitations), COLORS.success);
+  drawMetricCard(doc, PAGE_LEFT + 260, top + 52, 110, 'Reliability', data.reliabilityLabel, statusColor(data.reliabilityLabel.toLowerCase() as CitationStatus));
 
   let findingsY = top + 52;
   doc
     .font('Helvetica-Bold')
     .fontSize(11)
     .fillColor(COLORS.text)
-    .text('Key findings', PAGE_LEFT + 430, findingsY, { width: 95 });
+    .text('Key findings', findingsX, findingsY, { width: findingsWidth });
   findingsY += 20;
 
   for (const finding of data.keyFindings.slice(0, 4)) {
     const bullet = `• ${finding}`;
-    const height = drawTextHeight(doc, bullet, 95, 'Helvetica', 9);
+    const height = drawTextHeight(doc, bullet, findingsWidth, 'Helvetica', 9);
     doc
       .font('Helvetica')
       .fontSize(9)
       .fillColor(COLORS.text)
-      .text(bullet, PAGE_LEFT + 430, findingsY, { width: 95 });
+      .text(bullet, findingsX, findingsY, { width: findingsWidth });
     findingsY += height + 6;
   }
 
@@ -385,7 +449,7 @@ function renderBreakdownTable(doc: PDFKit.PDFDocument, data: CitationReportData)
   drawSectionTitle(doc, 'Validation Overview');
 
   const startX = PAGE_LEFT;
-  const widths = [205, 50, 72, 96, 72];
+  const widths = [180, 45, 60, 96, 114];
   const headers = ['Category', 'Count', 'Percentage', 'Visual Bar', 'Status'];
 
   const renderHeaderRow = () => {
@@ -511,7 +575,7 @@ function renderCitationDetailTable(doc: PDFKit.PDFDocument, details: CitationDet
 function renderCitationSection(doc: PDFKit.PDFDocument, citation: CitationEntry, index: number) {
   ensureSpace(doc, 48);
   const headerTop = doc.y;
-  drawRoundedCard(doc, PAGE_LEFT, headerTop, CONTENT_WIDTH, 32, COLORS.indigo);
+  drawRoundedCard(doc, PAGE_LEFT, headerTop, CONTENT_WIDTH, 32, COLORS.navy);
   doc
     .font('Helvetica-Bold')
     .fontSize(11)
@@ -571,6 +635,7 @@ export async function renderCitationReportPdf(data: CitationReportData): Promise
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
+    renderCoverPage(doc);
     renderHeader(doc, data);
     renderExecutiveSummary(doc, data);
     renderBreakdownTable(doc, data);
