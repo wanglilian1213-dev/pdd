@@ -335,13 +335,15 @@ function drawSectionTitle(doc: PDFKit.PDFDocument, title: string) {
 function drawMetricCard(doc: PDFKit.PDFDocument, x: number, y: number, width: number, title: string, value: string, accent: string) {
   drawRoundedCard(doc, x, y, width, 72, COLORS.white);
   doc.save();
-  doc.roundedRect(x, y, width, 72, 14).stroke(COLORS.border);
+  doc.roundedRect(x, y, width, 72, 8).stroke(COLORS.border);
   doc.restore();
+  // Thin accent strip at top — clip to card bounds so it doesn't bleed
   doc.save();
-  doc.roundedRect(x, y, width, 6, 6).fill(accent);
+  doc.roundedRect(x, y, width, 72, 8).clip();
+  doc.rect(x, y, width, 4).fill(accent);
   doc.restore();
-  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9).text(title, x + 14, y + 18, { width: width - 28 });
-  doc.fillColor(COLORS.text).font('Helvetica-Bold').fontSize(18).text(value, x + 14, y + 36, { width: width - 28 });
+  doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9).text(title, x + 14, y + 16, { width: width - 28, lineBreak: false });
+  doc.fillColor(COLORS.text).font('Helvetica-Bold').fontSize(18).text(value, x + 14, y + 34, { width: width - 28, lineBreak: false });
 }
 
 function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
@@ -364,12 +366,14 @@ function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
   doc.fillColor(COLORS.gold).text('V', PAGE_LEFT, 28, { continued: true });
   doc.fillColor(COLORS.white).text('eritasScan', { continued: false });
 
-  // Report ID pill
+  // Report ID pill (PDFKit doesn't support rgba — use opacity API)
   const pillX = pw - 200;
   const pillW = 150;
   doc.save();
-  doc.roundedRect(pillX, 26, pillW, 28, 14).fill('rgba(255,255,255,0.15)');
-  doc.roundedRect(pillX, 26, pillW, 28, 14).strokeColor('rgba(255,255,255,0.3)').lineWidth(0.5).stroke();
+  doc.opacity(0.2).roundedRect(pillX, 26, pillW, 28, 14).fill(COLORS.white);
+  doc.restore();
+  doc.save();
+  doc.opacity(0.35).roundedRect(pillX, 26, pillW, 28, 14).strokeColor(COLORS.white).lineWidth(0.5).stroke();
   doc.restore();
   doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.white)
     .text(data.reportId, pillX, 34, { width: pillW, align: 'center' });
@@ -396,53 +400,54 @@ function renderHeader(doc: PDFKit.PDFDocument, data: CitationReportData) {
 }
 
 function renderExecutiveSummary(doc: PDFKit.PDFDocument, data: CitationReportData) {
-  // --- layout constants ---
-  const metricAreaWidth = 400;  // left side: metric cards
-  const findingsWidth = 160;    // right side: key findings (wider to prevent overflow)
-  const findingsX = PAGE_LEFT + metricAreaWidth - 28;
+  // Vertical stacked layout: title → metric cards → key findings
+  const innerPad = 20;
+  const innerWidth = CONTENT_WIDTH - innerPad * 2;
+  const cardW = Math.floor((innerWidth - 20) / 3); // 3 cards with 10px gaps
 
+  // Pre-calculate findings height for overall card sizing
+  const findingsTextWidth = innerWidth;
   const findingsHeight = data.keyFindings
     .slice(0, 4)
-    .reduce((sum, finding) => sum + drawTextHeight(doc, `• ${finding}`, findingsWidth, 'Helvetica', 9) + 6, 0);
-  const cardHeight = Math.max(190, 112 + findingsHeight);
-  ensureSpace(doc, cardHeight + 8);
+    .reduce((sum, f) => sum + drawTextHeight(doc, `• ${f}`, findingsTextWidth, 'Helvetica', 9.5) + 4, 0);
+
+  // Total card: title(36) + metric cards(80) + gap(12) + findings title(18) + findings + bottom pad
+  const totalHeight = 36 + 80 + 12 + 18 + findingsHeight + 16;
+  ensureSpace(doc, totalHeight + 8);
   const top = doc.y;
 
-  drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, COLORS.softBlue);
+  // Outer card
+  drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, totalHeight, COLORS.softBlue);
   doc.save();
-  doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, 14).stroke(COLORS.border);
+  doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, totalHeight, 12).stroke(COLORS.border);
   doc.restore();
 
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(16)
-    .fillColor(COLORS.text)
-    .text('Executive Summary', PAGE_LEFT + 20, top + 18);
+  // Title
+  doc.font('Helvetica-Bold').fontSize(14).fillColor(COLORS.text)
+    .text('Executive Summary', PAGE_LEFT + innerPad, top + 14, { lineBreak: false });
 
-  drawMetricCard(doc, PAGE_LEFT + 20, top + 52, 110, 'Overall score', `${data.overallScore}%`, COLORS.indigo);
-  drawMetricCard(doc, PAGE_LEFT + 140, top + 52, 110, 'Total citations', String(data.totalCitations), COLORS.success);
-  drawMetricCard(doc, PAGE_LEFT + 260, top + 52, 110, 'Reliability', data.reliabilityLabel, statusColor(data.reliabilityLabel.toLowerCase() as CitationStatus));
+  // Metric cards — evenly spaced
+  const metricsY = top + 40;
+  const cardStartX = PAGE_LEFT + innerPad;
+  drawMetricCard(doc, cardStartX, metricsY, cardW, 'Overall score', `${data.overallScore}%`, COLORS.indigo);
+  drawMetricCard(doc, cardStartX + cardW + 10, metricsY, cardW, 'Total citations', String(data.totalCitations), COLORS.success);
+  drawMetricCard(doc, cardStartX + (cardW + 10) * 2, metricsY, cardW, 'Reliability', data.reliabilityLabel, statusColor(data.reliabilityLabel.toLowerCase() as CitationStatus));
 
-  let findingsY = top + 52;
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(11)
-    .fillColor(COLORS.text)
-    .text('Key findings', findingsX, findingsY, { width: findingsWidth });
-  findingsY += 20;
+  // Key findings — full width below the cards
+  let findingsY = metricsY + 80 + 12;
+  doc.font('Helvetica-Bold').fontSize(10).fillColor(COLORS.text)
+    .text('Key findings', PAGE_LEFT + innerPad, findingsY, { width: findingsTextWidth, lineBreak: false });
+  findingsY += 18;
 
   for (const finding of data.keyFindings.slice(0, 4)) {
     const bullet = `• ${finding}`;
-    const height = drawTextHeight(doc, bullet, findingsWidth, 'Helvetica', 9);
-    doc
-      .font('Helvetica')
-      .fontSize(9)
-      .fillColor(COLORS.text)
-      .text(bullet, findingsX, findingsY, { width: findingsWidth });
-    findingsY += height + 6;
+    const h = drawTextHeight(doc, bullet, findingsTextWidth, 'Helvetica', 9.5);
+    doc.font('Helvetica').fontSize(9.5).fillColor(COLORS.text)
+      .text(bullet, PAGE_LEFT + innerPad, findingsY, { width: findingsTextWidth });
+    findingsY += h + 4;
   }
 
-  doc.y = top + cardHeight + SECTION_GAP;
+  doc.y = top + totalHeight + SECTION_GAP;
 }
 
 function renderBreakdownTable(doc: PDFKit.PDFDocument, data: CitationReportData) {
@@ -453,13 +458,14 @@ function renderBreakdownTable(doc: PDFKit.PDFDocument, data: CitationReportData)
   const headers = ['Category', 'Count', 'Percentage', 'Visual Bar', 'Status'];
 
   const renderHeaderRow = () => {
+    const headerY = doc.y;
     doc.font('Helvetica-Bold').fontSize(10).fillColor(COLORS.muted);
     let x = startX;
     headers.forEach((header, index) => {
-      doc.text(header, x, doc.y, { width: widths[index] });
+      doc.text(header, x, headerY, { width: widths[index], lineBreak: false });
       x += widths[index];
     });
-    doc.moveDown(0.6);
+    doc.y = headerY + 16;
   };
 
   renderHeaderRow();
