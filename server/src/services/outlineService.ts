@@ -38,6 +38,7 @@ import {
   buildTaskRequirementExtractionPrompt,
   deriveUnifiedTaskRequirements,
   normalizeExtractedTaskRequirements,
+  parseRequirementOverrides,
   type UnifiedTaskRequirements,
 } from './taskRequirementService';
 
@@ -896,16 +897,28 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     reservedEdit = true;
     const materialContent = await buildMaterialContentFromStorage(files);
     uploadedFileIds = materialContent.uploadedFileIds;
-    const unifiedRequirements = deriveStoredUnifiedRequirements({
-      target_words: typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words,
-      citation_style: typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style,
-      required_reference_count: typeof latestOutline.required_reference_count === 'number'
-        ? latestOutline.required_reference_count
-        : task.required_reference_count,
-      required_section_count: typeof latestOutline.required_section_count === 'number'
-        ? latestOutline.required_section_count
-        : task.required_section_count,
-    });
+
+    // Parse requirement overrides from user's editInstruction (e.g. "写3000字", "换成Harvard")
+    const overrides = parseRequirementOverrides(editInstruction);
+    const baseTargetWords = typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words;
+    const baseCitationStyle = typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style;
+    const hasOverride = overrides.targetWords !== undefined || overrides.citationStyle !== undefined;
+
+    const unifiedRequirements = hasOverride
+      ? deriveUnifiedTaskRequirements({
+          targetWords: overrides.targetWords ?? baseTargetWords,
+          citationStyle: overrides.citationStyle ?? baseCitationStyle,
+        })
+      : deriveStoredUnifiedRequirements({
+          target_words: baseTargetWords,
+          citation_style: baseCitationStyle,
+          required_reference_count: typeof latestOutline.required_reference_count === 'number'
+            ? latestOutline.required_reference_count
+            : task.required_reference_count,
+          required_section_count: typeof latestOutline.required_section_count === 'number'
+            ? latestOutline.required_section_count
+            : task.required_section_count,
+        });
 
     const prompt = buildRegenerateOutlinePrompt({
       currentOutline: latestOutline.content,

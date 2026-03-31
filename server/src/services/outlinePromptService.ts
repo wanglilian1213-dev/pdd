@@ -164,7 +164,7 @@ ${normalizeText(input.specialRequirements)}
 New revision request:
 ${normalizeText(input.editInstruction)}
 
-Keep the fixed task requirements unchanged. Follow the outline planning rules and return JSON only.`,
+Follow the fixed task requirements in the system instructions and return JSON only.`,
   };
 }
 
