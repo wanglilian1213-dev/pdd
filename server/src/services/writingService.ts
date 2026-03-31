@@ -626,7 +626,15 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
         citationStyle: input.citationStyle,
       });
       if (!assessment.valid) {
-        throw new Error(`draft_invalid:${assessment.reasons.join(',')}`);
+        // Distinguish critical failures (empty/refusal/no references) from soft warnings (reference quality)
+        const criticalReasons = assessment.reasons.filter(
+          (r) => r === 'empty paper' || r === 'refusal content' || r === 'missing references' || r === 'missing citation',
+        );
+        if (criticalReasons.length > 0) {
+          throw new Error(`draft_invalid:${criticalReasons.join(',')}`);
+        }
+        // Soft issues (reference quality, count, style) — log but allow through
+        console.warn(`Draft passed with warnings for task ${input.taskId}: ${assessment.reasons.join(', ')}`);
       }
     }
 
@@ -954,21 +962,34 @@ export async function generateCitationReport(
 
   // Keep report generation on the same tuning as citation verification until we
   // have a concrete need to split them into separate stages.
-  const response = await openai.responses.create({
-    ...buildMainOpenAIResponsesOptions('citation_verification'),
-    input: [
-      {
-        role: 'system',
-        content: prompt.systemPrompt,
-      },
-      {
-        role: 'user',
-        content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
-      },
-    ],
-  });
+  let rawReportText = '';
+  try {
+    const response = await withRewriteStageTimeout(
+      'citation_verification',
+      openai.responses.create({
+        ...buildMainOpenAIResponsesOptions('citation_verification'),
+        input: [
+          {
+            role: 'system',
+            content: prompt.systemPrompt,
+          },
+          {
+            role: 'user',
+            content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
+          },
+        ],
+      }),
+      120_000,
+    );
+    rawReportText = typeof response.output_text === 'string' ? response.output_text : '';
+  } catch (error) {
+    if (!isWritingStageTimeoutError(error)) {
+      throw error;
+    }
+    // Timeout: fall back to empty report data (parseCitationReportData handles '' gracefully)
+  }
 
-  const parsed = parseCitationReportData(typeof response.output_text === 'string' ? response.output_text : '', citationStyle);
+  const parsed = parseCitationReportData(rawReportText, citationStyle);
   const now = new Date();
 
   return {

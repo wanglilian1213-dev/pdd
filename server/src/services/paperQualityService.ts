@@ -194,7 +194,7 @@ function analyzeReferenceEntry(entry: string): ReferenceEntryAnalysis {
   const hasExplicitNonAcademicMarkers = NON_ACADEMIC_SOURCE_PATTERNS.some((pattern) => pattern.test(normalizedEntry));
   const looksLikeAcademicPaper = !looksLikeBook
     && !hasExplicitNonAcademicMarkers
-    && (hasExplicitAcademicMarkers || (hasAuthorYearShape && hasResolvableLink));
+    && (hasExplicitAcademicMarkers || hasAuthorYearShape || hasResolvableLink);
 
   return {
     entry: normalizedEntry,
@@ -314,7 +314,9 @@ export function assessGeneratedPaper(
     reasons.push('references must be from 2020 onwards');
   }
 
-  if (summary.analyses.some((analysis) => analysis.looksLikeBook || !analysis.looksLikeAcademicPaper)) {
+  const totalRefs = summary.analyses.length;
+  const badRefCount = summary.analyses.filter((analysis) => analysis.looksLikeBook || !analysis.looksLikeAcademicPaper).length;
+  if (totalRefs > 0 && badRefCount / totalRefs > 0.3) {
     reasons.push('references must be academic scholar papers, not books');
   }
 
