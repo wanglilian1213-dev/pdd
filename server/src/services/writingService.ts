@@ -23,6 +23,18 @@ export const assessGeneratedPaper = assessGeneratedPaperInternal;
 const REWRITE_STAGE_TIMEOUT_MS = 60_000;
 const DRAFT_GENERATION_TIMEOUT_MS = 600_000;
 const WORD_CALIBRATION_MAX_ATTEMPTS = 5;
+const REFERENCE_REPAIR_MAX_ATTEMPTS = 2;
+
+const CRITICAL_PAPER_REASONS = new Set([
+  'empty paper',
+  'refusal content',
+  'missing references',
+  'missing citation',
+]);
+
+function isCriticalPaperFailure(reasons: string[]) {
+  return reasons.some((r) => CRITICAL_PAPER_REASONS.has(r));
+}
 
 interface WritingContextInput {
   taskId: string;
@@ -473,6 +485,95 @@ Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backti
 Return clean academic prose only.`;
 }
 
+function buildReferenceRepairSystemPrompt(
+  citationStyle: string,
+  requiredReferenceCount: number,
+  issues: string[],
+) {
+  return `You are an academic reference repair specialist.
+The following issues were found with the paper's references:
+${issues.map((issue) => `- ${issue}`).join('\n')}
+
+Fix ALL identified issues in the paper below:
+- If reference count is below ${requiredReferenceCount}, add more real academic journal paper references with proper in-text citations in the body.
+- If any references are from before 2020, replace them with references from 2020 onwards.
+- If any references look like books or non-academic sources, replace them with academic journal paper references.
+- If citation format doesn't match ${citationStyle}, reformat all citations and references to ${citationStyle}.
+- Every reference must be an academic scholar paper. Do not use book sources.
+- Each reference should include a proper DOI link or journal URL.
+
+Keep the main body text and arguments unchanged. Only fix the references and their corresponding in-text citations.
+Output the complete paper with all fixes applied.
+Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
+Section headings must be written as plain text on their own line.
+Return clean academic prose only.`;
+}
+
+async function repairReferenceIssues(
+  text: string,
+  options: {
+    citationStyle: string;
+    requiredReferenceCount: number;
+    issues: string[];
+    maxAttempts?: number;
+  },
+): Promise<string> {
+  let current = text;
+  const maxAttempts = options.maxAttempts || REFERENCE_REPAIR_MAX_ATTEMPTS;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const currentAssessment = assessGeneratedPaper(current, {
+      requiredReferenceCount: options.requiredReferenceCount,
+      citationStyle: options.citationStyle,
+    });
+
+    const referenceIssues = currentAssessment.reasons.filter((r) => !CRITICAL_PAPER_REASONS.has(r));
+    if (referenceIssues.length === 0) break;
+
+    try {
+      const response = await withRewriteStageTimeout(
+        'citation_verification',
+        openai.responses.create({
+          ...buildMainOpenAIResponsesOptions('citation_verification'),
+          input: [
+            {
+              role: 'system',
+              content: buildReferenceRepairSystemPrompt(
+                options.citationStyle,
+                options.requiredReferenceCount,
+                referenceIssues,
+              ),
+            },
+            {
+              role: 'user',
+              content: current,
+            },
+          ],
+        }),
+      );
+
+      const repaired = typeof response.output_text === 'string' ? response.output_text : current;
+
+      // Only use repaired version if it doesn't introduce critical issues
+      const repairedAssessment = assessGeneratedPaper(repaired, {
+        requiredReferenceCount: options.requiredReferenceCount,
+        citationStyle: options.citationStyle,
+      });
+
+      if (!isCriticalPaperFailure(repairedAssessment.reasons)) {
+        current = repaired;
+      }
+
+      if (repairedAssessment.valid) break;
+    } catch (error) {
+      if (!isWritingStageTimeoutError(error)) throw error;
+      break;
+    }
+  }
+
+  return current;
+}
+
 function buildDraftGenerationUserPrompt(options: {
   paperTitle: string;
   researchQuestion: string;
@@ -626,15 +727,26 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
         citationStyle: input.citationStyle,
       });
       if (!assessment.valid) {
-        // Distinguish critical failures (empty/refusal/no references) from soft warnings (reference quality)
-        const criticalReasons = assessment.reasons.filter(
-          (r) => r === 'empty paper' || r === 'refusal content' || r === 'missing references' || r === 'missing citation',
-        );
-        if (criticalReasons.length > 0) {
-          throw new Error(`draft_invalid:${criticalReasons.join(',')}`);
+        // Critical failures cannot be repaired further
+        if (isCriticalPaperFailure(assessment.reasons)) {
+          const critical = assessment.reasons.filter((r) => CRITICAL_PAPER_REASONS.has(r));
+          throw new Error(`draft_invalid:${critical.join(',')}`);
         }
-        // Soft issues (reference quality, count, style) — log but allow through
-        console.warn(`Draft passed with warnings for task ${input.taskId}: ${assessment.reasons.join(', ')}`);
+
+        // Reference quality issues — attempt targeted repair
+        content = await repairReferenceIssues(content, {
+          citationStyle: input.citationStyle,
+          requiredReferenceCount: input.requiredReferenceCount,
+          issues: assessment.reasons,
+        });
+
+        const finalAssessment = assessGeneratedPaper(content, {
+          requiredReferenceCount: input.requiredReferenceCount,
+          citationStyle: input.citationStyle,
+        });
+        if (!finalAssessment.valid) {
+          console.warn(`Draft reference issues persist after repair for task ${input.taskId}: ${finalAssessment.reasons.join(', ')}`);
+        }
       }
     }
 
@@ -962,32 +1074,25 @@ export async function generateCitationReport(
 
   // Keep report generation on the same tuning as citation verification until we
   // have a concrete need to split them into separate stages.
-  let rawReportText = '';
-  try {
-    const response = await withRewriteStageTimeout(
-      'citation_verification',
-      openai.responses.create({
-        ...buildMainOpenAIResponsesOptions('citation_verification'),
-        input: [
-          {
-            role: 'system',
-            content: prompt.systemPrompt,
-          },
-          {
-            role: 'user',
-            content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
-          },
-        ],
-      }),
-      120_000,
-    );
-    rawReportText = typeof response.output_text === 'string' ? response.output_text : '';
-  } catch (error) {
-    if (!isWritingStageTimeoutError(error)) {
-      throw error;
-    }
-    // Timeout: fall back to empty report data (parseCitationReportData handles '' gracefully)
-  }
+  // Timeout here is an explicit failure — do not silently deliver a fake report.
+  const response = await withRewriteStageTimeout(
+    'citation_verification',
+    openai.responses.create({
+      ...buildMainOpenAIResponsesOptions('citation_verification'),
+      input: [
+        {
+          role: 'system',
+          content: prompt.systemPrompt,
+        },
+        {
+          role: 'user',
+          content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
+        },
+      ],
+    }),
+    120_000,
+  );
+  const rawReportText = typeof response.output_text === 'string' ? response.output_text : '';
 
   const parsed = parseCitationReportData(rawReportText, citationStyle);
   const now = new Date();
