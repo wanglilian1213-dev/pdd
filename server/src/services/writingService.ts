@@ -401,7 +401,8 @@ export function buildDraftGenerationSystemPrompt(
   return `You are an academic writing expert.
 
 Write the entire article at once.
-Write all chapters from the provided outline.
+Write all chapters from the provided outline in order.
+Each chapter must start with its section title as a plain-text heading on its own line, exactly as named in the outline.
 The target word count is approximately ${targetWords} words.
 Use ${citationStyle} citation style.
 Write only the paper content, with no meta-commentary.
@@ -433,7 +434,8 @@ Do not miss any information.
 Do not use straight quotation marks.
 Do not use em dash.
 Do not use a dependent clause followed by an independent clause separated with a comma.
-Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
+Do not use Markdown syntax, Markdown emphasis markers, backticks, or Markdown list markers.
+Section headings must be written as plain text on their own line (e.g. "Introduction", "2. Literature Review"), not as Markdown headings with # symbols.
 Return clean academic prose only.
 
 each references should come with proper link.`;
