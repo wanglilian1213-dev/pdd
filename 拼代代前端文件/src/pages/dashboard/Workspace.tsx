@@ -115,8 +115,8 @@ function getDownloadCardMeta(category: TaskFileCategory) {
       };
     case 'humanized_doc':
       return {
-        title: '降重版文章',
-        buttonLabel: '下载降重版',
+        title: '降AI版文章',
+        buttonLabel: '下载降AI版',
         emptyLabel: 'Word 格式 (.docx)',
         icon: FileText,
         iconWrapClass: 'bg-blue-50 text-blue-600',
@@ -1037,6 +1037,11 @@ export default function Workspace() {
                         </div>
                       );
                     })}
+                  </div>
+
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 text-center">
+                    <p className="text-sm text-amber-800 font-medium">机器降AI可能出现纰漏，提交前务必先查AI</p>
+                    <p className="text-sm text-amber-700">如需人工润色降重降AI请联系客服</p>
                   </div>
 
                   <div className="flex justify-center pt-4 border-t border-gray-100">
