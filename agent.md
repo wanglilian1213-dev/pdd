@@ -33,6 +33,15 @@
   - 推送 `main` 时自动发布清理服务 `cleanup`
   - 推送 `main` 时自动发布前端 `拼代代前端`
 - 当前运营白名单邮箱：`1318823634@qq.com`
+- 当前最新主线提交：`2f20cca`
+- 2026-03-31 交接前已经用桌面这 3 个 PDF 做过真实线上验收：
+  - `Report Marking Criteria.pdf`
+  - `Final Report Writing Guide.pdf`
+  - `Written Project Assessment Task Information (.pdf)(1).pdf`
+- 这轮真实验收已经确认：
+  - 正式题目不会再被评分标准文件名带偏
+  - 大纲和正文主题会贴着真实任务要求走，不再写成“怎么写报告”
+  - 最终正文下载文件名会优先使用正式题目，不再叫 `Report Marking Criteria.docx`
 
 ## 常用命令
 
