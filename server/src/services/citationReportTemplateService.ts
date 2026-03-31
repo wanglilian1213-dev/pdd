@@ -521,19 +521,22 @@ function renderCitationDetailTable(doc: PDFKit.PDFDocument, details: CitationDet
   const startX = PAGE_LEFT;
 
   const renderTableHeader = () => {
-    ensureSpace(doc, 24);
     const top = doc.y;
     drawRoundedCard(doc, startX, top, CONTENT_WIDTH, 24, COLORS.light);
     const headers = ['Criterion', 'Expected', 'Found', 'Status'];
+    const headerY = top + 8;
     let x = startX + 10;
     doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.muted);
     headers.forEach((header, index) => {
-      doc.text(header, x, top + 8, { width: columnWidths[index] - 10 });
+      doc.text(header, x, headerY, { width: columnWidths[index] - 10, lineBreak: false });
       x += columnWidths[index];
     });
     doc.y = top + 30;
   };
 
+  // Reserve space for header (30) + at least one data row (28) together
+  // to prevent orphaned table headers at page bottom
+  ensureSpace(doc, 58);
   renderTableHeader();
 
   details.forEach((detail) => {

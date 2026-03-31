@@ -125,5 +125,7 @@ test('renderCitationReportPdf paginates cleanly for long citation analysis conte
   const pageMarkers = pdfText.match(/\/Type \/Page\b/g) ?? [];
 
   assert.equal(pdfBuffer.subarray(0, 4).toString(), '%PDF');
-  assert.equal(pageMarkers.length > 1, true);
+  // Cover page adds 1 page; long content must force at least 1 additional
+  // page beyond the cover + first content page, so total must be > 2.
+  assert.equal(pageMarkers.length > 2, true, `Expected > 2 pages for long content, got ${pageMarkers.length}`);
 });
