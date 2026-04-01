@@ -111,6 +111,8 @@ Return valid JSON only.
 Use a professional, objective, constructive tone.
 Focus on practical validation based on the essay text and the available citation information inside the essay.
 
+IMPORTANT: Do NOT check or score citation formatting quality (e.g. APA/Harvard visual presentation, italics, hanging indent, punctuation style). Only validate: author accuracy, year, title, journal/source, DOI availability, and relevance. Do NOT include any "formatting quality" criterion in the details array.
+
 Return JSON in this shape:
 {
   "overall_score": number,
@@ -143,7 +145,7 @@ Task compliance requirements:
 - suspected book sources: ${compliance.suspectedBookCount}
 - suspected non-academic sources: ${compliance.suspectedNonAcademicCount}
 
-Judge the essay against these requirements as well as the citation formatting quality.
+Judge the essay against these requirements. Do NOT judge citation formatting quality — only validate factual accuracy, source existence, and relevance.
 
 Essay content:
 ${text}`,
@@ -159,16 +161,19 @@ export function parseCitationReportData(
   const citations: CitationEntry[] = rawCitations.map((citation, index) => {
     const score = clampScore(Number(citation.score ?? 0));
     const details = Array.isArray(citation.details) ? citation.details as Array<Record<string, unknown>> : [];
-    const normalizedDetails: CitationDetail[] = details.length > 0
-      ? details.map((detail) => ({
+    // Filter out any formatting-related criteria the model may still return
+    const FORMATTING_KEYWORDS = /\bformat/i;
+    const filteredDetails = details.filter((detail) => !FORMATTING_KEYWORDS.test(String(detail.criterion ?? '')));
+    const normalizedDetails: CitationDetail[] = filteredDetails.length > 0
+      ? filteredDetails.map((detail) => ({
           criterion: String(detail.criterion ?? 'Criterion'),
           expected: String(detail.expected ?? 'Not specified'),
           found: String(detail.found ?? 'Not specified'),
           status: normalizeCriterionStatus(detail.status),
         }))
       : [{
-          criterion: 'Citation format',
-          expected: `${citationStyle} consistency`,
+          criterion: 'Source verification',
+          expected: 'Verifiable academic source',
           found: 'Limited data available',
           status: 'warning',
         }];
