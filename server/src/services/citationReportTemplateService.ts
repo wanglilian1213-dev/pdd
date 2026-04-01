@@ -613,24 +613,71 @@ function renderCitationSection(doc: PDFKit.PDFDocument, citation: CitationEntry,
   doc.moveDown(0.6);
 }
 
-function renderRecommendations(doc: PDFKit.PDFDocument, data: CitationReportData) {
-  drawSectionTitle(doc, 'Recommendations');
+function getVerdictText(score: number): string {
+  if (score >= 90) {
+    return 'All references in this essay have been verified as credible academic sources. The citation quality meets or exceeds expectations for scholarly work. No integrity concerns were identified during this assessment.';
+  }
+  if (score >= 70) {
+    return 'The majority of references in this essay are verified academic sources. A small number of citations could not be fully confirmed but do not raise significant integrity concerns. Overall citation quality is satisfactory for scholarly work.';
+  }
+  if (score >= 50) {
+    return 'Several references in this essay could not be fully verified or present minor quality concerns. While no definitive integrity violations were detected, the citation base would benefit from additional peer-reviewed sources to strengthen academic rigor.';
+  }
+  return 'A significant portion of references in this essay could not be verified or present quality concerns. The citation base may not meet the expected standard for scholarly work. Further review and source strengthening is recommended.';
+}
 
-  data.recommendations.forEach((recommendation) => {
-    const height = 16 + drawTextHeight(doc, `• ${recommendation}`, CONTENT_WIDTH - 32, 'Helvetica', 10) + 16;
-    ensureSpace(doc, height + 4);
-    const top = doc.y;
-    drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, height, COLORS.light);
-    doc.save();
-    doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, height, 12).stroke(COLORS.border);
-    doc.restore();
-    doc
-      .font('Helvetica')
-      .fontSize(10)
-      .fillColor(COLORS.text)
-      .text(`• ${recommendation}`, PAGE_LEFT + 16, top + 12, { width: CONTENT_WIDTH - 32 });
-    doc.y = top + height + 8;
-  });
+function renderConclusion(doc: PDFKit.PDFDocument, data: CitationReportData) {
+  const verdictText = getVerdictText(data.overallScore);
+  const textHeight = drawTextHeight(doc, verdictText, CONTENT_WIDTH - 80, 'Helvetica', 10);
+  // Card: title(20) + pad(16) + score circle area(80) + gap(12) + text + bottom pad(20)
+  const cardHeight = 20 + 16 + 80 + 12 + textHeight + 24;
+  ensureSpace(doc, cardHeight + 20);
+
+  drawSectionTitle(doc, 'Conclusion');
+  const top = doc.y;
+
+  // Outer card with navy left accent border
+  drawRoundedCard(doc, PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, COLORS.softBlue);
+  doc.save();
+  doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, 12).stroke(COLORS.border);
+  doc.restore();
+  // Left accent strip
+  doc.save();
+  doc.roundedRect(PAGE_LEFT, top, CONTENT_WIDTH, cardHeight, 12).clip();
+  doc.rect(PAGE_LEFT, top, 5, cardHeight).fill(COLORS.navy);
+  doc.restore();
+
+  // "Overall Verdict" label
+  doc.font('Helvetica-Bold').fontSize(12).fillColor(COLORS.text)
+    .text('Overall Verdict', PAGE_LEFT + 24, top + 16, { width: CONTENT_WIDTH - 48, lineBreak: false });
+
+  // Score circle — centered
+  const circleX = PAGE_LEFT + CONTENT_WIDTH / 2;
+  const circleY = top + 16 + 24 + 40; // center of 80px area
+  const radius = 34;
+  const scoreColor = statusColor(getStatusFromScore(data.overallScore));
+
+  // Outer ring
+  doc.save();
+  doc.circle(circleX, circleY, radius).lineWidth(5).strokeColor(scoreColor).stroke();
+  doc.restore();
+  // Inner fill (light)
+  doc.save();
+  doc.circle(circleX, circleY, radius - 4).fill(COLORS.white);
+  doc.restore();
+  // Score number
+  doc.font('Helvetica-Bold').fontSize(22).fillColor(scoreColor)
+    .text(`${data.overallScore}%`, circleX - 30, circleY - 12, { width: 60, align: 'center' });
+  // Label below score
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(COLORS.muted)
+    .text(data.reliabilityLabel.toUpperCase(), circleX - 40, circleY + 14, { width: 80, align: 'center' });
+
+  // Summary text below circle
+  const textY = top + 16 + 24 + 80 + 12;
+  doc.font('Helvetica').fontSize(10).fillColor(COLORS.text)
+    .text(verdictText, PAGE_LEFT + 24, textY, { width: CONTENT_WIDTH - 48 });
+
+  doc.y = top + cardHeight + SECTION_GAP;
 }
 
 export async function renderCitationReportPdf(data: CitationReportData): Promise<Buffer> {
@@ -655,7 +702,7 @@ export async function renderCitationReportPdf(data: CitationReportData): Promise
     renderBreakdownTable(doc, data);
     drawSectionTitle(doc, 'Detailed Analysis');
     data.citations.forEach((citation, index) => renderCitationSection(doc, citation, index));
-    renderRecommendations(doc, data);
+    renderConclusion(doc, data);
     doc.end();
   });
 }
