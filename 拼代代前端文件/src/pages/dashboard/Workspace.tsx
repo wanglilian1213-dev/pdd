@@ -1053,8 +1053,8 @@ export default function Workspace() {
                   </div>
 
                   <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 text-center">
-                    <p className="text-sm text-amber-800 font-medium">机器降AI可能出现纰漏，提交前务必先查AI</p>
-                    <p className="text-sm text-amber-700">如需人工润色降重降AI请联系客服</p>
+                    <p className="text-sm text-amber-800 font-medium">〈机械一键降AI可能出现字数膨胀或者拼写错误等问题，提交前务必先检查一遍，具体AI率以turnitin为准</p>
+                    <p className="text-sm text-amber-700">如需人工高质量润色降重降AI请联系客服〉</p>
                   </div>
 
                   <div className="flex justify-center pt-4 border-t border-gray-100">
