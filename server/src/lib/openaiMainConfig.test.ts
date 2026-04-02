@@ -6,6 +6,7 @@ import { env } from './runtimeEnv';
 const expectedEffortByStage: Record<MainOpenAIStage, 'medium' | 'high'> = {
   outline_generation: 'medium',
   outline_regeneration: 'medium',
+  outline_translation: 'medium',
   draft_generation: 'high',
   word_calibration: 'medium',
   citation_verification: 'medium',
