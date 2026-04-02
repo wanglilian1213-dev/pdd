@@ -187,6 +187,8 @@ export async function getOrUploadMaterialContent(taskId: string): Promise<Prepar
   // Upload files that don't have a cached openai_file_id
   const parts: MaterialInputPart[] = [];
   const uploadedFileIds: string[] = [];
+  // Track DB row IDs for files we newly uploaded (not previously cached)
+  const newlyUploadedDbIds: string[] = [];
 
   try {
     for (const file of files) {
@@ -205,6 +207,8 @@ export async function getOrUploadMaterialContent(taskId: string): Promise<Prepar
           .from('task_files')
           .update({ openai_file_id: fileId })
           .eq('id', file.id);
+
+        newlyUploadedDbIds.push(file.id);
       }
 
       uploadedFileIds.push(fileId);
@@ -231,11 +235,18 @@ export async function getOrUploadMaterialContent(taskId: string): Promise<Prepar
     return { parts, uploadedFileIds };
   } catch (err) {
     // Cleanup only the files we just uploaded (not previously cached ones)
-    const newlyUploaded = uploadedFileIds.filter(
+    const newlyUploadedOpenAIIds = uploadedFileIds.filter(
       (id) => !files.some((f) => f.openai_file_id === id),
     );
-    if (newlyUploaded.length > 0) {
-      await Promise.allSettled(newlyUploaded.map((id) => openai.files.del(id)));
+    if (newlyUploadedOpenAIIds.length > 0) {
+      await Promise.allSettled(newlyUploadedOpenAIIds.map((id) => openai.files.del(id)));
+    }
+    // Clear the openai_file_id we just wrote to DB, since those OpenAI files are now deleted
+    if (newlyUploadedDbIds.length > 0) {
+      await supabaseAdmin
+        .from('task_files')
+        .update({ openai_file_id: null })
+        .in('id', newlyUploadedDbIds);
     }
     throw err;
   }
@@ -289,26 +300,28 @@ export async function cleanupTaskOpenAIFiles(taskId: string) {
 
   if (!files || files.length === 0) return;
 
-  const fileIds = files
-    .map((f) => f.openai_file_id as string)
-    .filter(Boolean);
+  // Try to delete each OpenAI file, track which succeeded
+  const results = await Promise.allSettled(
+    files.map(async (file) => {
+      await openai.files.del(file.openai_file_id as string);
+      return file.id; // return DB row id on success
+    }),
+  );
 
-  if (fileIds.length > 0) {
-    await Promise.allSettled(
-      fileIds.map(async (fileId) => {
-        try {
-          await openai.files.del(fileId);
-        } catch (err) {
-          captureError(err, 'cleanup.openai_file_delete', { fileId, taskId });
-        }
-      }),
-    );
+  const succeededDbIds = results
+    .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+    .map((r) => r.value);
+
+  const failedFiles = results.filter((r) => r.status === 'rejected');
+  for (const failed of failedFiles) {
+    captureError((failed as PromiseRejectedResult).reason, 'cleanup.openai_file_delete', { taskId });
   }
 
-  // Clear the openai_file_id column
-  await supabaseAdmin
-    .from('task_files')
-    .update({ openai_file_id: null })
-    .eq('task_id', taskId)
-    .eq('category', 'material');
+  // Only clear openai_file_id for files that were successfully deleted
+  if (succeededDbIds.length > 0) {
+    await supabaseAdmin
+      .from('task_files')
+      .update({ openai_file_id: null })
+      .in('id', succeededDbIds);
+  }
 }

@@ -221,10 +221,6 @@ Rewrite the outline so every section follows the rule exactly. Keep each bullet 
 
 interface MergedOutlineGenerationPromptInput {
   specialRequirements?: string | null;
-  targetWords: number;
-  citationStyle: string;
-  requiredSectionCount: number;
-  requiredReferenceCount: number;
   knownCourseCode?: string | null;
 }
 
@@ -247,26 +243,38 @@ export function buildMergedOutlineGenerationPrompt(input: MergedOutlineGeneratio
     systemPrompt: `You are an academic writing assistant.
 Read every attached material file directly. Perform ALL of the following tasks in a single response:
 
-1. Extract the explicitly stated target word count and citation style from the materials. If a value is not clearly specified, return null.
+1. Extract the explicitly stated target word count and citation style from the task materials. If a value is not clearly specified, return null so the system can apply its own defaults.
 2. ${courseCodeInstruction}
 3. Generate a detailed English academic paper outline from the full material set.
 
-${buildFixedRequirementBlock(input)}
+Requirement extraction rules:
+- Only extract target_words and citation_style that are explicitly stated in the materials.
+- Do not infer defaults. If the materials do not clearly specify a value, return null.
+- The system will use defaults (1000 words, APA 7) when you return null.
+- The system will compute required_section_count and required_reference_count from the final target_words.
 
-${OUTLINE_PLANNING_RULES}
+Outline planning rules (apply after determining the target_words):
+- If target_words is found in the materials, compute: required_section_count = 3 + (ceil(target_words / 1000) - 1), required_reference_count = ceil(target_words / 1000) * 5.
+- If target_words is null, use 3 sections and 5 references as the default.
+- Introduction and Conclusion count within the total section count.
+- Every section must contain between 3 and 5 bullet points.
+- Each bullet point should stay on a single line starting with "- ".
+- Generate a concrete English paper title that can be used directly as the final delivery title.
+- Generate a concrete research question.
+- Never use rubric names, file names, scoring guide names, or placeholders as the final paper title.
 
 ${OUTLINE_TOPIC_RULES}
 
 ${MERGED_RESPONSE_SCHEMA}`,
     userPrompt: `Please read every uploaded material file directly. In a single JSON response:
-- Extract the target word count and citation style if explicitly stated in the materials.
+- Extract the target word count and citation style if explicitly stated in the materials. Return null if not found.
 - Extract the course code if present.
-- Generate an English academic paper outline.
+- Generate an English academic paper outline based on the extracted (or default) requirements.
 
 Original special requirements:
 ${normalizeText(input.specialRequirements)}
 
-Follow the fixed task requirements in the system instructions and return JSON only.`,
+Return JSON only.`,
   };
 }
 

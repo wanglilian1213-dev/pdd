@@ -679,16 +679,9 @@ export async function generateOutline(taskId: string, userId: string) {
       ...files.map((file) => file.original_name),
     ) || task?.course_code || null;
 
-    // Use default requirements as a starting point for the merged prompt
-    const defaultRequirements = deriveUnifiedTaskRequirements({});
-
-    // Single merged API call: extracts requirements + course code + generates outline
+    // Single merged API call: GPT extracts requirements + course code + generates outline
     const prompt = buildMergedOutlineGenerationPrompt({
       specialRequirements: task?.special_requirements,
-      targetWords: defaultRequirements.targetWords,
-      citationStyle: defaultRequirements.citationStyle,
-      requiredSectionCount: defaultRequirements.requiredSectionCount,
-      requiredReferenceCount: defaultRequirements.requiredReferenceCount,
       knownCourseCode: regexCourseCode,
     });
 

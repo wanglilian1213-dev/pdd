@@ -5,7 +5,7 @@ import { failTask } from './services/taskService';
 import { deleteExpiredFiles } from './services/fileService';
 import { getConfig } from './services/configService';
 import { captureError } from './lib/errorMonitor';
-import { cleanupTaskOpenAIFiles } from './services/materialInputService';
+import { openai } from './lib/openai';
 
 export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;
@@ -122,30 +122,19 @@ async function cleanupExpiredMaterials() {
     return;
   }
 
-  // Collect unique task IDs from expired materials for OpenAI file cleanup
-  const taskIdsToClean = new Set<string>();
-
   for (const file of oldMaterials) {
+    // 1. Delete OpenAI file first (while we still have the ID)
     if (file.openai_file_id) {
-      // Get the task_id for this file to clean up OpenAI files
-      const { data: fileRecord } = await supabaseAdmin
-        .from('task_files')
-        .select('task_id')
-        .eq('id', file.id)
-        .single();
-      if (fileRecord) {
-        taskIdsToClean.add(fileRecord.task_id);
+      try {
+        await openai.files.del(file.openai_file_id);
+      } catch (err) {
+        captureError(err, 'cleanup.expired_material_openai_delete', { fileId: file.openai_file_id });
       }
     }
+    // 2. Delete from Supabase storage
     await supabaseAdmin.storage.from('task-files').remove([file.storage_path]);
+    // 3. Delete DB row last
     await supabaseAdmin.from('task_files').delete().eq('id', file.id);
-  }
-
-  // Clean up any orphaned OpenAI files for affected tasks
-  for (const taskId of taskIdsToClean) {
-    await cleanupTaskOpenAIFiles(taskId).catch((err) => {
-      captureError(err, 'cleanup.expired_material_openai_files', { taskId });
-    });
   }
 
   console.log(`[cleanup] Cleaned up ${oldMaterials.length} expired material files.`);
