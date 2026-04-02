@@ -65,6 +65,22 @@ export default function Landing() {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.05 }}
+              className="flex flex-col sm:flex-row items-center justify-center gap-3 mb-8"
+            >
+              <div className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-full text-sm font-semibold shadow-lg">
+                <Zap className="w-4 h-4 text-amber-400" />
+                <span>成本直降 70%，交付标准不变</span>
+              </div>
+              <div className="flex items-center gap-2 bg-gray-900 text-white px-5 py-2.5 rounded-full text-sm font-semibold shadow-lg">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span>100% 真实文献，零捏造零幻觉</span>
+              </div>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5, delay: 0.1 }}
               className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16"
             >
