@@ -8,6 +8,7 @@ const POSITIVE_INTEGER_CONFIG_KEYS = new Set([
   'material_retention_days',
   'stuck_task_timeout_minutes',
   'max_outline_edits',
+  'outline_edit_cost',
 ]);
 
 export const DEFAULT_ACTIVATION_DENOMINATIONS = [1000, 3000, 10000, 20000];

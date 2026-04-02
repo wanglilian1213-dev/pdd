@@ -10,9 +10,12 @@ import {
 } from './materialInputService';
 import {
   confirmOutlineTaskAtomic,
+  freezeCreditsAtomic,
   releaseOutlineEditAtomic,
   reserveOutlineEditAtomic,
+  settleCreditsAtomic,
 } from './atomicOpsService';
+import { translateOutlineToZh } from './outlineTranslationService';
 import {
   buildMergedOutlineGenerationPrompt,
   buildOutlineThemeReviewPrompt,
@@ -759,12 +762,15 @@ export async function generateOutline(taskId: string, userId: string) {
       },
     );
 
+    const contentZh = await translateOutlineToZh(themeAligned.outline);
+
     const { data: outline, error } = await supabaseAdmin
       .from('outline_versions')
       .insert({
         task_id: taskId,
         version: 1,
         content: themeAligned.outline,
+        content_zh: contentZh,
         paper_title: themeAligned.paper_title,
         research_question: themeAligned.research_question,
         target_words: unifiedRequirements.targetWords,
@@ -887,8 +893,21 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
   let reservedEdit = false;
 
   try {
+    // Pre-check balance before starting expensive OpenAI work
+    const editCost = (await getConfig('outline_edit_cost')) || 50;
+    const { data: wallet } = await supabaseAdmin
+      .from('wallets')
+      .select('balance')
+      .eq('user_id', userId)
+      .single();
+    if (!wallet || wallet.balance < editCost) {
+      throw new AppError(400, '余额不足，请先充值后再操作。');
+    }
+
+    // Reserve edit slot + lock task stage to 'outline_regenerating' (blocks concurrent requests)
     await reserveOutlineEditAtomic(taskId, userId, maxEdits);
     reservedEdit = true;
+
     const materialContent = await getOrUploadMaterialContent(taskId);
 
     // Parse requirement overrides from user's editInstruction (e.g. "写3000字", "换成Harvard")
@@ -986,14 +1005,17 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       },
     );
 
+    const contentZh = await translateOutlineToZh(themeAligned.outline);
+
     const newVersion = latestOutline.version + 1;
 
-    const { data: outline } = await supabaseAdmin
+    const { data: outline, error: insertError } = await supabaseAdmin
       .from('outline_versions')
       .insert({
         task_id: taskId,
         version: newVersion,
         content: themeAligned.outline,
+        content_zh: contentZh,
         paper_title: themeAligned.paper_title,
         research_question: themeAligned.research_question,
         edit_instruction: editInstruction,
@@ -1005,9 +1027,14 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       .select()
       .single();
 
-    await supabaseAdmin
+    if (insertError || !outline) {
+      throw new Error(`保存大纲版本失败: ${insertError?.message || 'no data returned'}`);
+    }
+
+    const { error: updateError } = await supabaseAdmin
       .from('tasks')
       .update({
+        stage: 'outline_ready',
         paper_title: themeAligned.paper_title,
         research_question: themeAligned.research_question,
         target_words: unifiedRequirements.targetWords,
@@ -1017,6 +1044,17 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
         updated_at: new Date().toISOString(),
       })
       .eq('id', taskId);
+
+    if (updateError) {
+      throw new Error(`更新任务元数据失败: ${updateError.message}`);
+    }
+
+    // Deduct credits AFTER outline is durably saved (deferred billing: safe against crashes)
+    await freezeCreditsAtomic(userId, editCost, 'task', taskId, `大纲修改（第 ${newVersion} 版），${editCost} 积分`);
+    await settleCreditsAtomic(userId, editCost);
+
+    // reservedEdit is consumed — stage was restored to outline_ready by tasks.update above
+    reservedEdit = false;
 
     return outline;
   } catch (err: any) {

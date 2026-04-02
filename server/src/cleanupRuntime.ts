@@ -26,6 +26,7 @@ const defaultLogger: CleanupLogger = {
 const AUTO_CLEANUP_STAGES = new Set([
   'uploading',
   'outline_generating',
+  'outline_regenerating',
   'writing',
   'word_calibrating',
   'citation_checking',

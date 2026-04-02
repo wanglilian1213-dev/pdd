@@ -22,6 +22,7 @@ import { getPollDelayMs, hasPollingTimedOut, type PollStage } from '../../lib/po
 interface Outline {
   id: string;
   content: string;
+  content_zh?: string;
   target_words?: number;
   citation_style?: string;
   required_reference_count?: number;
@@ -495,6 +496,7 @@ export default function Workspace() {
       const rawUpdated = await api.getTask(taskData.task.id);
       const updated: TaskData = reshapeTaskResponse(rawUpdated);
       setTaskData(updated);
+      refreshBalance();
 
       if (updated.task.stage !== 'outline_ready') {
         // Outline generation is async, poll for it
@@ -506,7 +508,7 @@ export default function Workspace() {
     } finally {
       setIsRegeneratingOutline(false);
     }
-  }, [taskData, editInstruction, startOutlinePolling]);
+  }, [taskData, editInstruction, startOutlinePolling, refreshBalance]);
 
   const handleConfirmOutline = useCallback(async () => {
     if (!taskData) return;
@@ -812,6 +814,17 @@ export default function Workspace() {
                 {taskData?.outline?.content || '大纲内容加载中...'}
               </div>
 
+              {taskData?.outline?.content_zh && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-sm font-medium text-gray-500">中文翻译版（仅供参考，最终生成的文章为英文）</span>
+                  </div>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 text-sm leading-relaxed text-gray-800 whitespace-pre-wrap">
+                    {taskData.outline.content_zh}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <label className="text-sm font-medium text-gray-900">对大纲有修改意见？（选填）</label>
                 <textarea
@@ -834,7 +847,7 @@ export default function Workspace() {
                     {isRegeneratingOutline ? (
                       <><Loader2 className="mr-2 w-4 h-4 animate-spin" /> 重新生成中...</>
                     ) : (
-                      '重新生成大纲'
+                      <>重新生成大纲 <span className="ml-1 text-xs text-gray-500">（50积分）</span></>
                     )}
                   </Button>
                   <Button

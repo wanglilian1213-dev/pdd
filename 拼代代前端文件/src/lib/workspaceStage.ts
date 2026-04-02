@@ -3,6 +3,7 @@ export function stageToStep(stage: string, status: string): number {
     const map: Record<string, number> = {
       uploading: 1,
       outline_generating: 1,
+      outline_regenerating: 2,
       outline_ready: 2,
       writing: 3,
       word_calibrating: 4,
@@ -24,6 +25,8 @@ export function stageToStep(stage: string, status: string): number {
       return 1;
     case 'outline_generating':
       return 1;
+    case 'outline_regenerating':
+      return 2;
     case 'outline_ready':
       return 2;
     case 'writing':
