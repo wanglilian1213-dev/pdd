@@ -6,7 +6,7 @@ import { getConfig } from './configService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
-import { buildMaterialContentFromStorage, cleanupOpenAIFiles, type StoredMaterialFile } from './materialInputService';
+import { getOrUploadMaterialContent, type StoredMaterialFile } from './materialInputService';
 import {
   assessGeneratedPaper as assessGeneratedPaperInternal,
   summarizeReferenceCompliance,
@@ -647,10 +647,9 @@ ${options.brokenText}`;
 }
 
 async function generateDraft(input: WritingContextInput): Promise<string> {
-  const materialContent = await buildMaterialContentFromStorage(input.materialFiles);
+  const materialContent = await getOrUploadMaterialContent(input.taskId);
 
-  try {
-    const response = await withDraftGenerationTimeout(
+  const response = await withDraftGenerationTimeout(
       openai.responses.create({
         ...buildMainOpenAIResponsesOptions('draft_generation'),
         input: [
@@ -766,10 +765,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
       detail: { word_count: wordCount, paper_title: input.paperTitle, research_question: input.researchQuestion },
     });
 
-    return content;
-  } finally {
-    await cleanupOpenAIFiles(materialContent.uploadedFileIds);
-  }
+  return content;
 }
 
 async function calibrateWordCount(

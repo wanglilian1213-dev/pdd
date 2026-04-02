@@ -1,6 +1,8 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError, ActiveTaskExistsError } from '../lib/errors';
 import { normalizeCitationStyle } from './citationStyleService';
+import { cleanupTaskOpenAIFiles } from './materialInputService';
+import { captureError } from '../lib/errorMonitor';
 
 interface DiscardPendingTaskDeps {
   loadTask: (taskId: string, userId: string) => Promise<{
@@ -125,6 +127,11 @@ export async function discardPendingTaskWithDeps(
     await deps.removeStoragePaths(storagePaths);
   }
 
+  // Cleanup cached OpenAI files before deleting the task (which cascades task_files)
+  await cleanupTaskOpenAIFiles(taskId).catch((err) => {
+    captureError(err, 'task.discard.cleanup_openai_files', { taskId });
+  });
+
   await deps.deleteTask(taskId);
 }
 
@@ -218,6 +225,11 @@ export async function failTask(taskId: string, failureStage: string, failureReas
     event_type: 'task_failed',
     detail: { stage: failureStage, reason: failureReason, refunded },
   });
+
+  // Async cleanup of cached OpenAI files
+  cleanupTaskOpenAIFiles(taskId).catch((err) => {
+    captureError(err, 'task.fail.cleanup_openai_files', { taskId });
+  });
 }
 
 export async function completeTask(taskId: string) {
@@ -234,6 +246,11 @@ export async function completeTask(taskId: string) {
   if (error) {
     throw new AppError(500, '任务完成状态更新失败。');
   }
+
+  // Async cleanup of cached OpenAI files
+  cleanupTaskOpenAIFiles(taskId).catch((err) => {
+    captureError(err, 'task.complete.cleanup_openai_files', { taskId });
+  });
 }
 
 export async function deleteTask(taskId: string) {

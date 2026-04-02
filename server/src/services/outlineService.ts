@@ -5,8 +5,7 @@ import { updateTaskStage, failTask } from './taskService';
 import { getConfig } from './configService';
 import { startWritingPipeline } from './writingService';
 import {
-  buildMaterialContentFromStorage,
-  cleanupOpenAIFiles,
+  getOrUploadMaterialContent,
   type MaterialInputPart,
 } from './materialInputService';
 import {
@@ -15,7 +14,7 @@ import {
   reserveOutlineEditAtomic,
 } from './atomicOpsService';
 import {
-  buildInitialOutlinePrompt,
+  buildMergedOutlineGenerationPrompt,
   buildOutlineThemeReviewPrompt,
   buildRegenerateOutlinePrompt,
   buildRepairOutlinePrompt,
@@ -35,7 +34,6 @@ import {
   formatOutlineBulletViolations,
 } from './outlineStructureService';
 import {
-  buildTaskRequirementExtractionPrompt,
   deriveUnifiedTaskRequirements,
   normalizeExtractedTaskRequirements,
   parseRequirementOverrides,
@@ -117,43 +115,6 @@ function deriveStoredUnifiedRequirements(source: {
     requiredReferenceCount: Number(source.required_reference_count || unified.requiredReferenceCount),
     requiredSectionCount: Number(source.required_section_count || unified.requiredSectionCount),
   };
-}
-
-async function extractUnifiedTaskRequirementsForOutlineGeneration(options: {
-  specialRequirements?: string | null;
-  materialParts: MaterialInputPart[];
-}): Promise<UnifiedTaskRequirements> {
-  const prompt = buildTaskRequirementExtractionPrompt({
-    specialRequirements: options.specialRequirements,
-  });
-
-  try {
-    const response = await openai.responses.create({
-      ...buildMainOpenAIResponsesOptions('outline_generation'),
-      input: [
-        {
-          role: 'system' as const,
-          content: prompt.systemPrompt,
-        },
-        {
-          role: 'user' as const,
-          content: [
-            {
-              type: 'input_text',
-              text: prompt.userPrompt,
-            },
-            ...options.materialParts,
-          ],
-        },
-      ],
-    });
-
-    return deriveUnifiedTaskRequirements(
-      normalizeExtractedTaskRequirements(typeof response.output_text === 'string' ? response.output_text : ''),
-    );
-  } catch {
-    return deriveUnifiedTaskRequirements({});
-  }
 }
 
 async function repairOutlineBulletCounts(
@@ -541,11 +502,8 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
     throw new AppError(400, '没有找到任务材料，无法修复大纲。');
   }
 
-  let uploadedFileIds: string[] = [];
-  try {
-    const materialContent = await buildMaterialContentFromStorage(files);
-    uploadedFileIds = materialContent.uploadedFileIds;
-    const unifiedRequirements = deriveStoredUnifiedRequirements({
+  const materialContent = await getOrUploadMaterialContent(taskId);
+  const unifiedRequirements = deriveStoredUnifiedRequirements({
       target_words: typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words,
       citation_style: typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style,
       required_reference_count: typeof latestOutline.required_reference_count === 'number'
@@ -688,9 +646,6 @@ export async function ensureUsableOutlineForTask(taskId: string): Promise<Usable
       requiredSectionCount: unifiedRequirements.requiredSectionCount,
       courseCode: courseCode || null,
     };
-  } finally {
-    await cleanupOpenAIFiles(uploadedFileIds);
-  }
 }
 
 export async function generateOutline(taskId: string, userId: string) {
@@ -714,27 +669,27 @@ export async function generateOutline(taskId: string, userId: string) {
 
   await updateTaskStage(taskId, 'outline_generating');
 
-  let uploadedFileIds: string[] = [];
   try {
-    const materialContent = await buildMaterialContentFromStorage(files);
-    uploadedFileIds = materialContent.uploadedFileIds;
-    const unifiedRequirements = await extractUnifiedTaskRequirementsForOutlineGeneration({
+    const materialContent = await getOrUploadMaterialContent(taskId);
+
+    // Try regex course code extraction first (free, no API call)
+    const regexCourseCode = extractCourseCodeByRegex(
+      task?.title,
+      task?.special_requirements,
+      ...files.map((file) => file.original_name),
+    ) || task?.course_code || null;
+
+    // Use default requirements as a starting point for the merged prompt
+    const defaultRequirements = deriveUnifiedTaskRequirements({});
+
+    // Single merged API call: extracts requirements + course code + generates outline
+    const prompt = buildMergedOutlineGenerationPrompt({
       specialRequirements: task?.special_requirements,
-      materialParts: materialContent.parts,
-    });
-    const courseCode = await extractCourseCodeForTask({
-      taskTitle: task?.title,
-      specialRequirements: task?.special_requirements,
-      existingCourseCode: task?.course_code,
-      fileNames: files.map((file) => file.original_name),
-      materialParts: materialContent.parts,
-    });
-    const prompt = buildInitialOutlinePrompt({
-      specialRequirements: task?.special_requirements,
-      targetWords: unifiedRequirements.targetWords,
-      citationStyle: unifiedRequirements.citationStyle,
-      requiredSectionCount: unifiedRequirements.requiredSectionCount,
-      requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      targetWords: defaultRequirements.targetWords,
+      citationStyle: defaultRequirements.citationStyle,
+      requiredSectionCount: defaultRequirements.requiredSectionCount,
+      requiredReferenceCount: defaultRequirements.requiredReferenceCount,
+      knownCourseCode: regexCourseCode,
     });
 
     const response = await openai.responses.create({
@@ -759,12 +714,27 @@ export async function generateOutline(taskId: string, userId: string) {
 
     const content = response.output_text;
 
+    // Parse the merged response — extract requirements, course code, and outline
+    const mergedJson = parseMergedOutlineResponse(content);
+    const extractedRequirements = deriveUnifiedTaskRequirements(
+      normalizeExtractedTaskRequirements(JSON.stringify({
+        target_words: mergedJson.target_words,
+        citation_style: mergedJson.citation_style,
+      })),
+    );
+
+    const courseCode = regexCourseCode
+      || parseCourseCodeExtraction(JSON.stringify({ course_code: mergedJson.course_code }))
+      || null;
+
+    const unifiedRequirements = extractedRequirements;
+
     const bulletFixed = await repairOutlineBulletCounts(
       'outline_generation',
       parseOutlineJson(content, {
-        paper_title: '',
-        research_question: '',
-        outline: content,
+        paper_title: mergedJson.paper_title || '',
+        research_question: mergedJson.research_question || '',
+        outline: mergedJson.outline || content,
         target_words: unifiedRequirements.targetWords,
         citation_style: unifiedRequirements.citationStyle,
       }),
@@ -845,8 +815,40 @@ export async function generateOutline(taskId: string, userId: string) {
     const mappedError = mapOutlineGenerationError(err);
     await failTask(taskId, 'outline_generating', mappedError.userMessage, false);
     throw mappedError;
-  } finally {
-    await cleanupOpenAIFiles(uploadedFileIds);
+  }
+  // No finally cleanup — files are reused across stages and cleaned up on task completion/failure
+}
+
+interface MergedOutlineJson {
+  course_code?: string | null;
+  target_words?: number | null;
+  citation_style?: string | null;
+  paper_title: string;
+  research_question: string;
+  outline: string;
+}
+
+function parseMergedOutlineResponse(content: string): MergedOutlineJson {
+  try {
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content) as Partial<MergedOutlineJson>;
+    return {
+      course_code: typeof parsed.course_code === 'string' ? parsed.course_code : null,
+      target_words: typeof parsed.target_words === 'number' ? parsed.target_words : null,
+      citation_style: typeof parsed.citation_style === 'string' ? parsed.citation_style : null,
+      paper_title: typeof parsed.paper_title === 'string' ? parsed.paper_title : '',
+      research_question: typeof parsed.research_question === 'string' ? parsed.research_question : '',
+      outline: typeof parsed.outline === 'string' ? parsed.outline : content,
+    };
+  } catch {
+    return {
+      course_code: null,
+      target_words: null,
+      citation_style: null,
+      paper_title: '',
+      research_question: '',
+      outline: content,
+    };
   }
 }
 
@@ -890,13 +892,11 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
   }
 
   let reservedEdit = false;
-  let uploadedFileIds: string[] = [];
 
   try {
     await reserveOutlineEditAtomic(taskId, userId, maxEdits);
     reservedEdit = true;
-    const materialContent = await buildMaterialContentFromStorage(files);
-    uploadedFileIds = materialContent.uploadedFileIds;
+    const materialContent = await getOrUploadMaterialContent(taskId);
 
     // Parse requirement overrides from user's editInstruction (e.g. "写3000字", "换成Harvard")
     const overrides = parseRequirementOverrides(editInstruction);
@@ -1032,9 +1032,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     }
     if (err instanceof AppError) throw err;
     throw new AppError(500, '大纲修改失败，请稍后重试。');
-  } finally {
-    await cleanupOpenAIFiles(uploadedFileIds);
   }
+  // No finally cleanup — files are reused across stages and cleaned up on task completion/failure
 }
 
 export async function confirmOutline(taskId: string, userId: string) {

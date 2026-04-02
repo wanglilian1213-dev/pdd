@@ -219,6 +219,57 @@ Rewrite the outline so every section follows the rule exactly. Keep each bullet 
   };
 }
 
+interface MergedOutlineGenerationPromptInput {
+  specialRequirements?: string | null;
+  targetWords: number;
+  citationStyle: string;
+  requiredSectionCount: number;
+  requiredReferenceCount: number;
+  knownCourseCode?: string | null;
+}
+
+const MERGED_RESPONSE_SCHEMA = `Respond with valid JSON only in this shape:
+{
+  "course_code": "string or null",
+  "target_words": number | null,
+  "citation_style": "string" | null,
+  "paper_title": "a concrete English paper title",
+  "research_question": "a concrete English research question",
+  "outline": "the full outline text"
+}`;
+
+export function buildMergedOutlineGenerationPrompt(input: MergedOutlineGenerationPromptInput): OutlinePrompt {
+  const courseCodeInstruction = input.knownCourseCode
+    ? `The course code is already known: ${input.knownCourseCode}. Return this value as course_code.`
+    : `Extract the course/module/unit code from the task materials if present. Common formats: BUSI1001, BUSI-1001, BUSI 1001. If no reliable course code is found, return null.`;
+
+  return {
+    systemPrompt: `You are an academic writing assistant.
+Read every attached material file directly. Perform ALL of the following tasks in a single response:
+
+1. Extract the explicitly stated target word count and citation style from the materials. If a value is not clearly specified, return null.
+2. ${courseCodeInstruction}
+3. Generate a detailed English academic paper outline from the full material set.
+
+${buildFixedRequirementBlock(input)}
+
+${OUTLINE_PLANNING_RULES}
+
+${OUTLINE_TOPIC_RULES}
+
+${MERGED_RESPONSE_SCHEMA}`,
+    userPrompt: `Please read every uploaded material file directly. In a single JSON response:
+- Extract the target word count and citation style if explicitly stated in the materials.
+- Extract the course code if present.
+- Generate an English academic paper outline.
+
+Original special requirements:
+${normalizeText(input.specialRequirements)}
+
+Follow the fixed task requirements in the system instructions and return JSON only.`,
+  };
+}
+
 export function buildOutlineThemeReviewPrompt(input: OutlineThemeReviewPromptInput): OutlinePrompt {
   return {
     systemPrompt: `You judge whether the generated title, research question, and outline truly answer the task requirements.

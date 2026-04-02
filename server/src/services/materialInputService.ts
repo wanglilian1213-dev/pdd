@@ -2,6 +2,7 @@ import { toFile } from 'openai';
 import { openai } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
+import { captureError } from '../lib/errorMonitor';
 
 export interface StoredMaterialFile {
   original_name: string;
@@ -143,4 +144,171 @@ export async function cleanupOpenAIFiles(fileIds: string[]) {
       await openai.files.del(fileId);
     }),
   );
+}
+
+/**
+ * Get material content for a task, reusing cached OpenAI file IDs when available.
+ * If files have already been uploaded to OpenAI (openai_file_id is set in DB),
+ * builds parts from cached IDs without re-uploading.
+ * Otherwise uploads to OpenAI and persists the file IDs for future reuse.
+ */
+export async function getOrUploadMaterialContent(taskId: string): Promise<PreparedMaterialContent> {
+  const { data: files, error } = await supabaseAdmin
+    .from('task_files')
+    .select('id, original_name, storage_path, mime_type, openai_file_id')
+    .eq('task_id', taskId)
+    .eq('category', 'material');
+
+  if (error || !files || files.length === 0) {
+    throw new AppError(400, '没有找到任务材料文件。');
+  }
+
+  const allCached = files.every((f) => typeof f.openai_file_id === 'string' && f.openai_file_id.length > 0);
+
+  if (allCached) {
+    // Try to reuse cached file IDs — if any are stale, fall back to re-upload
+    try {
+      return buildPartsFromCachedIds(files as Array<{
+        id: string;
+        original_name: string;
+        mime_type: string | null;
+        openai_file_id: string;
+      }>);
+    } catch {
+      // Stale file IDs — clear them and re-upload below
+      await supabaseAdmin
+        .from('task_files')
+        .update({ openai_file_id: null })
+        .eq('task_id', taskId)
+        .eq('category', 'material');
+    }
+  }
+
+  // Upload files that don't have a cached openai_file_id
+  const parts: MaterialInputPart[] = [];
+  const uploadedFileIds: string[] = [];
+
+  try {
+    for (const file of files) {
+      let fileId = typeof file.openai_file_id === 'string' && file.openai_file_id.length > 0
+        ? file.openai_file_id
+        : null;
+
+      if (!fileId) {
+        const body = await downloadMaterialFromStorage(file.storage_path);
+        const mimeType = getMimeType(file.original_name, file.mime_type, body);
+        const uploaded = await uploadFileToOpenAI(body, file.original_name, mimeType);
+        fileId = uploaded.id;
+
+        // Persist the openai_file_id to DB for future reuse
+        await supabaseAdmin
+          .from('task_files')
+          .update({ openai_file_id: fileId })
+          .eq('id', file.id);
+      }
+
+      uploadedFileIds.push(fileId);
+
+      parts.push({
+        type: 'input_text',
+        text: `材料文件：${file.original_name}`,
+      });
+
+      if (isImageFile(file.original_name, file.mime_type)) {
+        parts.push({
+          type: 'input_image',
+          file_id: fileId,
+          detail: 'auto',
+        });
+      } else {
+        parts.push({
+          type: 'input_file',
+          file_id: fileId,
+        });
+      }
+    }
+
+    return { parts, uploadedFileIds };
+  } catch (err) {
+    // Cleanup only the files we just uploaded (not previously cached ones)
+    const newlyUploaded = uploadedFileIds.filter(
+      (id) => !files.some((f) => f.openai_file_id === id),
+    );
+    if (newlyUploaded.length > 0) {
+      await Promise.allSettled(newlyUploaded.map((id) => openai.files.del(id)));
+    }
+    throw err;
+  }
+}
+
+function buildPartsFromCachedIds(files: Array<{
+  id: string;
+  original_name: string;
+  mime_type: string | null;
+  openai_file_id: string;
+}>): PreparedMaterialContent {
+  const parts: MaterialInputPart[] = [];
+  const uploadedFileIds: string[] = [];
+
+  for (const file of files) {
+    uploadedFileIds.push(file.openai_file_id);
+
+    parts.push({
+      type: 'input_text',
+      text: `材料文件：${file.original_name}`,
+    });
+
+    if (isImageFile(file.original_name, file.mime_type)) {
+      parts.push({
+        type: 'input_image',
+        file_id: file.openai_file_id,
+        detail: 'auto',
+      });
+    } else {
+      parts.push({
+        type: 'input_file',
+        file_id: file.openai_file_id,
+      });
+    }
+  }
+
+  return { parts, uploadedFileIds };
+}
+
+/**
+ * Clean up all OpenAI files associated with a task's material files.
+ * Called when a task completes, fails, or is discarded.
+ */
+export async function cleanupTaskOpenAIFiles(taskId: string) {
+  const { data: files } = await supabaseAdmin
+    .from('task_files')
+    .select('id, openai_file_id')
+    .eq('task_id', taskId)
+    .eq('category', 'material')
+    .not('openai_file_id', 'is', null);
+
+  if (!files || files.length === 0) return;
+
+  const fileIds = files
+    .map((f) => f.openai_file_id as string)
+    .filter(Boolean);
+
+  if (fileIds.length > 0) {
+    await Promise.allSettled(
+      fileIds.map(async (fileId) => {
+        try {
+          await openai.files.del(fileId);
+        } catch (err) {
+          captureError(err, 'cleanup.openai_file_delete', { fileId, taskId });
+        }
+      }),
+    );
+  }
+
+  // Clear the openai_file_id column
+  await supabaseAdmin
+    .from('task_files')
+    .update({ openai_file_id: null })
+    .eq('task_id', taskId)
+    .eq('category', 'material');
 }
