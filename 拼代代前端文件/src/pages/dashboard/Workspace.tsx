@@ -847,7 +847,7 @@ export default function Workspace() {
                     {isRegeneratingOutline ? (
                       <><Loader2 className="mr-2 w-4 h-4 animate-spin" /> 重新生成中...</>
                     ) : (
-                      <>重新生成大纲 <span className="ml-1 text-xs text-gray-500">（50积分）</span></>
+                      <>重新生成大纲</>
                     )}
                   </Button>
                   <Button

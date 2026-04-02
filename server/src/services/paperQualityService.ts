@@ -22,6 +22,7 @@ export interface ReferenceEntryAnalysis {
   isBefore2020: boolean;
   looksLikeBook: boolean;
   looksLikeAcademicPaper: boolean;
+  hasResolvableLink: boolean;
 }
 
 export interface ReferenceComplianceSummary {
@@ -32,6 +33,7 @@ export interface ReferenceComplianceSummary {
   likelyAcademicPaperCount: number;
   suspectedBookCount: number;
   suspectedNonAcademicCount: number;
+  referencesWithLinks: number;
 }
 
 const PLACEHOLDER_PATTERNS = [
@@ -123,8 +125,14 @@ function looksLikeGenericTitle(title: string, blockedFileTitles: string[]) {
 }
 
 function hasInTextCitation(text: string) {
+  // APA/Harvard with comma: (Smith, 2024)
   return /\([^)]+,\s*(19|20)\d{2}[a-z]?\)/.test(text)
-    || /\b[A-Z][A-Za-z-]+(?:\s+et al\.)?\s*\((19|20)\d{2}[a-z]?\)/.test(text);
+    // Narrative: Smith (2024), Smith et al. (2024)
+    || /\b[A-Z][A-Za-z-]+(?:\s+et al\.)?\s*\((19|20)\d{2}[a-z]?\)/.test(text)
+    // Harvard without comma: (Smith 2024)
+    || /\([A-Z][A-Za-z-]+(?:\s+(?:et al\.?|and|&)\s+[A-Z][A-Za-z-]+)*\s+(19|20)\d{2}[a-z]?\)/.test(text)
+    // Numeric: [1], [2,3], [1-3]
+    || /\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/.test(text);
 }
 
 function getOutlineSectionCount(outline: string) {
@@ -194,7 +202,7 @@ function analyzeReferenceEntry(entry: string): ReferenceEntryAnalysis {
   const hasExplicitNonAcademicMarkers = NON_ACADEMIC_SOURCE_PATTERNS.some((pattern) => pattern.test(normalizedEntry));
   const looksLikeAcademicPaper = !looksLikeBook
     && !hasExplicitNonAcademicMarkers
-    && (hasExplicitAcademicMarkers || hasAuthorYearShape);
+    && (hasExplicitAcademicMarkers || hasAuthorYearShape || hasResolvableLink);
 
   return {
     entry: normalizedEntry,
@@ -202,6 +210,7 @@ function analyzeReferenceEntry(entry: string): ReferenceEntryAnalysis {
     isBefore2020: typeof year === 'number' && year < 2020,
     looksLikeBook,
     looksLikeAcademicPaper,
+    hasResolvableLink,
   };
 }
 
@@ -217,6 +226,7 @@ export function summarizeReferenceCompliance(text: string): ReferenceComplianceS
     likelyAcademicPaperCount: analyses.filter((analysis) => analysis.looksLikeAcademicPaper).length,
     suspectedBookCount: analyses.filter((analysis) => analysis.looksLikeBook).length,
     suspectedNonAcademicCount: analyses.filter((analysis) => !analysis.looksLikeAcademicPaper).length,
+    referencesWithLinks: analyses.filter((analysis) => analysis.hasResolvableLink).length,
   };
 }
 
@@ -316,6 +326,10 @@ export function assessGeneratedPaper(
 
   if (summary.analyses.some((analysis) => analysis.looksLikeBook || !analysis.looksLikeAcademicPaper)) {
     reasons.push('references must be academic scholar papers, not books');
+  }
+
+  if (summary.totalReferences > 0 && summary.analyses.some((analysis) => !analysis.hasResolvableLink)) {
+    reasons.push('references must include proper links');
   }
 
   if (hasObviousCitationStyleConflict(summary, options.citationStyle)) {

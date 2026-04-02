@@ -381,8 +381,15 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
     if (task && task.frozen_credits > 0) {
       try {
+        const stageMessages: Record<string, string> = {
+          writing: '初稿生成过程中出现问题',
+          word_calibrating: '字数校准过程中出现问题',
+          citation_checking: '引用检查过程中出现问题',
+          delivering: '文件交付过程中出现问题',
+        };
+        const stageMsg = stageMessages[task.stage] || '正文生成过程中出现问题';
         await refundCredits(task.user_id, task.frozen_credits, 'task', taskId, `正文生成失败退款：${task.frozen_credits} 积分`);
-        await failTask(taskId, task.stage, '正文生成过程中出现问题，积分已自动退回。请重新创建任务。', true);
+        await failTask(taskId, task.stage, `${stageMsg}，积分已自动退回。请重新创建任务。`, true);
       } catch (refundErr) {
         console.error(`Refund failed for task ${taskId}:`, refundErr);
         await failTask(taskId, task.stage, '正文生成失败，退款异常，请联系客服处理。', false);
@@ -531,6 +538,8 @@ async function repairReferenceIssues(
     if (referenceIssues.length === 0) break;
 
     try {
+      const previousText = current;
+
       const response = await withRewriteStageTimeout(
         'citation_verification',
         openai.responses.create({
@@ -563,6 +572,9 @@ async function repairReferenceIssues(
       if (!isCriticalPaperFailure(repairedAssessment.reasons)) {
         current = repaired;
       }
+
+      // No progress — further attempts will not help
+      if (current === previousText) break;
 
       if (repairedAssessment.valid) break;
     } catch (error) {
@@ -1005,25 +1017,29 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     body: docBuffer,
   });
 
-  const citationReport = await generateCitationReport(
-    finalText,
-    task.citation_style,
-    displayTitle,
-    Number(task.required_reference_count || deriveWritingTaskRequirements(task).requiredReferenceCount),
-  );
-  const reportBuffer = await renderCitationReportPdf(citationReport);
-  const reportPath = `${taskId}/citation-report.pdf`;
+  try {
+    const citationReport = await generateCitationReport(
+      finalText,
+      task.citation_style,
+      displayTitle,
+      Number(task.required_reference_count || deriveWritingTaskRequirements(task).requiredReferenceCount),
+    );
+    const reportBuffer = await renderCitationReportPdf(citationReport);
+    const reportPath = `${taskId}/citation-report.pdf`;
 
-  await storeGeneratedTaskFile({
-    taskId,
-    category: 'citation_report',
-    originalName: 'citation-report.pdf',
-    storagePath: reportPath,
-    fileSize: reportBuffer.length,
-    mimeType: 'application/pdf',
-    expiresAtIso: expiresAt.toISOString(),
-    body: reportBuffer,
-  });
+    await storeGeneratedTaskFile({
+      taskId,
+      category: 'citation_report',
+      originalName: 'citation-report.pdf',
+      storagePath: reportPath,
+      fileSize: reportBuffer.length,
+      mimeType: 'application/pdf',
+      expiresAtIso: expiresAt.toISOString(),
+      body: reportBuffer,
+    });
+  } catch (reportErr) {
+    console.error(`Citation report generation failed for task ${taskId} (non-fatal):`, reportErr);
+  }
 }
 
 export async function regenerateDeliverableContent(input: WritingContextInput) {

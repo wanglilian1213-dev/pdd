@@ -166,7 +166,10 @@ export async function getOrUploadMaterialContent(taskId: string): Promise<Prepar
   const allCached = files.every((f) => typeof f.openai_file_id === 'string' && f.openai_file_id.length > 0);
 
   if (allCached) {
-    // Try to reuse cached file IDs — if any are stale, fall back to re-upload
+    // Reuse cached file IDs. If building the parts array fails unexpectedly
+    // (e.g. bad data shape), fall back to fresh upload.
+    // Note: stale OpenAI file IDs are NOT caught here — they surface during
+    // the openai.responses.create() call in generateDraft.
     try {
       return buildPartsFromCachedIds(files as Array<{
         id: string;
@@ -175,7 +178,7 @@ export async function getOrUploadMaterialContent(taskId: string): Promise<Prepar
         openai_file_id: string;
       }>);
     } catch {
-      // Stale file IDs — clear them and re-upload below
+      // Clear cached IDs and re-upload below
       await supabaseAdmin
         .from('task_files')
         .update({ openai_file_id: null })
