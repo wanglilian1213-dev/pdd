@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_STUCK_TASK_TIMEOUT_MINUTES, isAutoCleanupStage, runInitialCleanup } from './cleanupRuntime';
+import {
+  cleanupExpiredMaterialsWithDeps,
+  DEFAULT_STUCK_TASK_TIMEOUT_MINUTES,
+  isAutoCleanupStage,
+  runInitialCleanup,
+} from './cleanupRuntime';
 
 test('runInitialCleanup catches startup failures so cleanup service does not crash', async () => {
   const messages: string[] = [];
@@ -65,4 +70,51 @@ test('isAutoCleanupStage keeps backend-driven stuck stages eligible for cleanup'
 
 test('default stuck task timeout is 45 minutes', () => {
   assert.equal(DEFAULT_STUCK_TASK_TIMEOUT_MINUTES, 45);
+});
+
+test('cleanupExpiredMaterials only deletes expired materials for finished tasks', async () => {
+  const deletedOpenAiFileIds: string[] = [];
+  const removedStoragePaths: string[] = [];
+  const deletedTaskFileIds: string[] = [];
+  const logMessages: string[] = [];
+
+  await cleanupExpiredMaterialsWithDeps({
+    getRetentionDays: async () => 3,
+    listExpiredMaterials: async () => [
+      { id: 'material-completed', taskId: 'task-completed', storagePath: 'materials/completed.pdf', openAiFileId: 'oa-completed' },
+      { id: 'material-failed', taskId: 'task-failed', storagePath: 'materials/failed.pdf', openAiFileId: null },
+      { id: 'material-processing', taskId: 'task-processing', storagePath: 'materials/processing.pdf', openAiFileId: 'oa-processing' },
+      { id: 'material-outline', taskId: 'task-outline', storagePath: 'materials/outline.pdf', openAiFileId: 'oa-outline' },
+    ],
+    listTasksByIds: async () => [
+      { id: 'task-completed', status: 'completed' },
+      { id: 'task-failed', status: 'failed' },
+      { id: 'task-processing', status: 'processing' },
+      { id: 'task-outline', status: 'processing' },
+    ],
+    deleteOpenAiFile: async (fileId: string) => {
+      deletedOpenAiFileIds.push(fileId);
+    },
+    removeStorageFile: async (storagePath: string) => {
+      removedStoragePaths.push(storagePath);
+    },
+    deleteTaskFileRecord: async (fileId: string) => {
+      deletedTaskFileIds.push(fileId);
+    },
+    captureCleanupError: () => {},
+    logger: {
+      log: (message: string) => {
+        logMessages.push(message);
+      },
+      error: () => {},
+    },
+  });
+
+  assert.deepEqual(deletedOpenAiFileIds, ['oa-completed']);
+  assert.deepEqual(removedStoragePaths, ['materials/completed.pdf', 'materials/failed.pdf']);
+  assert.deepEqual(deletedTaskFileIds, ['material-completed', 'material-failed']);
+  assert.equal(
+    logMessages.some((message) => message.includes('Skipped 2 expired material files because their tasks are not finished')),
+    true,
+  );
 });

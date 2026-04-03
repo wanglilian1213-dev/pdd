@@ -1,4 +1,4 @@
-# 2026-03-30 最终版发布状态
+# 2026-04-03 最终版发布状态
 
 这份文件是仓库里唯一保留的实施记录，用来说明“现在真正上线给客户的这一个版本”。
 
@@ -15,18 +15,24 @@
 7. 交付正式 `Word` 正文和正式 `PDF` 引用报告
 8. 用户可选继续做降 AI
 
-## 2026-03-31 交接前最新核对结果
+## 2026-04-03 最近一次核对结果
 
-- 当前对外主线提交：`2f20cca`
+- GitHub `main` 最近一次核对提交：`fd48f5b`
+- 2026-04-03 这轮最小修补已直接发布到 Railway：
+  - `app`：`e66eacb4-fa09-41fc-9664-1d80547e8845`
+  - `cleanup`：`a1cd2f0c-3fc2-4693-85a0-f2dc71b82ac2`
 - 已用桌面这 3 个 PDF 做过真实线上回归：
   - `Report Marking Criteria.pdf`
   - `Final Report Writing Guide.pdf`
   - `Written Project Assessment Task Information (.pdf)(1).pdf`
-- 这轮回归已经确认：
+- 这轮回归和修补已经确认：
   - 正式题目不会再被评分标准文件名带偏
   - 大纲和正文不再写成“怎么写报告”这种元话题
   - 最终正文文件名会优先用正式题目
-  - 线上前端、后端、清理服务都已经同步到这一版
+  - `cleanup` 服务启动命令已核对为 `npm run start:cleanup`
+  - 老材料清理只会清 `completed / failed` 任务，不会删还在 `processing / outline_ready` 的任务材料
+  - `/api/user/init` 已改成“档案 / 钱包缺哪补哪”，不会再把半残账号直接判成已存在
+  - 已补一次性补钱包脚本：`npm run repair:wallets`
 
 ## 当前已经锁死的交付规则
 
@@ -112,6 +118,16 @@
 - Railway `app`
 - Railway `cleanup`
 - Railway `拼代代前端`
+
+## 当前已经锁死的账号修补规则
+
+- `/api/user/init` 必须同时检查 `user_profiles` 和 `wallets`
+- 如果两边都存在：直接返回已存在
+- 如果只有 `user_profiles`：只补 `wallets`
+- 如果只有 `wallets`：只补 `user_profiles`
+- 如果两边都不存在：按正常新账号初始化
+- 一次性修旧数据统一走：
+  - `npm run repair:wallets`
 
 ## 当前历史坏任务补救规则
 

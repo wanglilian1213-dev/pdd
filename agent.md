@@ -70,6 +70,7 @@ npm run lint
 npm run build
 npm run start
 npm run start:cleanup
+npm run repair:wallets
 ```
 
 ### 第三方资料查询

@@ -18,12 +18,36 @@ export interface CleanupLogger {
   error: (message: string, error?: unknown) => void;
 }
 
+export interface ExpiredMaterialRecord {
+  id: string;
+  taskId: string | null;
+  storagePath: string;
+  openAiFileId: string | null;
+}
+
+export interface TaskStatusRecord {
+  id: string;
+  status: string | null;
+}
+
+export interface CleanupExpiredMaterialsDeps {
+  getRetentionDays: () => Promise<number | null>;
+  listExpiredMaterials: (cutoffIso: string) => Promise<ExpiredMaterialRecord[]>;
+  listTasksByIds: (taskIds: string[]) => Promise<TaskStatusRecord[]>;
+  deleteOpenAiFile: (fileId: string) => Promise<void>;
+  removeStorageFile: (storagePath: string) => Promise<void>;
+  deleteTaskFileRecord: (fileId: string) => Promise<void>;
+  captureCleanupError: (error: unknown, context: string, extra?: Record<string, unknown>) => void;
+  logger: CleanupLogger;
+}
+
 const defaultLogger: CleanupLogger = {
   log: (message: string) => console.log(message),
   error: (message: string, error?: unknown) => console.error(message, error),
 };
 
 export const DEFAULT_STUCK_TASK_TIMEOUT_MINUTES = 45;
+const FINISHED_TASK_STATUSES = new Set(['completed', 'failed']);
 
 const AUTO_CLEANUP_STAGES = new Set([
   'uploading',
@@ -38,6 +62,10 @@ const AUTO_CLEANUP_STAGES = new Set([
 
 export function isAutoCleanupStage(stage: string): boolean {
   return AUTO_CLEANUP_STAGES.has(stage);
+}
+
+export function isFinishedTaskStatus(status: string | null | undefined): boolean {
+  return status != null && FINISHED_TASK_STATUSES.has(status);
 }
 
 async function cleanupStuckTasks() {
@@ -109,38 +137,107 @@ async function cleanupExpiredFiles() {
   console.log(`[cleanup] Deleted ${count} expired files.`);
 }
 
-async function cleanupExpiredMaterials() {
-  const retentionDays = (await getConfig('material_retention_days')) || 3;
-  const cutoff = new Date();
+function createExpiredMaterialsDeps(
+  logger: CleanupLogger = defaultLogger,
+): CleanupExpiredMaterialsDeps {
+  return {
+    getRetentionDays: async () => getConfig('material_retention_days'),
+    listExpiredMaterials: async (cutoffIso: string) => {
+      const { data } = await supabaseAdmin
+        .from('task_files')
+        .select('id, task_id, storage_path, openai_file_id')
+        .eq('category', 'material')
+        .lt('created_at', cutoffIso);
+
+      return (data || []).map((file) => ({
+        id: file.id,
+        taskId: file.task_id,
+        storagePath: file.storage_path,
+        openAiFileId: file.openai_file_id,
+      }));
+    },
+    listTasksByIds: async (taskIds: string[]) => {
+      if (taskIds.length === 0) {
+        return [];
+      }
+
+      const { data } = await supabaseAdmin
+        .from('tasks')
+        .select('id, status')
+        .in('id', taskIds);
+
+      return (data || []).map((task) => ({
+        id: task.id,
+        status: task.status,
+      }));
+    },
+    deleteOpenAiFile: async (fileId: string) => {
+      await openai.files.del(fileId);
+    },
+    removeStorageFile: async (storagePath: string) => {
+      await supabaseAdmin.storage.from('task-files').remove([storagePath]);
+    },
+    deleteTaskFileRecord: async (fileId: string) => {
+      await supabaseAdmin.from('task_files').delete().eq('id', fileId);
+    },
+    captureCleanupError: captureError,
+    logger,
+  };
+}
+
+export async function cleanupExpiredMaterialsWithDeps(
+  deps: CleanupExpiredMaterialsDeps,
+  now: Date = new Date(),
+) {
+  const retentionDays = (await deps.getRetentionDays()) || 3;
+  const cutoff = new Date(now);
   cutoff.setDate(cutoff.getDate() - retentionDays);
 
-  const { data: oldMaterials } = await supabaseAdmin
-    .from('task_files')
-    .select('id, storage_path, openai_file_id')
-    .eq('category', 'material')
-    .lt('created_at', cutoff.toISOString());
+  const oldMaterials = await deps.listExpiredMaterials(cutoff.toISOString());
 
-  if (!oldMaterials || oldMaterials.length === 0) {
-    console.log('[cleanup] No expired materials found.');
+  if (oldMaterials.length === 0) {
+    deps.logger.log('[cleanup] No expired materials found.');
     return;
   }
 
-  for (const file of oldMaterials) {
+  const taskStatuses = new Map(
+    (await deps.listTasksByIds(
+      [...new Set(oldMaterials.map((file) => file.taskId).filter((taskId): taskId is string => Boolean(taskId)))],
+    )).map((task) => [task.id, task.status]),
+  );
+
+  const eligibleMaterials = oldMaterials.filter((file) => isFinishedTaskStatus(file.taskId ? taskStatuses.get(file.taskId) : null));
+  const skippedCount = oldMaterials.length - eligibleMaterials.length;
+
+  if (skippedCount > 0) {
+    deps.logger.log(`[cleanup] Skipped ${skippedCount} expired material files because their tasks are not finished yet.`);
+  }
+
+  if (eligibleMaterials.length === 0) {
+    deps.logger.log('[cleanup] No expired materials eligible for cleanup.');
+    return;
+  }
+
+  for (const file of eligibleMaterials) {
     // 1. Delete OpenAI file first (while we still have the ID)
-    if (file.openai_file_id) {
+    if (file.openAiFileId) {
       try {
-        await openai.files.del(file.openai_file_id);
+        await deps.deleteOpenAiFile(file.openAiFileId);
       } catch (err) {
-        captureError(err, 'cleanup.expired_material_openai_delete', { fileId: file.openai_file_id });
+        deps.captureCleanupError(err, 'cleanup.expired_material_openai_delete', { fileId: file.openAiFileId });
       }
     }
     // 2. Delete from Supabase storage
-    await supabaseAdmin.storage.from('task-files').remove([file.storage_path]);
+    await deps.removeStorageFile(file.storagePath);
     // 3. Delete DB row last
-    await supabaseAdmin.from('task_files').delete().eq('id', file.id);
+    await deps.deleteTaskFileRecord(file.id);
   }
 
-  console.log(`[cleanup] Cleaned up ${oldMaterials.length} expired material files.`);
+  deps.logger.log(`[cleanup] Cleaned up ${eligibleMaterials.length} expired material files.`);
+}
+
+async function cleanupExpiredMaterials() {
+  await cleanupExpiredMaterialsWithDeps(createExpiredMaterialsDeps());
 }
 
 export function createDefaultCleanupDeps(): CleanupDeps {
@@ -193,6 +290,7 @@ export function startCleanupService(
   deps: CleanupDeps = createDefaultCleanupDeps(),
   logger: CleanupLogger = defaultLogger,
 ) {
+  logger.log('[cleanup] ENTRYPOINT verified: running dedicated cleanup service process.');
   logger.log('[cleanup] Cleanup service started. Scheduled for 3:00 AM daily.');
   scheduleCleanup(deps, logger);
   void runInitialCleanup(deps, logger);

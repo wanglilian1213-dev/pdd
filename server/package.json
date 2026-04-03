@@ -9,6 +9,7 @@
     "start:cleanup": "node dist/cleanup.js",
     "repair:delivery": "tsx src/scripts/repairDeliveryFiles.ts",
     "repair:completed": "tsx src/scripts/remediateCompletedTasks.ts",
+    "repair:wallets": "tsx src/scripts/repairMissingWallets.ts",
     "lint": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts"
   },
