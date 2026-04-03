@@ -4,6 +4,8 @@ import {
   buildDraftGenerationSystemPrompt,
   buildWordCalibrationSystemPrompt,
   buildCitationVerificationSystemPrompt,
+  buildFinalDocDescriptor,
+  buildWritingFailureReason,
   storeGeneratedTaskFile,
   writingServiceTestUtils,
 } from './writingService';
@@ -102,6 +104,36 @@ test('storeGeneratedTaskFile removes uploaded file if database insert fails', as
   );
 
   assert.deepEqual(removed, ['task-1/citation-report.pdf']);
+});
+
+test('buildFinalDocDescriptor keeps the readable download name but uses a safe storage path', () => {
+  const descriptor = buildFinalDocDescriptor(
+    'task-1',
+    'The Impact of Social Media Use on University Students’ Mental Health',
+  );
+
+  assert.equal(
+    descriptor.originalName,
+    'The Impact of Social Media Use on University Students’ Mental Health.docx',
+  );
+  assert.equal(descriptor.storagePath, 'task-1/final-paper.docx');
+});
+
+test('buildWritingFailureReason tells the user when draft generation timed out', () => {
+  const error = new Error('draft_generation timed out after 600000ms');
+  error.name = 'WritingStageTimeoutError';
+
+  assert.equal(
+    buildWritingFailureReason('writing', error),
+    '初稿生成超时，积分已自动退回。请稍后重试。',
+  );
+});
+
+test('buildWritingFailureReason keeps the deliver-stage wording specific', () => {
+  assert.equal(
+    buildWritingFailureReason('delivering', new Error('storage failed')),
+    '文件交付过程中出现问题，积分已自动退回。请重新创建任务。',
+  );
 });
 
 test('drafts that refuse to answer are treated as repairable instead of deliverable', () => {
@@ -243,6 +275,17 @@ test('draft generation also has a timeout guard instead of hanging forever', asy
       return true;
     },
   );
+});
+
+test('default writing timeout settings match the configured long-running limits', () => {
+  const getStageTimeoutMs = (writingServiceTestUtils as Record<string, unknown>).getStageTimeoutMs as
+    | ((stage: 'draft_generation' | 'word_calibration' | 'citation_verification') => number)
+    | undefined;
+
+  assert.equal(typeof getStageTimeoutMs, 'function');
+  assert.equal(getStageTimeoutMs!('draft_generation'), 1_800_000);
+  assert.equal(getStageTimeoutMs!('word_calibration'), 900_000);
+  assert.equal(getStageTimeoutMs!('citation_verification'), 1_200_000);
 });
 
 test('countMainBodyWords ignores the title and references section', () => {

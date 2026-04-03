@@ -20,8 +20,9 @@ import {
 import { deriveUnifiedTaskRequirements } from './taskRequirementService';
 
 export const assessGeneratedPaper = assessGeneratedPaperInternal;
-const REWRITE_STAGE_TIMEOUT_MS = 60_000;
-const DRAFT_GENERATION_TIMEOUT_MS = 600_000;
+const DRAFT_GENERATION_TIMEOUT_MS = 1_800_000;
+const WORD_CALIBRATION_TIMEOUT_MS = 900_000;
+const CITATION_VERIFICATION_TIMEOUT_MS = 1_200_000;
 const WORD_CALIBRATION_MAX_ATTEMPTS = 5;
 const REFERENCE_REPAIR_MAX_ATTEMPTS = 2;
 
@@ -86,10 +87,21 @@ class WritingStageTimeoutError extends Error {
   }
 }
 
+export function getStageTimeoutMs(stage: 'draft_generation' | 'word_calibration' | 'citation_verification') {
+  switch (stage) {
+    case 'draft_generation':
+      return DRAFT_GENERATION_TIMEOUT_MS;
+    case 'word_calibration':
+      return WORD_CALIBRATION_TIMEOUT_MS;
+    case 'citation_verification':
+      return CITATION_VERIFICATION_TIMEOUT_MS;
+  }
+}
+
 async function withRewriteStageTimeout<T>(
   stage: 'draft_generation' | 'word_calibration' | 'citation_verification',
   operation: Promise<T>,
-  timeoutMs = REWRITE_STAGE_TIMEOUT_MS,
+  timeoutMs = getStageTimeoutMs(stage),
 ): Promise<T> {
   let timeoutId: NodeJS.Timeout | undefined;
 
@@ -111,9 +123,44 @@ function isWritingStageTimeoutError(error: unknown) {
   return error instanceof WritingStageTimeoutError;
 }
 
+export function buildWritingFailureReason(stage: string, error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  const errorName = error instanceof Error ? error.name : '';
+
+  const timeoutStageMessages: Record<string, string> = {
+    writing: '初稿生成超时，积分已自动退回。请稍后重试。',
+    word_calibrating: '字数校准超时，积分已自动退回。请稍后重试。',
+    citation_checking: '引用检查超时，积分已自动退回。请稍后重试。',
+  };
+
+  if (errorName === 'WritingStageTimeoutError' || isWritingStageTimeoutError(error)) {
+    return timeoutStageMessages[stage] || '正文生成超时，积分已自动退回。请稍后重试。';
+  }
+
+  if (message.startsWith('draft_invalid:')) {
+    if (message.includes('missing references') || message.includes('missing citation')) {
+      return '初稿没有形成合格的引用内容，积分已自动退回。请稍后重试。';
+    }
+
+    if (message.includes('empty paper') || message.includes('refusal content')) {
+      return '初稿内容不可用，积分已自动退回。请稍后重试。';
+    }
+  }
+
+  const stageMessages: Record<string, string> = {
+    writing: '初稿生成过程中出现问题',
+    word_calibrating: '字数校准过程中出现问题',
+    citation_checking: '引用检查过程中出现问题',
+    delivering: '文件交付过程中出现问题',
+  };
+
+  const stageMsg = stageMessages[stage] || '正文生成过程中出现问题';
+  return `${stageMsg}，积分已自动退回。请重新创建任务。`;
+}
+
 async function withDraftGenerationTimeout<T>(
   operation: Promise<T>,
-  timeoutMs = DRAFT_GENERATION_TIMEOUT_MS,
+  timeoutMs = getStageTimeoutMs('draft_generation'),
 ): Promise<T> {
   return withRewriteStageTimeout('draft_generation', operation, timeoutMs);
 }
@@ -221,6 +268,7 @@ export const writingServiceTestUtils = {
   withRewriteStageTimeout,
   withDraftGenerationTimeout,
   isWritingStageTimeoutError,
+  getStageTimeoutMs,
   getWordCountRange,
   countMainBodyWords,
   isMainBodyWordCountWithinRange,
@@ -281,6 +329,13 @@ export async function storeGeneratedTaskFile(
     await deps.removeFromStorage(payload.storagePath).catch(() => undefined);
     throw insertResult.error;
   }
+}
+
+export function buildFinalDocDescriptor(taskId: string, rawTitle: string | null | undefined, fallback = 'Academic Essay') {
+  return {
+    originalName: buildDocxFileName(rawTitle, fallback),
+    storagePath: `${taskId}/final-paper.docx`,
+  };
 }
 
 export async function startWritingPipeline(taskId: string, userId: string) {
@@ -381,15 +436,8 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
     if (task && task.frozen_credits > 0) {
       try {
-        const stageMessages: Record<string, string> = {
-          writing: '初稿生成过程中出现问题',
-          word_calibrating: '字数校准过程中出现问题',
-          citation_checking: '引用检查过程中出现问题',
-          delivering: '文件交付过程中出现问题',
-        };
-        const stageMsg = stageMessages[task.stage] || '正文生成过程中出现问题';
         await refundCredits(task.user_id, task.frozen_credits, 'task', taskId, `正文生成失败退款：${task.frozen_credits} 积分`);
-        await failTask(taskId, task.stage, `${stageMsg}，积分已自动退回。请重新创建任务。`, true);
+        await failTask(taskId, task.stage, buildWritingFailureReason(task.stage, err), true);
       } catch (refundErr) {
         console.error(`Refund failed for task ${taskId}:`, refundErr);
         await failTask(taskId, task.stage, '正文生成失败，退款异常，请联系客服处理。', false);
@@ -1003,14 +1051,13 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     paperTitle: displayTitle,
     courseCode: task.course_code,
   });
-  const finalDocName = buildDocxFileName(task.paper_title || task.title, 'Academic Essay');
-  const docPath = `${taskId}/${finalDocName}`;
+  const finalDoc = buildFinalDocDescriptor(taskId, task.paper_title || task.title, 'Academic Essay');
 
   await storeGeneratedTaskFile({
     taskId,
     category: 'final_doc',
-    originalName: finalDocName,
-    storagePath: docPath,
+    originalName: finalDoc.originalName,
+    storagePath: finalDoc.storagePath,
     fileSize: docBuffer.length,
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     expiresAtIso: expiresAt.toISOString(),

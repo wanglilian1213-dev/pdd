@@ -23,6 +23,8 @@ const defaultLogger: CleanupLogger = {
   error: (message: string, error?: unknown) => console.error(message, error),
 };
 
+export const DEFAULT_STUCK_TASK_TIMEOUT_MINUTES = 45;
+
 const AUTO_CLEANUP_STAGES = new Set([
   'uploading',
   'outline_generating',
@@ -39,7 +41,7 @@ export function isAutoCleanupStage(stage: string): boolean {
 }
 
 async function cleanupStuckTasks() {
-  const timeoutMinutes = (await getConfig('stuck_task_timeout_minutes')) || 30;
+  const timeoutMinutes = (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
   const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
 
   const { data: stuckTasks } = await supabaseAdmin

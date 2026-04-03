@@ -20,7 +20,7 @@ test('getPollDelayMs grows over time but stays within the writing cap', () => {
 
 test('getPollTimeoutMs returns the product timeout for each stage', () => {
   assert.equal(getPollTimeoutMs('outline'), 10 * 60 * 1000);
-  assert.equal(getPollTimeoutMs('writing'), 30 * 60 * 1000);
+  assert.equal(getPollTimeoutMs('writing'), 3 * 60 * 60 * 1000);
   assert.equal(getPollTimeoutMs('humanize'), 20 * 60 * 1000);
 });
 

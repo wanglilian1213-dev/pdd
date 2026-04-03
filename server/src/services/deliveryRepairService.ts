@@ -1,6 +1,6 @@
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
-import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
-import { generateCitationReport, storeGeneratedTaskFile } from './writingService';
+import { normalizeDeliveryPaperTitle } from './paperTitleService';
+import { buildFinalDocDescriptor, generateCitationReport, storeGeneratedTaskFile } from './writingService';
 import { renderCitationReportPdf } from './citationReportTemplateService';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
@@ -181,13 +181,13 @@ export async function repairTaskDeliveryFilesWithDeps(
     paperTitle: displayTitle,
     courseCode: task.courseCode,
   });
-  const finalDocName = buildDocxFileName(task.paperTitle || task.title, 'Academic Essay');
+  const finalDoc = buildFinalDocDescriptor(taskId, task.paperTitle || task.title, 'Academic Essay');
 
   await deps.storeGeneratedTaskFile({
     taskId,
     category: 'final_doc',
-    originalName: finalDocName,
-    storagePath: `${taskId}/${finalDocName}`,
+    originalName: finalDoc.originalName,
+    storagePath: finalDoc.storagePath,
     fileSize: docBuffer.length,
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     expiresAtIso,

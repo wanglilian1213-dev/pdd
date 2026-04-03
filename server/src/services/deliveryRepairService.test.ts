@@ -47,6 +47,7 @@ test('repairTaskDeliveryFilesWithDeps rebuilds final doc and citation report wit
       storedCategories.push(payload.category);
       if (payload.category === 'final_doc') {
         assert.equal(payload.originalName, 'A Better Essay Title.docx');
+        assert.equal(payload.storagePath, 'task-1/final-paper.docx');
       }
       if (payload.category === 'citation_report') {
         assert.equal(payload.originalName, 'citation-report.pdf');

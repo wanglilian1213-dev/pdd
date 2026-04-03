@@ -146,7 +146,7 @@ INSERT INTO system_config (key, value) VALUES
   ('humanize_price_per_1000', '250'),
   ('result_file_retention_days', '3'),
   ('material_retention_days', '3'),
-  ('stuck_task_timeout_minutes', '30'),
+  ('stuck_task_timeout_minutes', '45'),
   ('max_outline_edits', '4'),
   ('activation_denominations', '[1000, 3000, 10000, 20000]')
 ON CONFLICT (key) DO NOTHING;

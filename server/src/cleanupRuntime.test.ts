@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isAutoCleanupStage, runInitialCleanup } from './cleanupRuntime';
+import { DEFAULT_STUCK_TASK_TIMEOUT_MINUTES, isAutoCleanupStage, runInitialCleanup } from './cleanupRuntime';
 
 test('runInitialCleanup catches startup failures so cleanup service does not crash', async () => {
   const messages: string[] = [];
@@ -61,4 +61,8 @@ test('isAutoCleanupStage keeps backend-driven stuck stages eligible for cleanup'
       { stage: 'humanizing', value: true },
     ],
   );
+});
+
+test('default stuck task timeout is 45 minutes', () => {
+  assert.equal(DEFAULT_STUCK_TASK_TIMEOUT_MINUTES, 45);
 });

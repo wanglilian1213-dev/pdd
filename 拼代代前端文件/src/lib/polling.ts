@@ -8,7 +8,8 @@ const POLL_DELAY_MS: Record<PollStage, { initial: number; increment: number; max
 
 const POLL_TIMEOUT_MS: Record<PollStage, number> = {
   outline: 10 * 60 * 1000,
-  writing: 30 * 60 * 1000,
+  // Writing now allows a much longer server-side chain, so the UI must not give up early.
+  writing: 3 * 60 * 60 * 1000,
   humanize: 20 * 60 * 1000,
 };
 
