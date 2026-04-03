@@ -29,8 +29,6 @@ const REFERENCE_REPAIR_MAX_ATTEMPTS = 2;
 const CRITICAL_PAPER_REASONS = new Set([
   'empty paper',
   'refusal content',
-  'missing references',
-  'missing citation',
 ]);
 
 function isCriticalPaperFailure(reasons: string[]) {
@@ -553,8 +551,8 @@ Fix ALL identified issues in the paper below:
 - If reference count is below ${requiredReferenceCount}, add more real academic journal paper references with proper in-text citations in the body.
 - If any references are from before 2020, replace them with references from 2020 onwards.
 - If any references look like books or non-academic sources, replace them with academic journal paper references.
-- If citation format doesn't match ${citationStyle}, reformat all citations and references to ${citationStyle}.
 - Every reference must be an academic scholar paper. Do not use book sources.
+- ALL references must include real, accurate, and verifiable links (DOI or journal URL). Do NOT fabricate any reference or use any fake or broken link. Every reference must be a real published work that actually exists.
 - Each reference should include a proper DOI link or journal URL.
 
 Keep the main body text and arguments unchanged. Only fix the references and their corresponding in-text citations.
