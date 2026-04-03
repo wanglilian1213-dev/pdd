@@ -9,6 +9,7 @@ interface TaskRequirementPrompt {
 interface ExtractedTaskRequirementPayload {
   targetWords?: number | null;
   citationStyle?: string | null;
+  requiredSectionCount?: number | null;
 }
 
 export interface UnifiedTaskRequirements {
@@ -29,6 +30,17 @@ function safeParseJson(content: string) {
 
 function normalizeText(value: string | null | undefined) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeSectionCount(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+  if (!Number.isInteger(parsed) || parsed < 2 || parsed > 20) {
+    return null;
+  }
+  return parsed;
 }
 
 function normalizeTargetWords(value: unknown) {
@@ -87,6 +99,7 @@ If the materials do not clearly specify one of these values, return null for tha
 export function normalizeExtractedTaskRequirements(content: string): {
   targetWords: number | null;
   citationStyle: string | null;
+  requiredSectionCount: number | null;
 } {
   const parsed = safeParseJson(content);
   const citationStyle = normalizeText(typeof parsed?.citation_style === 'string' ? parsed.citation_style : '');
@@ -94,12 +107,14 @@ export function normalizeExtractedTaskRequirements(content: string): {
   return {
     targetWords: normalizeTargetWords(parsed?.target_words),
     citationStyle: citationStyle ? normalizeCitationStyle(citationStyle) : null,
+    requiredSectionCount: normalizeSectionCount(parsed?.required_section_count),
   };
 }
 
 export interface RequirementOverrides {
   targetWords?: number;
   citationStyle?: string;
+  requiredSectionCount?: number;
 }
 
 /**
@@ -145,6 +160,19 @@ export function parseRequirementOverrides(editInstruction: string): RequirementO
     }
   }
 
+  // --- Section count extraction ---
+  // Chinese: 6个章节, 分6章, 6个部分, 6节
+  // English: 6 sections, change to 5 sections
+  const zhSectionMatch = text.match(/(\d{1,2})\s*(?:个)?(?:章节|部分|章|节)/);
+  const enSectionMatch = text.match(/(\d{1,2})\s*sections?\b/i);
+  const rawSections = zhSectionMatch?.[1] || enSectionMatch?.[1];
+  if (rawSections) {
+    const parsed = Number.parseInt(rawSections, 10);
+    if (parsed >= 2 && parsed <= 20) {
+      overrides.requiredSectionCount = parsed;
+    }
+  }
+
   return overrides;
 }
 
@@ -154,10 +182,14 @@ export function deriveUnifiedTaskRequirements(
   const targetWords = normalizeTargetWords(input.targetWords) ?? 1000;
   const citationStyle = normalizeCitationStyle(input.citationStyle || 'APA 7');
 
+  // Priority: document-specified section count > word-count formula
+  const requiredSectionCount = normalizeSectionCount(input.requiredSectionCount)
+    ?? computeRequiredSectionCount(targetWords);
+
   return {
     targetWords,
     citationStyle,
     requiredReferenceCount: computeRequiredReferenceCount(targetWords),
-    requiredSectionCount: computeRequiredSectionCount(targetWords),
+    requiredSectionCount,
   };
 }

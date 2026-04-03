@@ -110,13 +110,14 @@ function deriveStoredUnifiedRequirements(source: {
   const unified = deriveUnifiedTaskRequirements({
     targetWords: typeof source.target_words === 'number' ? source.target_words : undefined,
     citationStyle: typeof source.citation_style === 'string' ? source.citation_style : undefined,
+    requiredSectionCount: typeof source.required_section_count === 'number' ? source.required_section_count : undefined,
   });
 
   return {
     targetWords: unified.targetWords,
     citationStyle: unified.citationStyle,
     requiredReferenceCount: Number(source.required_reference_count || unified.requiredReferenceCount),
-    requiredSectionCount: Number(source.required_section_count || unified.requiredSectionCount),
+    requiredSectionCount: unified.requiredSectionCount,
   };
 }
 
@@ -716,6 +717,7 @@ export async function generateOutline(taskId: string, userId: string) {
       normalizeExtractedTaskRequirements(JSON.stringify({
         target_words: mergedJson.target_words,
         citation_style: mergedJson.citation_style,
+        required_section_count: mergedJson.required_section_count,
       })),
     );
 
@@ -822,6 +824,7 @@ interface MergedOutlineJson {
   course_code?: string | null;
   target_words?: number | null;
   citation_style?: string | null;
+  required_section_count?: number | null;
   paper_title: string;
   research_question: string;
   outline: string;
@@ -835,6 +838,7 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
       course_code: typeof parsed.course_code === 'string' ? parsed.course_code : null,
       target_words: typeof parsed.target_words === 'number' ? parsed.target_words : null,
       citation_style: typeof parsed.citation_style === 'string' ? parsed.citation_style : null,
+      required_section_count: typeof parsed.required_section_count === 'number' ? parsed.required_section_count : null,
       paper_title: typeof parsed.paper_title === 'string' ? parsed.paper_title : '',
       research_question: typeof parsed.research_question === 'string' ? parsed.research_question : '',
       outline: typeof parsed.outline === 'string' ? parsed.outline : content,
@@ -844,6 +848,7 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
       course_code: null,
       target_words: null,
       citation_style: null,
+      required_section_count: null,
       paper_title: '',
       research_question: '',
       outline: content,
@@ -914,12 +919,25 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
     const overrides = parseRequirementOverrides(editInstruction);
     const baseTargetWords = typeof latestOutline.target_words === 'number' ? latestOutline.target_words : task.target_words;
     const baseCitationStyle = typeof latestOutline.citation_style === 'string' ? latestOutline.citation_style : task.citation_style;
-    const hasOverride = overrides.targetWords !== undefined || overrides.citationStyle !== undefined;
+    const hasOverride = overrides.targetWords !== undefined || overrides.citationStyle !== undefined || overrides.requiredSectionCount !== undefined;
+
+    // When user overrides section count, use it directly.
+    // When user only changes citation style (not word count), preserve stored section count.
+    // When user changes word count, let the formula recalculate.
+    const sectionCountForOverride = overrides.requiredSectionCount
+      ?? (overrides.targetWords === undefined
+        ? (typeof latestOutline.required_section_count === 'number'
+          ? latestOutline.required_section_count
+          : typeof task.required_section_count === 'number'
+            ? task.required_section_count
+            : undefined)
+        : undefined);
 
     const unifiedRequirements = hasOverride
       ? deriveUnifiedTaskRequirements({
           targetWords: overrides.targetWords ?? baseTargetWords,
           citationStyle: overrides.citationStyle ?? baseCitationStyle,
+          requiredSectionCount: sectionCountForOverride,
         })
       : deriveStoredUnifiedRequirements({
           target_words: baseTargetWords,

@@ -229,6 +229,7 @@ const MERGED_RESPONSE_SCHEMA = `Respond with valid JSON only in this shape:
   "course_code": "string or null",
   "target_words": number | null,
   "citation_style": "string" | null,
+  "required_section_count": number | null,
   "paper_title": "a concrete English paper title",
   "research_question": "a concrete English research question",
   "outline": "the full outline text"
@@ -249,13 +250,17 @@ Read every attached material file directly. Perform ALL of the following tasks i
 
 Requirement extraction rules:
 - Only extract target_words and citation_style that are explicitly stated in the materials.
+- If the task materials explicitly specify a required article structure (e.g. listing specific required sections/chapters such as "Introduction, Literature Review, Methodology, Findings, Discussion, Conclusion"), count the number of required sections and return it as required_section_count.
+- Only extract required_section_count when the document clearly mandates a specific structure. Do not infer a section count from word count or topic complexity.
 - Do not infer defaults. If the materials do not clearly specify a value, return null.
-- The system will use defaults (1000 words, APA 7) when you return null.
-- The system will compute required_section_count and required_reference_count from the final target_words.
+- The system will use defaults (1000 words, APA 7) when you return null for target_words or citation_style.
+- The system will compute required_section_count from target_words only when you return null for required_section_count.
 
 Outline planning rules (apply after determining the target_words):
-- If target_words is found in the materials, compute: required_section_count = 3 + (ceil(target_words / 1000) - 1), required_reference_count = ceil(target_words / 1000) * 5.
-- If target_words is null, use 3 sections and 5 references as the default.
+- If required_section_count is extracted from the materials, use that value directly for the number of sections.
+- Otherwise, if target_words is found in the materials, compute: required_section_count = 3 + (ceil(target_words / 1000) - 1).
+- If neither is specified, use 3 sections as the default.
+- required_reference_count = ceil(target_words / 1000) * 5 (or 5 if target_words is null).
 - Introduction and Conclusion count within the total section count.
 - Every section must contain between 3 and 5 bullet points.
 - Each bullet point should stay on a single line starting with "- ".
