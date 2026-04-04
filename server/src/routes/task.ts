@@ -126,6 +126,9 @@ router.post('/:id/outline/confirm', async (req: AuthRequest, res: Response) => {
   } catch (err: unknown) {
     const appErr = err as { statusCode?: number; userMessage?: string };
     const status = appErr.statusCode || 500;
+    if (status >= 500) {
+      console.error(`[POST /:id/outline/confirm] taskId=${req.params.id} userId=${req.userId}`, err);
+    }
     res.status(status).json({ success: false, error: appErr.userMessage || '确认大纲失败。' });
   }
 });

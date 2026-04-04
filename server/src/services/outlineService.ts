@@ -839,13 +839,20 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
 }
 
 export async function regenerateOutline(taskId: string, userId: string, editInstruction: string) {
-  const { data: task } = await supabaseAdmin
+  const { data: task, error: taskError } = await supabaseAdmin
     .from('tasks')
     .select('*')
     .eq('id', taskId)
     .eq('user_id', userId)
     .single();
 
+  if (taskError) {
+    if (taskError.code === 'PGRST116') {
+      throw new AppError(404, '任务不存在。');
+    }
+    console.error(`[regenerateOutline] task query failed task=${taskId} user=${userId}`, taskError);
+    throw new AppError(500, '查询任务失败，请稍后重试。');
+  }
   if (!task) {
     throw new AppError(404, '任务不存在。');
   }
@@ -1065,13 +1072,20 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
 }
 
 export async function confirmOutline(taskId: string, userId: string) {
-  const { data: task } = await supabaseAdmin
+  const { data: task, error: taskError } = await supabaseAdmin
     .from('tasks')
     .select('*')
     .eq('id', taskId)
     .eq('user_id', userId)
     .single();
 
+  if (taskError) {
+    if (taskError.code === 'PGRST116') {
+      throw new AppError(404, '任务不存在。');
+    }
+    console.error(`[confirmOutline] task query failed task=${taskId} user=${userId}`, taskError);
+    throw new AppError(500, '查询任务失败，请稍后重试。');
+  }
   if (!task) throw new AppError(404, '任务不存在。');
   if (task.stage !== 'outline_ready') throw new AppError(400, '请先等待大纲生成完成。');
 
