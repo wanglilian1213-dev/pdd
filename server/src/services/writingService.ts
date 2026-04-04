@@ -1062,7 +1062,9 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
       body: reportBuffer,
     });
   } catch (reportErr) {
-    console.error(`Citation report generation failed for task ${taskId} (non-fatal):`, reportErr);
+    const isTimeout = reportErr instanceof Error && reportErr.name === 'WritingStageTimeoutError';
+    const reason = isTimeout ? 'timeout' : (reportErr instanceof Error ? reportErr.message : String(reportErr));
+    console.error(`[citation-report] task=${taskId} failed reason=${reason}`, reportErr);
   }
 }
 
@@ -1123,7 +1125,6 @@ export async function generateCitationReport(
         },
       ],
     }),
-    120_000,
   );
   const rawReportText = typeof response.output_text === 'string' ? response.output_text : '';
 
