@@ -73,7 +73,6 @@ test('default stuck task timeout is 45 minutes', () => {
 });
 
 test('cleanupExpiredMaterials only deletes expired materials for finished tasks', async () => {
-  const deletedOpenAiFileIds: string[] = [];
   const removedStoragePaths: string[] = [];
   const deletedTaskFileIds: string[] = [];
   const logMessages: string[] = [];
@@ -81,10 +80,10 @@ test('cleanupExpiredMaterials only deletes expired materials for finished tasks'
   await cleanupExpiredMaterialsWithDeps({
     getRetentionDays: async () => 3,
     listExpiredMaterials: async () => [
-      { id: 'material-completed', taskId: 'task-completed', storagePath: 'materials/completed.pdf', openAiFileId: 'oa-completed' },
-      { id: 'material-failed', taskId: 'task-failed', storagePath: 'materials/failed.pdf', openAiFileId: null },
-      { id: 'material-processing', taskId: 'task-processing', storagePath: 'materials/processing.pdf', openAiFileId: 'oa-processing' },
-      { id: 'material-outline', taskId: 'task-outline', storagePath: 'materials/outline.pdf', openAiFileId: 'oa-outline' },
+      { id: 'material-completed', taskId: 'task-completed', storagePath: 'materials/completed.pdf' },
+      { id: 'material-failed', taskId: 'task-failed', storagePath: 'materials/failed.pdf' },
+      { id: 'material-processing', taskId: 'task-processing', storagePath: 'materials/processing.pdf' },
+      { id: 'material-outline', taskId: 'task-outline', storagePath: 'materials/outline.pdf' },
     ],
     listTasksByIds: async () => [
       { id: 'task-completed', status: 'completed' },
@@ -92,9 +91,6 @@ test('cleanupExpiredMaterials only deletes expired materials for finished tasks'
       { id: 'task-processing', status: 'processing' },
       { id: 'task-outline', status: 'processing' },
     ],
-    deleteOpenAiFile: async (fileId: string) => {
-      deletedOpenAiFileIds.push(fileId);
-    },
     removeStorageFile: async (storagePath: string) => {
       removedStoragePaths.push(storagePath);
     },
@@ -110,7 +106,6 @@ test('cleanupExpiredMaterials only deletes expired materials for finished tasks'
     },
   });
 
-  assert.deepEqual(deletedOpenAiFileIds, ['oa-completed']);
   assert.deepEqual(removedStoragePaths, ['materials/completed.pdf', 'materials/failed.pdf']);
   assert.deepEqual(deletedTaskFileIds, ['material-completed', 'material-failed']);
   assert.equal(

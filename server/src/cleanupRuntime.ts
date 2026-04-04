@@ -5,7 +5,6 @@ import { failTask } from './services/taskService';
 import { deleteExpiredFiles } from './services/fileService';
 import { getConfig } from './services/configService';
 import { captureError } from './lib/errorMonitor';
-import { openai } from './lib/openai';
 
 export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;
@@ -22,7 +21,6 @@ export interface ExpiredMaterialRecord {
   id: string;
   taskId: string | null;
   storagePath: string;
-  openAiFileId: string | null;
 }
 
 export interface TaskStatusRecord {
@@ -34,7 +32,6 @@ export interface CleanupExpiredMaterialsDeps {
   getRetentionDays: () => Promise<number | null>;
   listExpiredMaterials: (cutoffIso: string) => Promise<ExpiredMaterialRecord[]>;
   listTasksByIds: (taskIds: string[]) => Promise<TaskStatusRecord[]>;
-  deleteOpenAiFile: (fileId: string) => Promise<void>;
   removeStorageFile: (storagePath: string) => Promise<void>;
   deleteTaskFileRecord: (fileId: string) => Promise<void>;
   captureCleanupError: (error: unknown, context: string, extra?: Record<string, unknown>) => void;
@@ -145,7 +142,7 @@ function createExpiredMaterialsDeps(
     listExpiredMaterials: async (cutoffIso: string) => {
       const { data } = await supabaseAdmin
         .from('task_files')
-        .select('id, task_id, storage_path, openai_file_id')
+        .select('id, task_id, storage_path')
         .eq('category', 'material')
         .lt('created_at', cutoffIso);
 
@@ -153,7 +150,6 @@ function createExpiredMaterialsDeps(
         id: file.id,
         taskId: file.task_id,
         storagePath: file.storage_path,
-        openAiFileId: file.openai_file_id,
       }));
     },
     listTasksByIds: async (taskIds: string[]) => {
@@ -170,9 +166,6 @@ function createExpiredMaterialsDeps(
         id: task.id,
         status: task.status,
       }));
-    },
-    deleteOpenAiFile: async (fileId: string) => {
-      await openai.files.del(fileId);
     },
     removeStorageFile: async (storagePath: string) => {
       await supabaseAdmin.storage.from('task-files').remove([storagePath]);
@@ -219,17 +212,9 @@ export async function cleanupExpiredMaterialsWithDeps(
   }
 
   for (const file of eligibleMaterials) {
-    // 1. Delete OpenAI file first (while we still have the ID)
-    if (file.openAiFileId) {
-      try {
-        await deps.deleteOpenAiFile(file.openAiFileId);
-      } catch (err) {
-        deps.captureCleanupError(err, 'cleanup.expired_material_openai_delete', { fileId: file.openAiFileId });
-      }
-    }
-    // 2. Delete from Supabase storage
+    // 1. Delete from Supabase storage
     await deps.removeStorageFile(file.storagePath);
-    // 3. Delete DB row last
+    // 2. Delete DB row last
     await deps.deleteTaskFileRecord(file.id);
   }
 
