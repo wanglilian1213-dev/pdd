@@ -12,6 +12,7 @@ import {
 } from "../../components/ui/dropdown-menu";
 import { api } from '../../lib/api';
 import { normalizeTaskFiles, pickPrimaryDownloadFile } from '../../lib/taskFiles';
+import { triggerDownload } from '../../lib/downloadFile';
 import { formatDate } from '../../lib/utils';
 
 interface TaskItem {
@@ -85,7 +86,7 @@ export default function Tasks() {
         return;
       }
       const { url } = await api.getDownloadUrl(taskId, file.id);
-      window.open(url, '_blank');
+      triggerDownload(url, file.filename);
     } catch (err) {
       const message = err instanceof Error ? err.message : '获取下载链接失败';
       alert(message);

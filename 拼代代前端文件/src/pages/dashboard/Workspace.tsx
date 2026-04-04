@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { api } from '../../lib/api';
 import { useBalance } from '../../contexts/BalanceContext';
 import { buildDownloadCards, normalizeTaskFiles, TaskFile, TaskFileCategory } from '../../lib/taskFiles';
+import { triggerDownload } from '../../lib/downloadFile';
 import {
   getHumanizeStepAfterStartAttempt,
   getWorkspaceStep,
@@ -551,7 +552,7 @@ export default function Workspace() {
     setDownloadingFileId(fileId);
     try {
       const data = await api.getDownloadUrl(taskData.task.id, fileId);
-      window.open(data.url, '_blank');
+      triggerDownload(data.url);
     } catch (err) {
       setError(err instanceof Error ? err.message : '获取下载链接失败');
     } finally {
