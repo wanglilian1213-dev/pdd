@@ -92,7 +92,7 @@ export async function prepareMaterialContent(
 
     parts.push({
       type: 'input_file',
-      file_data: base64,
+      file_data: `data:${mimeType};base64,${base64}`,
       filename: file.original_name,
     });
   }

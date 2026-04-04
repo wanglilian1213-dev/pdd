@@ -7,6 +7,7 @@ export interface Env {
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
   openaiApiKey: string;
+  openaiBaseUrl: string | undefined;
   openaiModel: AllowedOpenAIModel;
   undetectableApiKey: string;
   allowedOrigins: string[];
@@ -67,6 +68,7 @@ export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
     supabaseAnonKey: readRequired(rawEnv, 'SUPABASE_ANON_KEY'),
     supabaseServiceRoleKey: readRequired(rawEnv, 'SUPABASE_SERVICE_ROLE_KEY'),
     openaiApiKey: readRequired(rawEnv, 'OPENAI_API_KEY'),
+    openaiBaseUrl: rawEnv.OPENAI_BASE_URL?.trim() || undefined,
     openaiModel: readOpenAIModel(rawEnv),
     undetectableApiKey: readRequired(rawEnv, 'UNDETECTABLE_API_KEY'),
     allowedOrigins: readAllowedOrigins(rawEnv),

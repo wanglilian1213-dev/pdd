@@ -34,7 +34,9 @@ test('prepareMaterialContent converts documents to base64 file_data and images t
   assert.equal(filePart.type, 'input_file');
   assert.equal(typeof filePart.file_data, 'string');
   assert.equal(filePart.filename, 'report.pdf');
-  assert.equal(Buffer.from(filePart.file_data!, 'base64').toString(), 'fake pdf body');
+  assert.ok(filePart.file_data!.startsWith('data:application/pdf;base64,'));
+  const base64Part = filePart.file_data!.split(',')[1];
+  assert.equal(Buffer.from(base64Part, 'base64').toString(), 'fake pdf body');
 
   assert.deepEqual(content.parts[2], { type: 'input_text', text: '材料文件：diagram.png' });
 
