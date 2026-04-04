@@ -590,17 +590,14 @@ async function repairReferenceIssues(
         'citation_verification',
         openai.responses.create({
           ...buildMainOpenAIResponsesOptions('citation_verification'),
+          instructions: buildReferenceRepairSystemPrompt(
+            options.citationStyle,
+            options.requiredReferenceCount,
+            referenceIssues,
+          ),
           input: [
             {
-              role: 'system',
-              content: buildReferenceRepairSystemPrompt(
-                options.citationStyle,
-                options.requiredReferenceCount,
-                referenceIssues,
-              ),
-            },
-            {
-              role: 'user',
+              role: 'user' as const,
               content: current,
             },
           ],
@@ -710,17 +707,14 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
   const response = await withDraftGenerationTimeout(
       openai.responses.create({
         ...buildMainOpenAIResponsesOptions('draft_generation'),
+        instructions: buildDraftGenerationSystemPrompt(
+          input.targetWords,
+          input.citationStyle,
+          input.requiredReferenceCount,
+        ),
         input: [
           {
-            role: 'system',
-            content: buildDraftGenerationSystemPrompt(
-              input.targetWords,
-              input.citationStyle,
-              input.requiredReferenceCount,
-            ),
-          },
-          {
-            role: 'user',
+            role: 'user' as const,
             content: [
               {
                 type: 'input_text',
@@ -748,17 +742,14 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
       const repairedResponse = await withDraftGenerationTimeout(
         openai.responses.create({
           ...buildMainOpenAIResponsesOptions('draft_generation'),
+          instructions: buildDraftGenerationSystemPrompt(
+            input.targetWords,
+            input.citationStyle,
+            input.requiredReferenceCount,
+          ),
           input: [
             {
-              role: 'system',
-              content: buildDraftGenerationSystemPrompt(
-                input.targetWords,
-                input.citationStyle,
-                input.requiredReferenceCount,
-              ),
-            },
-            {
-              role: 'user',
+              role: 'user' as const,
               content: [
                 {
                   type: 'input_text',
@@ -860,13 +851,10 @@ async function calibrateWordCount(
           'word_calibration',
           openai.responses.create({
             ...buildMainOpenAIResponsesOptions('word_calibration'),
+            instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
             input: [
               {
-                role: 'system',
-                content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
-              },
-              {
-                role: 'user',
+                role: 'user' as const,
                 content: currentText,
               },
             ],
@@ -891,13 +879,10 @@ async function calibrateWordCount(
             'word_calibration',
             openai.responses.create({
               ...buildMainOpenAIResponsesOptions('word_calibration'),
+              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
               input: [
                 {
-                  role: 'system',
-                  content: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
-                },
-                {
-                  role: 'user',
+                  role: 'user' as const,
                   content: buildStageRepairUserPrompt({
                     lastGoodText: currentText,
                     brokenText: calibrated,
@@ -955,13 +940,10 @@ async function verifyCitations(
       'citation_verification',
       openai.responses.create({
         ...buildMainOpenAIResponsesOptions('citation_verification'),
+        instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
         input: [
           {
-            role: 'system',
-            content: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
-          },
-          {
-            role: 'user',
+            role: 'user' as const,
             content: text,
           },
         ],
@@ -985,13 +967,10 @@ async function verifyCitations(
         'citation_verification',
         openai.responses.create({
           ...buildMainOpenAIResponsesOptions('citation_verification'),
+          instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
           input: [
             {
-              role: 'system',
-              content: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
-            },
-            {
-              role: 'user',
+              role: 'user' as const,
               content: buildStageRepairUserPrompt({
                 lastGoodText: text,
                 brokenText: verified,
@@ -1136,13 +1115,10 @@ export async function generateCitationReport(
     'citation_verification',
     openai.responses.create({
       ...buildMainOpenAIResponsesOptions('citation_verification'),
+      instructions: prompt.systemPrompt,
       input: [
         {
-          role: 'system',
-          content: prompt.systemPrompt,
-        },
-        {
-          role: 'user',
+          role: 'user' as const,
           content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
         },
       ],

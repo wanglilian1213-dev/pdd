@@ -145,11 +145,8 @@ async function repairOutlineBulletCounts(
 
     const response = await openai.responses.create({
       ...buildMainOpenAIResponsesOptions(stage),
+      instructions: prompt.systemPrompt,
       input: [
-        {
-          role: 'system' as const,
-          content: prompt.systemPrompt,
-        },
         {
           role: 'user' as const,
           content: prompt.userPrompt,
@@ -206,11 +203,8 @@ async function repairOutlineReadiness(
 
   const response = await openai.responses.create({
     ...buildMainOpenAIResponsesOptions(stage),
+    instructions: prompt.systemPrompt,
     input: [
-      {
-        role: 'system' as const,
-        content: prompt.systemPrompt,
-      },
       {
         role: 'user' as const,
         content: options.materialParts
@@ -263,11 +257,8 @@ async function reviewOutlineThemeAlignment(
 
   const response = await openai.responses.create({
     ...buildMainOpenAIResponsesOptions(stage),
+    instructions: prompt.systemPrompt,
     input: [
-      {
-        role: 'system' as const,
-        content: prompt.systemPrompt,
-      },
       {
         role: 'user' as const,
         content: [
@@ -320,11 +311,8 @@ async function repairOutlineThemeAlignment(
 
   const response = await openai.responses.create({
     ...buildMainOpenAIResponsesOptions(stage),
+    instructions: prompt.systemPrompt,
     input: [
-      {
-        role: 'system' as const,
-        content: prompt.systemPrompt,
-      },
       {
         role: 'user' as const,
         content: options.materialParts
@@ -434,13 +422,10 @@ async function extractCourseCodeForTask(options: {
   try {
     const response = await openai.responses.create({
       ...buildMainOpenAIResponsesOptions('outline_generation'),
+      instructions: prompt.systemPrompt,
       input: [
         {
-          role: 'system',
-          content: prompt.systemPrompt,
-        },
-        {
-          role: 'user',
+          role: 'user' as const,
           content: [
             {
               type: 'input_text',
@@ -691,11 +676,8 @@ export async function generateOutline(taskId: string, userId: string) {
 
     const response = await openai.responses.create({
       ...buildMainOpenAIResponsesOptions('outline_generation'),
+      instructions: prompt.systemPrompt,
       input: [
-        {
-          role: 'system' as const,
-          content: prompt.systemPrompt,
-        },
         {
           role: 'user' as const,
           content: [
@@ -964,11 +946,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
 
     const response = await openai.responses.create({
       ...buildMainOpenAIResponsesOptions('outline_regeneration'),
+      instructions: prompt.systemPrompt,
       input: [
-        {
-          role: 'system' as const,
-          content: prompt.systemPrompt,
-        },
         {
           role: 'user' as const,
           content: [
