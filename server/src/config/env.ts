@@ -9,6 +9,8 @@ export interface Env {
   openaiApiKey: string;
   openaiBaseUrl: string | undefined;
   openaiModel: AllowedOpenAIModel;
+  anthropicApiKey: string;
+  anthropicBaseUrl: string | undefined;
   undetectableApiKey: string;
   allowedOrigins: string[];
   opsWhitelistEmails: string[];
@@ -70,6 +72,8 @@ export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
     openaiApiKey: readRequired(rawEnv, 'OPENAI_API_KEY'),
     openaiBaseUrl: rawEnv.OPENAI_BASE_URL?.trim() || undefined,
     openaiModel: readOpenAIModel(rawEnv),
+    anthropicApiKey: readRequired(rawEnv, 'ANTHROPIC_API_KEY'),
+    anthropicBaseUrl: rawEnv.ANTHROPIC_BASE_URL?.trim() || undefined,
     undetectableApiKey: readRequired(rawEnv, 'UNDETECTABLE_API_KEY'),
     allowedOrigins: readAllowedOrigins(rawEnv),
     opsWhitelistEmails: (rawEnv.OPS_WHITELIST_EMAILS || '')

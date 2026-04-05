@@ -105,7 +105,7 @@ npx -y @aisuite/chub annotate --list
 - 认证：Supabase Auth
 - 数据和文件：Supabase Database + Storage
 - 业务接口：Railway 上的 Express 服务
-- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
+- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；文章修改走 Anthropic Claude API（`claude-opus-4-6-20250414`，开启 extended thinking）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
 - 交付排版规则：最终正文 `Word` 必须自动套固定论文模板，第 1 页是封面（课号 + 任务标题），正文从第 2 页开始，`Reference` 必须另起一页，正文和参考文献统一 `Times New Roman 12`、`1.5 倍行距`
 - 课号规则：不加新的输入框；系统在第一次生成大纲时自动从任务标题、特殊要求、材料文件里提取课号，提不出来就留空继续
@@ -132,6 +132,8 @@ npx -y @aisuite/chub annotate --list
 - 核验报告规则：引用核验报告继续交付 `PDF`，但必须按真实内容自动长高和分页，不能再出现文字重叠、压线、卡片高度写死的问题
 - 工作台状态规则：第 6 步只是"交付阶段"，只有真正 `completed + completed` 才算交付完成；`delivering + processing` 仍然要继续轮询并显示"正在整理交付文件"
 - 下载规则：任务列表里的单个"下载"按钮固定代表"下载主文稿"，优先顺序是 `humanized_doc` → `final_doc` → `citation_report`
+- 文章修改规则：文章修改功能与主写作流程完全独立，走 Anthropic Claude API（`claude-opus-4-6-20250414`，开启 extended thinking），同一时间一个用户只能有一个进行中的修改请求
+- 文章修改计费规则：每 1000 字收费 250 积分（由 `system_config.revision_price_per_1000` 控制），按修改后的文章字数计费，不足 1000 字按 1000 字计；失败必须自动退款
 - 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败
 - 安全规则：前端 Supabase 地址和公开 key 只能从环境变量读取，不能再在源码里写真实兜底值
 - 安全规则：后端跨域白名单必须走 `ALLOWED_ORIGINS`，不能再全开放
@@ -175,6 +177,7 @@ npx -y @aisuite/chub annotate --list
 | `/login` | Login | 邮箱密码登录 |
 | `/register` | Register | 注册 + 初始化 |
 | `/dashboard/workspace` | Workspace | 核心工作台 |
+| `/dashboard/revision` | Revision | 文章修改（上传文章 + 修改要求 → Claude 修改 → 下载） |
 | `/dashboard/tasks` | Tasks | 历史任务列表 |
 | `/dashboard/recharge` | Recharge | 余额和激活码兑换 |
 | `/activation-rules` | ActivationRules | 静态页 |

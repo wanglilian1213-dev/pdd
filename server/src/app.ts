@@ -43,10 +43,12 @@ export function createApp({ allowedOrigins, mountApiRoutes = true }: CreateAppOp
     const rechargeRoutes = (require('./routes/recharge') as typeof import('./routes/recharge')).default;
     const taskRoutes = (require('./routes/task') as typeof import('./routes/task')).default;
     const opsRoutes = (require('./routes/ops') as typeof import('./routes/ops')).default;
+    const revisionRoutes = (require('./routes/revision') as typeof import('./routes/revision')).default;
 
     app.use('/api/user', authMiddleware, userRoutes);
     app.use('/api/recharge', authMiddleware, rechargeRoutes);
     app.use('/api/task', authMiddleware, taskRoutes);
+    app.use('/api/revision', authMiddleware, revisionRoutes);
     app.use('/api/ops', authMiddleware, opsMiddleware, opsRoutes);
   }
 

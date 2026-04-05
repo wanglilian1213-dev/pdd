@@ -77,4 +77,27 @@ export const api = {
     request<any>(`/api/task/${taskId}/humanize`, { method: 'POST' }),
   getDownloadUrl: (taskId: string, fileId: string) =>
     request<any>(`/api/task/${taskId}/file/${fileId}/download`),
+
+  // Revision
+  createRevision: async (files: File[], instructions: string) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const formData = new FormData();
+    files.forEach(f => formData.append('files', f));
+    formData.append('instructions', instructions);
+
+    const res = await fetch(`${API_BASE}/api/revision/create`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${session.access_token}` },
+      body: formData,
+    });
+    return parseApiResponse<any>(res, '创建修改请求失败');
+  },
+  getRevisionCurrent: () => request<any>('/api/revision/current'),
+  getRevision: (id: string) => request<any>(`/api/revision/${id}`),
+  getRevisionList: (limit = 20, offset = 0) =>
+    request<any>(`/api/revision/list?limit=${limit}&offset=${offset}`),
+  getRevisionDownloadUrl: (revisionId: string, fileId: string) =>
+    request<any>(`/api/revision/${revisionId}/file/${fileId}/download`),
 };
