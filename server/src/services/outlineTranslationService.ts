@@ -1,4 +1,4 @@
-import { openai } from '../lib/openai';
+import { openai, extractOutputText } from '../lib/openai';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 
 /**
@@ -21,7 +21,7 @@ export async function translateOutlineToZh(outlineContent: string): Promise<stri
       ],
     }).finalResponse();
 
-    const translated = response.output_text?.trim();
+    const translated = extractOutputText(response).trim();
     return translated || null;
   } catch {
     return null;

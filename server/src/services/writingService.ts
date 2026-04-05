@@ -1,4 +1,4 @@
-import { openai } from '../lib/openai';
+import { openai, extractOutputText } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
@@ -604,7 +604,7 @@ async function repairReferenceIssues(
         }).finalResponse(),
       );
 
-      const repaired = typeof response.output_text === 'string' ? response.output_text : current;
+      const repaired = extractOutputText(response) || current;
 
       // Only use repaired version if it doesn't introduce critical issues
       const repairedAssessment = assessGeneratedPaper(repaired, {
@@ -732,7 +732,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
       }).finalResponse(),
     );
 
-    let content = typeof response.output_text === 'string' ? response.output_text : '';
+    let content = extractOutputText(response);
     let assessment = assessGeneratedPaper(content, {
       requiredReferenceCount: input.requiredReferenceCount,
       citationStyle: input.citationStyle,
@@ -769,7 +769,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
         }).finalResponse(),
       );
 
-      content = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : content;
+      content = extractOutputText(repairedResponse) || content;
       assessment = assessGeneratedPaper(content, {
         requiredReferenceCount: input.requiredReferenceCount,
         citationStyle: input.citationStyle,
@@ -861,7 +861,7 @@ async function calibrateWordCount(
           }).finalResponse(),
         );
 
-        calibrated = typeof response.output_text === 'string' ? response.output_text : currentText;
+        calibrated = extractOutputText(response) || currentText;
       } catch (error) {
         if (!isWritingStageTimeoutError(error)) {
           throw error;
@@ -894,7 +894,7 @@ async function calibrateWordCount(
             }).finalResponse(),
           );
 
-          const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : currentText;
+          const repaired = extractOutputText(repairedResponse) || currentText;
           assessment = assessGeneratedPaper(repaired, {
             requiredReferenceCount,
             citationStyle,
@@ -950,7 +950,7 @@ async function verifyCitations(
       }).finalResponse(),
     );
 
-    verified = typeof response.output_text === 'string' ? response.output_text : text;
+    verified = extractOutputText(response) || text;
   } catch (error) {
     if (!isWritingStageTimeoutError(error)) {
       throw error;
@@ -982,7 +982,7 @@ async function verifyCitations(
         }).finalResponse(),
       );
 
-      const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : text;
+      const repaired = extractOutputText(repairedResponse) || text;
       assessment = assessGeneratedPaper(repaired, {
         requiredReferenceCount,
         citationStyle,
@@ -1126,7 +1126,7 @@ export async function generateCitationReport(
       ],
     }).finalResponse(),
   );
-  const rawReportText = typeof response.output_text === 'string' ? response.output_text : '';
+  const rawReportText = extractOutputText(response);
 
   const parsed = parseCitationReportData(rawReportText, citationStyle);
   const now = new Date();

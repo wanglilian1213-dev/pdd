@@ -1,4 +1,4 @@
-import { openai } from '../lib/openai';
+import { openai, extractOutputText } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask } from './taskService';
@@ -154,7 +154,7 @@ async function repairOutlineBulletCounts(
       ],
     }).finalResponse();
 
-    const repaired = parseOutlineJson(response.output_text, currentPayload);
+    const repaired = parseOutlineJson(extractOutputText(response), currentPayload);
 
     return {
       paper_title: repaired.paper_title || currentPayload.paper_title,
@@ -220,7 +220,7 @@ async function repairOutlineReadiness(
     ],
   }).finalResponse();
 
-  const repaired = parseOutlineJson(response.output_text, payload);
+  const repaired = parseOutlineJson(extractOutputText(response), payload);
   const repairedAssessment = assessOutlineReadiness(repaired, {
     blockedFileTitles: options.fileNames,
     requiredSectionCount: options.requiredSectionCount,
@@ -272,7 +272,7 @@ async function reviewOutlineThemeAlignment(
     ],
   }).finalResponse();
 
-  return parseOutlineThemeReview(response.output_text);
+  return parseOutlineThemeReview(extractOutputText(response));
 }
 
 async function repairOutlineThemeAlignment(
@@ -328,7 +328,7 @@ async function repairOutlineThemeAlignment(
     ],
   }).finalResponse();
 
-  const repaired = parseOutlineJson(response.output_text, payload);
+  const repaired = parseOutlineJson(extractOutputText(response), payload);
   const repairedReview = await reviewOutlineThemeAlignment(stage, repaired, {
     specialRequirements: options.specialRequirements,
     materialParts: options.materialParts,
@@ -437,7 +437,7 @@ async function extractCourseCodeForTask(options: {
       ],
     }).finalResponse();
 
-    return parseCourseCodeExtraction(typeof response.output_text === 'string' ? response.output_text : '');
+    return parseCourseCodeExtraction(extractOutputText(response));
   } catch {
     return null;
   }
@@ -691,7 +691,7 @@ export async function generateOutline(taskId: string, userId: string) {
       ],
     }).finalResponse();
 
-    const content = response.output_text;
+    const content = extractOutputText(response);
 
     // Parse the merged response — extract requirements, course code, and outline
     const mergedJson = parseMergedOutlineResponse(content);
@@ -968,7 +968,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       ],
     }).finalResponse();
 
-    const content = response.output_text;
+    const content = extractOutputText(response);
     const bulletFixed = await repairOutlineBulletCounts(
       'outline_regeneration',
       parseOutlineJson(content, {
