@@ -23,7 +23,7 @@ async function withServer(
 }
 
 test('createApp applies security headers on health responses', async () => {
-  await withServer(['https://pindaidai.up.railway.app'], async (baseUrl) => {
+  await withServer(['https://pindaidai.uk'], async (baseUrl) => {
     const response = await fetch(`${baseUrl}/health`);
     assert.equal(response.headers.get('x-frame-options'), 'SAMEORIGIN');
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
@@ -31,11 +31,11 @@ test('createApp applies security headers on health responses', async () => {
 });
 
 test('createApp reflects allowed origins only', async () => {
-  await withServer(['https://pindaidai.up.railway.app'], async (baseUrl) => {
+  await withServer(['https://pindaidai.uk'], async (baseUrl) => {
     const allowed = await fetch(`${baseUrl}/health`, {
-      headers: { Origin: 'https://pindaidai.up.railway.app' },
+      headers: { Origin: 'https://pindaidai.uk' },
     });
-    assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://pindaidai.up.railway.app');
+    assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://pindaidai.uk');
 
     const blocked = await fetch(`${baseUrl}/health`, {
       headers: { Origin: 'https://evil.example.com' },
