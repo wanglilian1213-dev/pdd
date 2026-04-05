@@ -143,7 +143,7 @@ async function repairOutlineBulletCounts(
       violationSummary: formatOutlineBulletViolations(violations),
     });
 
-    const response = await openai.responses.create({
+    const response = await openai.responses.stream({
       ...buildMainOpenAIResponsesOptions(stage),
       instructions: prompt.systemPrompt,
       input: [
@@ -152,7 +152,7 @@ async function repairOutlineBulletCounts(
           content: prompt.userPrompt,
         },
       ],
-    });
+    }).finalResponse();
 
     const repaired = parseOutlineJson(response.output_text, currentPayload);
 
@@ -201,7 +201,7 @@ async function repairOutlineReadiness(
     qualityIssueSummary: assessment.reasons.join(', '),
   });
 
-  const response = await openai.responses.create({
+  const response = await openai.responses.stream({
     ...buildMainOpenAIResponsesOptions(stage),
     instructions: prompt.systemPrompt,
     input: [
@@ -218,7 +218,7 @@ async function repairOutlineReadiness(
           : prompt.userPrompt,
       },
     ],
-  });
+  }).finalResponse();
 
   const repaired = parseOutlineJson(response.output_text, payload);
   const repairedAssessment = assessOutlineReadiness(repaired, {
@@ -255,7 +255,7 @@ async function reviewOutlineThemeAlignment(
     specialRequirements: options.specialRequirements,
   });
 
-  const response = await openai.responses.create({
+  const response = await openai.responses.stream({
     ...buildMainOpenAIResponsesOptions(stage),
     instructions: prompt.systemPrompt,
     input: [
@@ -270,7 +270,7 @@ async function reviewOutlineThemeAlignment(
         ],
       },
     ],
-  });
+  }).finalResponse();
 
   return parseOutlineThemeReview(response.output_text);
 }
@@ -309,7 +309,7 @@ async function repairOutlineThemeAlignment(
     qualityIssueSummary: `Theme drift review failed: ${review.reason || 'The title, research question, and outline do not answer the actual task requirements.'}`,
   });
 
-  const response = await openai.responses.create({
+  const response = await openai.responses.stream({
     ...buildMainOpenAIResponsesOptions(stage),
     instructions: prompt.systemPrompt,
     input: [
@@ -326,7 +326,7 @@ async function repairOutlineThemeAlignment(
           : prompt.userPrompt,
       },
     ],
-  });
+  }).finalResponse();
 
   const repaired = parseOutlineJson(response.output_text, payload);
   const repairedReview = await reviewOutlineThemeAlignment(stage, repaired, {
@@ -420,7 +420,7 @@ async function extractCourseCodeForTask(options: {
   });
 
   try {
-    const response = await openai.responses.create({
+    const response = await openai.responses.stream({
       ...buildMainOpenAIResponsesOptions('outline_generation'),
       instructions: prompt.systemPrompt,
       input: [
@@ -435,7 +435,7 @@ async function extractCourseCodeForTask(options: {
           ],
         },
       ],
-    });
+    }).finalResponse();
 
     return parseCourseCodeExtraction(typeof response.output_text === 'string' ? response.output_text : '');
   } catch {
@@ -674,7 +674,7 @@ export async function generateOutline(taskId: string, userId: string) {
       knownCourseCode: regexCourseCode,
     });
 
-    const response = await openai.responses.create({
+    const response = await openai.responses.stream({
       ...buildMainOpenAIResponsesOptions('outline_generation'),
       instructions: prompt.systemPrompt,
       input: [
@@ -689,7 +689,7 @@ export async function generateOutline(taskId: string, userId: string) {
           ],
         },
       ],
-    });
+    }).finalResponse();
 
     const content = response.output_text;
 
@@ -951,7 +951,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       editInstruction,
     });
 
-    const response = await openai.responses.create({
+    const response = await openai.responses.stream({
       ...buildMainOpenAIResponsesOptions('outline_regeneration'),
       instructions: prompt.systemPrompt,
       input: [
@@ -966,7 +966,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
           ],
         },
       ],
-    });
+    }).finalResponse();
 
     const content = response.output_text;
     const bulletFixed = await repairOutlineBulletCounts(

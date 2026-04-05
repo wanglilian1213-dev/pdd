@@ -588,7 +588,7 @@ async function repairReferenceIssues(
 
       const response = await withRewriteStageTimeout(
         'citation_verification',
-        openai.responses.create({
+        openai.responses.stream({
           ...buildMainOpenAIResponsesOptions('citation_verification'),
           instructions: buildReferenceRepairSystemPrompt(
             options.citationStyle,
@@ -601,7 +601,7 @@ async function repairReferenceIssues(
               content: current,
             },
           ],
-        }),
+        }).finalResponse(),
       );
 
       const repaired = typeof response.output_text === 'string' ? response.output_text : current;
@@ -705,7 +705,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
   const materialContent = await getOrUploadMaterialContent(input.taskId);
 
   const response = await withDraftGenerationTimeout(
-      openai.responses.create({
+      openai.responses.stream({
         ...buildMainOpenAIResponsesOptions('draft_generation'),
         instructions: buildDraftGenerationSystemPrompt(
           input.targetWords,
@@ -729,7 +729,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
             ],
           },
         ],
-      }),
+      }).finalResponse(),
     );
 
     let content = typeof response.output_text === 'string' ? response.output_text : '';
@@ -740,7 +740,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
 
     if (!assessment.valid) {
       const repairedResponse = await withDraftGenerationTimeout(
-        openai.responses.create({
+        openai.responses.stream({
           ...buildMainOpenAIResponsesOptions('draft_generation'),
           instructions: buildDraftGenerationSystemPrompt(
             input.targetWords,
@@ -766,7 +766,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
               ],
             },
           ],
-        }),
+        }).finalResponse(),
       );
 
       content = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : content;
@@ -849,7 +849,7 @@ async function calibrateWordCount(
       try {
         const response = await withRewriteStageTimeout(
           'word_calibration',
-          openai.responses.create({
+          openai.responses.stream({
             ...buildMainOpenAIResponsesOptions('word_calibration'),
             instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
             input: [
@@ -858,7 +858,7 @@ async function calibrateWordCount(
                 content: currentText,
               },
             ],
-          }),
+          }).finalResponse(),
         );
 
         calibrated = typeof response.output_text === 'string' ? response.output_text : currentText;
@@ -877,7 +877,7 @@ async function calibrateWordCount(
         try {
           const repairedResponse = await withRewriteStageTimeout(
             'word_calibration',
-            openai.responses.create({
+            openai.responses.stream({
               ...buildMainOpenAIResponsesOptions('word_calibration'),
               instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
               input: [
@@ -891,7 +891,7 @@ async function calibrateWordCount(
                   }),
                 },
               ],
-            }),
+            }).finalResponse(),
           );
 
           const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : currentText;
@@ -938,7 +938,7 @@ async function verifyCitations(
   try {
     const response = await withRewriteStageTimeout(
       'citation_verification',
-      openai.responses.create({
+      openai.responses.stream({
         ...buildMainOpenAIResponsesOptions('citation_verification'),
         instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
         input: [
@@ -947,7 +947,7 @@ async function verifyCitations(
             content: text,
           },
         ],
-      }),
+      }).finalResponse(),
     );
 
     verified = typeof response.output_text === 'string' ? response.output_text : text;
@@ -965,7 +965,7 @@ async function verifyCitations(
     try {
       const repairedResponse = await withRewriteStageTimeout(
         'citation_verification',
-        openai.responses.create({
+        openai.responses.stream({
           ...buildMainOpenAIResponsesOptions('citation_verification'),
           instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
           input: [
@@ -979,7 +979,7 @@ async function verifyCitations(
               }),
             },
           ],
-        }),
+        }).finalResponse(),
       );
 
       const repaired = typeof repairedResponse.output_text === 'string' ? repairedResponse.output_text : text;
@@ -1115,7 +1115,7 @@ export async function generateCitationReport(
   // Timeout here is an explicit failure — do not silently deliver a fake report.
   const response = await withRewriteStageTimeout(
     'citation_verification',
-    openai.responses.create({
+    openai.responses.stream({
       ...buildMainOpenAIResponsesOptions('citation_verification'),
       instructions: prompt.systemPrompt,
       input: [
@@ -1124,7 +1124,7 @@ export async function generateCitationReport(
           content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
         },
       ],
-    }),
+    }).finalResponse(),
   );
   const rawReportText = typeof response.output_text === 'string' ? response.output_text : '';
 
