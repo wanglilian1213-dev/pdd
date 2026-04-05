@@ -10,7 +10,7 @@ function buildRawEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     OPENAI_API_KEY: 'openai-key',
     OPENAI_MODEL: 'gpt-5.4',
     UNDETECTABLE_API_KEY: 'undetectable-key',
-    ALLOWED_ORIGINS: 'https://pindaidai.up.railway.app,http://localhost:3000',
+    ALLOWED_ORIGINS: 'https://pindaidai.uk,http://localhost:3000',
     OPS_WHITELIST_EMAILS: 'ops@example.com',
     PORT: '3001',
     NODE_ENV: 'test',
@@ -22,7 +22,7 @@ test('parseEnv accepts OPENAI_MODEL=gpt-5.4', () => {
   const env = parseEnv(buildRawEnv());
 
   assert.equal(env.openaiModel, 'gpt-5.4');
-  assert.deepEqual(env.allowedOrigins, ['https://pindaidai.up.railway.app', 'http://localhost:3000']);
+  assert.deepEqual(env.allowedOrigins, ['https://pindaidai.uk', 'http://localhost:3000']);
   assert.deepEqual(env.opsWhitelistEmails, ['ops@example.com']);
 });
 
