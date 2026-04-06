@@ -106,7 +106,7 @@ export async function createRevision(
   instructions: string,
   files: Express.Multer.File[],
 ) {
-  // 1. Check for active revision
+  // 1. 主动检查是否有进行中的修改（友好提示，唯一索引也会兜底）
   const { data: active } = await supabaseAdmin
     .from('revisions')
     .select('id')
@@ -118,12 +118,12 @@ export async function createRevision(
     throw new AppError(400, '您当前有一个正在处理的修改请求，请等待完成后再提交新的修改。');
   }
 
-  // 2. Estimate cost and freeze credits
+  // 2. 估算字数并计算冻结金额
   const pricePerK = parseInt(await getConfig('revision_price_per_1000') || '250', 10);
   const estimatedWords = estimateWordCount(files);
   const frozenAmount = computeCost(estimatedWords, pricePerK);
 
-  // 3. Insert revision record first (need ID for file paths)
+  // 3. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
   const { data: revision, error: insertError } = await supabaseAdmin
     .from('revisions')
     .insert({
@@ -136,30 +136,58 @@ export async function createRevision(
     .single();
 
   if (insertError || !revision) {
-    // Unique index violation means concurrent active revision
+    // 唯一索引冲突说明有并发的进行中修改
     if (insertError?.code === '23505') {
       throw new AppError(400, '您当前有一个正在处理的修改请求，请等待完成后再提交新的修改。');
     }
     throw new AppError(500, '创建修改请求失败。');
   }
 
+  // 4. 冻结积分（独立 try：冻结失败时还没有任何资金动作，直接清理记录即可）
   try {
-    // 4. Freeze credits
     await freezeCredits(userId, frozenAmount, 'revision', revision.id, '文章修改冻结积分');
+  } catch (freezeError) {
+    await supabaseAdmin.from('revisions').delete().eq('id', revision.id);
+    throw freezeError;
+  }
 
-    // 5. Upload files
+  // 5. 上传文件 + 启动异步执行（独立 try：失败时必须先 refund 再标记 failed，不能删除记录）
+  try {
     await uploadRevisionFiles(revision.id, files);
 
-    // 6. Start async execution (non-blocking)
+    // 启动异步执行（不阻塞响应）
     executeRevision(revision.id, userId).catch((err) => {
       captureError(err, 'revision.execute', { revisionId: revision.id });
     });
 
     return revision;
-  } catch (error) {
-    // Cleanup on failure
-    await supabaseAdmin.from('revisions').delete().eq('id', revision.id);
-    throw error;
+  } catch (uploadError) {
+    // 关键修复：先退款，再标记 failed（不删除，保留审计）
+    try {
+      await refundCredits(
+        userId,
+        frozenAmount,
+        'revision',
+        revision.id,
+        '材料上传失败自动退款',
+      );
+    } catch (refundError) {
+      captureError(refundError, 'revision.create_refund_failed', {
+        revisionId: revision.id,
+      });
+    }
+
+    await supabaseAdmin
+      .from('revisions')
+      .update({
+        status: 'failed',
+        failure_reason: '材料上传失败，积分已自动退回。',
+        refunded: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', revision.id);
+
+    throw uploadError;
   }
 }
 
@@ -169,16 +197,17 @@ export async function createRevision(
 
 export async function executeRevision(revisionId: string, userId: string) {
   let frozenCreditsAmount = 0;
+  let alreadySettled = false; // 关键：跟踪是否已经结算，避免重复退款 / 错误退款
 
   try {
     // 1. Load revision
-    const { data: revision } = await supabaseAdmin
+    const { data: revision, error: loadError } = await supabaseAdmin
       .from('revisions')
       .select('*')
       .eq('id', revisionId)
       .single();
 
-    if (!revision) throw new AppError(500, '修改记录不存在。');
+    if (loadError || !revision) throw new AppError(500, '修改记录不存在。');
     frozenCreditsAmount = revision.frozen_credits;
 
     // 2. Prepare material content for Claude
@@ -206,24 +235,14 @@ export async function executeRevision(revisionId: string, userId: string) {
       ],
     });
 
-    // 4. Extract result text
+    // 4. Extract result text + 计算实际成本（先算好但还不结算）
     const resultText = extractTextFromResponse(response);
     const wordCount = countWords(resultText);
-
-    // 5. Settle credits
     const pricePerK = parseInt(await getConfig('revision_price_per_1000') || '250', 10);
     const actualCost = computeCost(wordCount, pricePerK);
     const costToSettle = Math.min(actualCost, frozenCreditsAmount);
 
-    await settleCredits(userId, costToSettle);
-
-    // Refund excess if frozen > actual
-    const refundAmount = frozenCreditsAmount - costToSettle;
-    if (refundAmount > 0) {
-      await refundCredits(userId, refundAmount, 'revision', revisionId, '修改费用差额退还');
-    }
-
-    // 6. Generate Word document
+    // 5. Generate Word document
     const docBuffer = await buildFormattedPaperDocBuffer(resultText);
     const docFileName = `修改结果-${new Date().toISOString().slice(0, 10)}.docx`;
     const docStoragePath = `revisions/${revisionId}/${getNow()}-${docFileName}`;
@@ -231,6 +250,7 @@ export async function executeRevision(revisionId: string, userId: string) {
     const retentionDays = parseInt(await getConfig('result_file_retention_days') || '3', 10);
     const expiresAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000).toISOString();
 
+    // 6. 上传 Word 到 storage（必须检查错误）
     const { error: uploadError } = await supabaseAdmin.storage
       .from('task-files')
       .upload(docStoragePath, docBuffer, {
@@ -241,18 +261,27 @@ export async function executeRevision(revisionId: string, userId: string) {
       throw new AppError(500, '保存修改结果文件失败。');
     }
 
-    await supabaseAdmin.from('revision_files').insert({
-      revision_id: revisionId,
-      category: 'revision_output',
-      original_name: docFileName,
-      storage_path: docStoragePath,
-      file_size: docBuffer.length,
-      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      expires_at: expiresAt,
-    });
+    // 7. 写入 revision_files（必须检查错误，失败时清理已上传的存储文件）
+    const { error: insertFileError } = await supabaseAdmin
+      .from('revision_files')
+      .insert({
+        revision_id: revisionId,
+        category: 'revision_output',
+        original_name: docFileName,
+        storage_path: docStoragePath,
+        file_size: docBuffer.length,
+        mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        expires_at: expiresAt,
+      });
 
-    // 7. Update revision to completed
-    await supabaseAdmin
+    if (insertFileError) {
+      // 清理孤儿存储文件
+      await supabaseAdmin.storage.from('task-files').remove([docStoragePath]);
+      throw new AppError(500, '保存修改结果记录失败。');
+    }
+
+    // 8. 更新 revision 为 completed（必须检查错误）
+    const { error: updateError } = await supabaseAdmin
       .from('revisions')
       .update({
         status: 'completed',
@@ -262,9 +291,24 @@ export async function executeRevision(revisionId: string, userId: string) {
       })
       .eq('id', revisionId);
 
+    if (updateError) {
+      throw new AppError(500, '更新修改状态失败。');
+    }
+
+    // 9. 最后才结算积分（所有副作用已经稳定落库）
+    await settleCredits(userId, costToSettle);
+    alreadySettled = true;
+
+    // 10. 退差额（如果有）
+    const refundAmount = frozenCreditsAmount - costToSettle;
+    if (refundAmount > 0) {
+      await refundCredits(userId, refundAmount, 'revision', revisionId, '修改费用差额退还');
+    }
+
   } catch (error: unknown) {
-    // Refund on failure
-    if (frozenCreditsAmount > 0) {
+    // 关键修复：只有还没结算的情况下才能退完整 frozen
+    // 已经结算过的话（理论上不该走到这里，因为步骤 9 之后没有抛出点），不应再尝试退款
+    if (frozenCreditsAmount > 0 && !alreadySettled) {
       try {
         await refundCredits(
           userId,

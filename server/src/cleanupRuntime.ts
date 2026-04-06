@@ -8,6 +8,7 @@ import { captureError } from './lib/errorMonitor';
 
 export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;
+  cleanupStuckRevisions: () => Promise<void>;
   cleanupExpiredFiles: () => Promise<void>;
   cleanupExpiredMaterials: () => Promise<void>;
 }
@@ -129,6 +130,68 @@ async function cleanupStuckTasks() {
   }
 }
 
+async function cleanupStuckRevisions() {
+  const timeoutMinutes =
+    (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
+  const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
+
+  const { data: stuckRevisions } = await supabaseAdmin
+    .from('revisions')
+    .select('id, user_id, frozen_credits, refunded')
+    .eq('status', 'processing')
+    .lt('updated_at', cutoff);
+
+  if (!stuckRevisions || stuckRevisions.length === 0) {
+    console.log('[cleanup] No stuck revisions found.');
+    return;
+  }
+
+  for (const revision of stuckRevisions) {
+    console.log(`[cleanup] Processing stuck revision ${revision.id}`);
+
+    if (!revision.refunded && revision.frozen_credits > 0) {
+      try {
+        await refundCredits(
+          revision.user_id,
+          revision.frozen_credits,
+          'revision',
+          revision.id,
+          `卡住修改自动退款：${revision.frozen_credits} 积分`,
+        );
+        await supabaseAdmin
+          .from('revisions')
+          .update({
+            status: 'failed',
+            failure_reason: '修改处理超时，积分已自动退回。请重新提交。',
+            refunded: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', revision.id);
+      } catch (err) {
+        console.error(`[cleanup] Refund failed for revision ${revision.id}:`, err);
+        await supabaseAdmin
+          .from('revisions')
+          .update({
+            status: 'failed',
+            failure_reason: '修改超时，退款异常，请联系客服。',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', revision.id);
+      }
+    } else {
+      // 没冻结积分或已退过款，直接标记失败
+      await supabaseAdmin
+        .from('revisions')
+        .update({
+          status: 'failed',
+          failure_reason: '修改处理超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', revision.id);
+    }
+  }
+}
+
 async function cleanupExpiredFiles() {
   const count = await deleteExpiredFiles();
   console.log(`[cleanup] Deleted ${count} expired files.`);
@@ -228,6 +291,7 @@ async function cleanupExpiredMaterials() {
 export function createDefaultCleanupDeps(): CleanupDeps {
   return {
     cleanupStuckTasks,
+    cleanupStuckRevisions,
     cleanupExpiredFiles,
     cleanupExpiredMaterials,
   };
@@ -237,6 +301,7 @@ export async function runCleanupCycle(
   deps: CleanupDeps = createDefaultCleanupDeps(),
 ) {
   await deps.cleanupStuckTasks();
+  await deps.cleanupStuckRevisions();
   await deps.cleanupExpiredFiles();
   await deps.cleanupExpiredMaterials();
 }
