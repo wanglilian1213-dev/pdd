@@ -1,5 +1,4 @@
 import Anthropic from '@anthropic-ai/sdk';
-import mammoth from 'mammoth';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 
@@ -9,40 +8,18 @@ interface StoredRevisionFile {
   storage_path: string;
 }
 
-const IMAGE_EXTENSIONS = new Set([
-  'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif',
-]);
-const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown', 'rtf']);
-const WORD_EXTENSIONS = new Set(['doc', 'docx']);
+const IMAGE_EXTENSIONS: Record<string, 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+};
+const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown']);
 
 function getFileExtension(filename: string): string {
   const segments = filename.toLowerCase().split('.');
   return segments.length > 1 ? segments.pop() || '' : '';
-}
-
-function isImageFile(filename: string, mimeType: string | null): boolean {
-  if (mimeType?.startsWith('image/')) return true;
-  return IMAGE_EXTENSIONS.has(getFileExtension(filename));
-}
-
-function getMimeType(filename: string, mimeType: string | null, body: Blob): string {
-  if (mimeType) return mimeType;
-  if (body.type) return body.type;
-  const ext = getFileExtension(filename);
-  if (ext === 'jpg') return 'image/jpeg';
-  if (ext === 'jpeg') return 'image/jpeg';
-  if (ext === 'png') return 'image/png';
-  if (ext === 'webp') return 'image/webp';
-  if (ext === 'gif') return 'image/gif';
-  if (ext === 'pdf') return 'application/pdf';
-  if (ext === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-  if (ext === 'doc') return 'application/msword';
-  return 'application/octet-stream';
-}
-
-async function blobToBase64(blob: Blob): Promise<string> {
-  const buffer = Buffer.from(await blob.arrayBuffer());
-  return buffer.toString('base64');
 }
 
 async function downloadFromStorage(storagePath: string): Promise<Blob> {
@@ -65,6 +42,21 @@ const defaultDeps: RevisionMaterialDeps = {
   downloadFile: downloadFromStorage,
 };
 
+/**
+ * 把用户上传的材料文件转换为 Anthropic Messages API 的 ContentBlock 数组。
+ *
+ * 设计原则：**零本地预处理**。文件原封不动地以 base64/raw text 形式上送给上游 API，
+ * 不做任何文本抽取、格式转换、markdown 化。
+ *
+ * 支持的格式：
+ *  - PDF                       → document + base64 (application/pdf)
+ *  - PNG/JPG/WEBP/GIF 图片     → image + base64
+ *  - TXT/MD                    → document + text source（透传 raw text）
+ *
+ * 不支持的格式（含 doc/docx/rtf/odt）会在这里直接抛 400，由前端引导用户先导出为 PDF。
+ * 原因：`api.anthropic.com/v1/messages` 的 inline document block 只接受 application/pdf，
+ * 其他二进制格式会被上游拒绝。
+ */
 export async function prepareRevisionMaterialForClaude(
   files: StoredRevisionFile[],
   deps: RevisionMaterialDeps = defaultDeps,
@@ -72,60 +64,39 @@ export async function prepareRevisionMaterialForClaude(
   const blocks: Anthropic.ContentBlockParam[] = [];
 
   for (const file of files) {
-    const body = await deps.downloadFile(file.storage_path);
-    const mimeType = getMimeType(file.original_name, file.mime_type, body);
     const ext = getFileExtension(file.original_name);
+    const body = await deps.downloadFile(file.storage_path);
+    const buffer = Buffer.from(await body.arrayBuffer());
 
-    // 1) 图片 → image block
-    if (isImageFile(file.original_name, mimeType)) {
-      blocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-          data: await blobToBase64(body),
-        },
-      });
-      continue;
-    }
-
-    // 2) PDF → document base64（Claude inline 仅支持 application/pdf）
-    if (ext === 'pdf' || mimeType === 'application/pdf') {
+    // PDF —— 唯一支持的文档格式
+    if (ext === 'pdf' || file.mime_type === 'application/pdf') {
       blocks.push({
         type: 'document',
         source: {
           type: 'base64',
           media_type: 'application/pdf',
-          data: await blobToBase64(body),
+          data: buffer.toString('base64'),
         },
       });
       continue;
     }
 
-    // 3) Word → 用 mammoth 提取纯文本（Claude 不接受 docx 内联，pddapi.cc 也不代理 Files API）
-    if (WORD_EXTENSIONS.has(ext)) {
-      const buffer = Buffer.from(await body.arrayBuffer());
-      let text = '';
-      try {
-        const result = await mammoth.extractRawText({ buffer });
-        text = result.value || '';
-      } catch (err) {
-        throw new AppError(400, `无法解析 Word 文件 ${file.original_name}，请尝试转为 PDF 后上传。`);
-      }
-      if (!text.trim()) {
-        throw new AppError(400, `Word 文件 ${file.original_name} 内容为空。`);
-      }
+    // 图片
+    if (ext in IMAGE_EXTENSIONS) {
       blocks.push({
-        type: 'document',
-        source: { type: 'text', media_type: 'text/plain', data: text } as any,
-        title: file.original_name,
-      } as any);
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: IMAGE_EXTENSIONS[ext],
+          data: buffer.toString('base64'),
+        },
+      });
       continue;
     }
 
-    // 4) 纯文本（txt/md/rtf 等）→ document + text source
-    if (TEXT_EXTENSIONS.has(ext) || mimeType.startsWith('text/')) {
-      const text = await body.text();
+    // 纯文本
+    if (TEXT_EXTENSIONS.has(ext) || (file.mime_type?.startsWith('text/') ?? false)) {
+      const text = buffer.toString('utf8');
       if (!text.trim()) {
         throw new AppError(400, `文件 ${file.original_name} 内容为空。`);
       }
@@ -137,10 +108,10 @@ export async function prepareRevisionMaterialForClaude(
       continue;
     }
 
-    // 5) 其他不支持的格式明确拒绝
+    // 其他格式（含 doc/docx/rtf/odt）一律拒绝
     throw new AppError(
       400,
-      `不支持的文件类型：${file.original_name}。请上传 PDF、Word(.doc/.docx)、纯文本或图片。`,
+      `不支持的文件类型：${file.original_name}。当前仅支持 PDF、PNG/JPG/WEBP/GIF 图片、TXT/MD 纯文本。请将 Word 文档导出为 PDF 后再上传。`,
     );
   }
 

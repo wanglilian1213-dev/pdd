@@ -156,13 +156,42 @@ export default function Revision() {
     };
   }, [startPolling, stopPolling]);
 
+  // --- File validation ---
+  // 后端走 Anthropic Messages API，inline document 只接受 application/pdf。
+  // Word 文件必须先导出为 PDF；这里在客户端就拦截，避免上传后才报错。
+  const ALLOWED_EXTENSIONS = new Set([
+    'pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'txt', 'md', 'markdown',
+  ]);
+  const REJECTED_WORD_EXTENSIONS = new Set(['doc', 'docx', 'rtf', 'odt']);
+
+  const filterAndValidateFiles = useCallback((incoming: File[]): File[] => {
+    const accepted: File[] = [];
+    for (const f of incoming) {
+      const ext = f.name.toLowerCase().split('.').pop() || '';
+      if (REJECTED_WORD_EXTENSIONS.has(ext)) {
+        setError(`暂不支持 Word/RTF/ODT 格式（${f.name}），请将文档另存为 PDF 后上传。`);
+        continue;
+      }
+      if (!ALLOWED_EXTENSIONS.has(ext)) {
+        setError(`不支持的文件类型：${f.name}。仅支持 PDF、PNG/JPG/WEBP/GIF 图片、TXT/MD 文本。`);
+        continue;
+      }
+      accepted.push(f);
+    }
+    return accepted;
+  }, []);
+
   // --- File handlers ---
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      setFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+      const valid = filterAndValidateFiles(Array.from(e.target.files));
+      if (valid.length > 0) {
+        setError(null);
+        setFiles(prev => [...prev, ...valid]);
+      }
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
+  }, [filterAndValidateFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -178,8 +207,12 @@ export default function Revision() {
     e.preventDefault();
     setIsDragging(false);
     const droppedFiles = Array.from(e.dataTransfer.files);
-    setFiles(prev => [...prev, ...droppedFiles]);
-  }, []);
+    const valid = filterAndValidateFiles(droppedFiles);
+    if (valid.length > 0) {
+      setError(null);
+      setFiles(prev => [...prev, ...valid]);
+    }
+  }, [filterAndValidateFiles]);
 
   const removeFile = useCallback((index: number) => {
     setFiles(prev => prev.filter((_, i) => i !== index));
@@ -394,13 +427,16 @@ export default function Revision() {
                 拖拽文件到此处，或<span className="text-red-700 font-medium">点击选择</span>
               </p>
               <p className="text-xs text-gray-400 mt-1">
-                支持 Word、PDF、图片，最多 10 个文件，每个不超过 20MB
+                支持 PDF、PNG/JPG/WEBP/GIF 图片、TXT/MD 文本，最多 10 个文件，每个不超过 20MB
+              </p>
+              <p className="text-xs text-amber-600 mt-1">
+                Word 文档请先在 Word 里"导出为 PDF"后再上传。
               </p>
               <input
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept=".docx,.doc,.pdf,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tiff,.tif,.heic,.heif"
+                accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md"
                 onChange={handleFileChange}
                 className="hidden"
               />
