@@ -7,3 +7,5 @@ dist/
 .DS_Store
 .playwright-mcp/
 docs/private/
+.claude/
+tmp-check/
