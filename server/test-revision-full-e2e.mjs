@@ -2,10 +2,16 @@
 import { createClient } from '@supabase/supabase-js';
 import { writeFileSync, readFileSync } from 'fs';
 
-const SUPABASE_URL = 'https://rjnfctvauewstngqbvrz.supabase.co';
-const SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqbmZjdHZhdWV3c3RuZ3FidnJ6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MzY2Nzk0MSwiZXhwIjoyMDg5MjQzOTQxfQ.DtxJLrDWQEcXawEwODZHAGcoqMgKp63hAUq7z1aclrI';
-const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqbmZjdHZhdWV3c3RuZ3FidnJ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2Njc5NDEsImV4cCI6MjA4OTI0Mzk0MX0.hko2P3G8xAqweNifjWxwOJzFfj2UaApPFROoEVPkDQE';
-const API = 'https://app-production-c8a4.up.railway.app';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const API = process.env.E2E_API_URL;
+
+if (!SUPABASE_URL || !SERVICE_KEY || !ANON_KEY || !API) {
+  console.error('[e2e] ❌ 缺少环境变量。需要设置：SUPABASE_URL、SUPABASE_SERVICE_KEY、SUPABASE_ANON_KEY、E2E_API_URL');
+  console.error('[e2e]    建议用法：set -a && source .env.e2e && set +a && node test-revision-full-e2e.mjs');
+  process.exit(1);
+}
 
 const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
