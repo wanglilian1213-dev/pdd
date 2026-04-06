@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import mammoth from 'mammoth';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 
@@ -11,6 +12,8 @@ interface StoredRevisionFile {
 const IMAGE_EXTENSIONS = new Set([
   'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif',
 ]);
+const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown', 'rtf']);
+const WORD_EXTENSIONS = new Set(['doc', 'docx']);
 
 function getFileExtension(filename: string): string {
   const segments = filename.toLowerCase().split('.');
@@ -71,27 +74,74 @@ export async function prepareRevisionMaterialForClaude(
   for (const file of files) {
     const body = await deps.downloadFile(file.storage_path);
     const mimeType = getMimeType(file.original_name, file.mime_type, body);
-    const base64 = await blobToBase64(body);
+    const ext = getFileExtension(file.original_name);
 
+    // 1) 图片 → image block
     if (isImageFile(file.original_name, mimeType)) {
       blocks.push({
         type: 'image',
         source: {
           type: 'base64',
           media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-          data: base64,
+          data: await blobToBase64(body),
         },
       });
-    } else {
+      continue;
+    }
+
+    // 2) PDF → document base64（Claude inline 仅支持 application/pdf）
+    if (ext === 'pdf' || mimeType === 'application/pdf') {
       blocks.push({
         type: 'document',
         source: {
           type: 'base64',
-          media_type: mimeType as any,
-          data: base64,
+          media_type: 'application/pdf',
+          data: await blobToBase64(body),
         },
       });
+      continue;
     }
+
+    // 3) Word → 用 mammoth 提取纯文本（Claude 不接受 docx 内联，pddapi.cc 也不代理 Files API）
+    if (WORD_EXTENSIONS.has(ext)) {
+      const buffer = Buffer.from(await body.arrayBuffer());
+      let text = '';
+      try {
+        const result = await mammoth.extractRawText({ buffer });
+        text = result.value || '';
+      } catch (err) {
+        throw new AppError(400, `无法解析 Word 文件 ${file.original_name}，请尝试转为 PDF 后上传。`);
+      }
+      if (!text.trim()) {
+        throw new AppError(400, `Word 文件 ${file.original_name} 内容为空。`);
+      }
+      blocks.push({
+        type: 'document',
+        source: { type: 'text', media_type: 'text/plain', data: text } as any,
+        title: file.original_name,
+      } as any);
+      continue;
+    }
+
+    // 4) 纯文本（txt/md/rtf 等）→ document + text source
+    if (TEXT_EXTENSIONS.has(ext) || mimeType.startsWith('text/')) {
+      const text = await body.text();
+      if (!text.trim()) {
+        throw new AppError(400, `文件 ${file.original_name} 内容为空。`);
+      }
+      blocks.push({
+        type: 'document',
+        source: { type: 'text', media_type: 'text/plain', data: text } as any,
+        title: file.original_name,
+      } as any);
+      continue;
+    }
+
+    // 5) 其他不支持的格式明确拒绝
+    throw new AppError(
+      400,
+      `不支持的文件类型：${file.original_name}。请上传 PDF、Word(.doc/.docx)、纯文本或图片。`,
+    );
   }
 
   return blocks;
