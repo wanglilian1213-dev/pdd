@@ -134,6 +134,8 @@ npx -y @aisuite/chub annotate --list
 - 下载规则：任务列表里的单个"下载"按钮固定代表"下载主文稿"，优先顺序是 `humanized_doc` → `final_doc` → `citation_report`
 - 文章修改规则：文章修改功能与主写作流程完全独立，走 Anthropic Claude API（`claude-opus-4-6-20250414`，开启 extended thinking），同一时间一个用户只能有一个进行中的修改请求
 - 文章修改计费规则：每 1000 字收费 250 积分（由 `system_config.revision_price_per_1000` 控制），按修改后的文章字数计费，不足 1000 字按 1000 字计；失败必须自动退款
+- 文章修改结算顺序规则：`settleCredits` 必须在所有副作用（Word 生成、storage 上传、`revision_files` 写入、`revisions` 状态更新）都稳定落库之后才能调用；任何在结算之后抛出的异常都会导致"失败单已收费"，因为 catch 块没法再正确退款。同理 `createRevision` 里冻结成功后的任何前置失败必须先 `refundCredits` 再处理记录，绝不允许直接删除带冻结的记录
+- 文章修改卡死回收规则：`revisions` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckRevisions` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标记 failed，避免服务重启 / 进程崩溃后冻结积分永久卡住
 - 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败
 - 安全规则：前端 Supabase 地址和公开 key 只能从环境变量读取，不能再在源码里写真实兜底值
 - 安全规则：后端跨域白名单必须走 `ALLOWED_ORIGINS`，不能再全开放

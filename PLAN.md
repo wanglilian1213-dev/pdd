@@ -117,13 +117,26 @@
 - [x] 工作台前端入口已接上
 - [x] 降 AI 已切到 Undetectable Humanization API
 
+### 文章修改（独立功能，2026-04-06 上线）
+
+- [x] 数据库迁移：`revisions` + `revision_files` 表 + `revision_price_per_1000` 配置
+- [x] 后端：Anthropic SDK 接入，`claude-opus-4-6-20250414` 开启 extended thinking
+- [x] 后端：`revisionService` + `revisionMaterialService` + `routes/revision.ts`
+- [x] 前端：侧边栏 `/dashboard/revision` 入口 + `Revision.tsx` 三状态页面（输入 / 处理中 / 完成）
+- [x] 计费：250 积分 / 1000 字，复用现有 wallet RPC（freeze → settle → 差额 refund）
+- [x] 同一时间一个用户只能一个 processing（唯一部分索引兜底）
+- [x] 失败自动退款：上传失败、API 失败、Word 生成失败都走 refund + 标记 failed
+- [x] settle 顺序：所有副作用（storage、DB 写）稳定落库后才结算，避免"失败单已收费"
+- [x] 卡死兜底：cleanup 服务新增 `cleanupStuckRevisions`，超时自动 refund + failed
+- [x] Railway `app` + `cleanup` 已配置 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`
+
 ### 线上环境
 
 - [x] Railway 已有项目 `glistening-achievement`
 - [x] Railway 已有 `app`、`cleanup`、`拼代代前端` 三个服务
 - [x] 前端线上域名可访问
 - [x] 后端 `/health` 正常
-- [x] 主写作链路统一使用 OpenAI Responses API + `gpt-5.4`
+- [x] 主写作链路统一使用 OpenAI Responses API + `gpt-5.4`（已改为 streaming 模式避免 Cloudflare 524 超时）
 - [x] `cleanup` 服务启动时会打印独立入口标识，便于线上核对是否真的跑在清理入口
 - [x] Railway `cleanup` 服务启动命令已核对为 `npm run start:cleanup`
 - [x] 清理服务不再误杀 `outline_ready` 的待确认大纲任务
