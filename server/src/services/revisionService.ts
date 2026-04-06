@@ -215,7 +215,7 @@ export async function executeRevision(revisionId: string, userId: string) {
 
     // 3. Call Anthropic API with extended thinking
     const response = await anthropic.messages.create({
-      model: 'claude-opus-4-6-20250414',
+      model: 'claude-opus-4-6',
       max_tokens: 16000,
       thinking: {
         type: 'enabled',
