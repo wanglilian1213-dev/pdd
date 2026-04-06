@@ -68,8 +68,12 @@ async function uploadRevisionFiles(
   revisionId: string,
   files: Express.Multer.File[],
 ): Promise<void> {
-  for (const file of files) {
-    const storagePath = `revisions/${revisionId}/${getNow()}-${file.originalname}`;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    // Supabase Storage 路径必须 ASCII；用户原文件名可能含中文，所以只用扩展名 + 索引
+    const ext = (file.originalname.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const safeExt = ext.length > 0 && ext.length <= 8 ? ext : 'bin';
+    const storagePath = `revisions/${revisionId}/material-${getNow()}-${i}.${safeExt}`;
 
     const { error: uploadError } = await supabaseAdmin.storage
       .from('task-files')
@@ -213,14 +217,17 @@ export async function executeRevision(revisionId: string, userId: string) {
     // 2. Prepare material content for Claude
     const materialBlocks = await getRevisionMaterialContent(revisionId);
 
-    // 3. Call Anthropic API with extended thinking
+    // 3. Call Anthropic API with adaptive extended thinking + max effort
+    //    Opus 4.6 推荐写法：thinking.adaptive + output_config.effort=max
+    //    （旧写法 thinking.enabled+budget_tokens 已 deprecated）
+    //    output_config 是 SDK 类型尚未补齐的新字段，用 spread + as any 透传
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 16000,
       thinking: {
-        type: 'enabled',
-        budget_tokens: 10000,
-      },
+        type: 'adaptive',
+      } as any,
+      ...({ output_config: { effort: 'max' } } as any),
       messages: [
         {
           role: 'user',
@@ -244,8 +251,10 @@ export async function executeRevision(revisionId: string, userId: string) {
 
     // 5. Generate Word document
     const docBuffer = await buildFormattedPaperDocBuffer(resultText);
+    // 面向用户的展示名（下载文件名）可以用中文
     const docFileName = `修改结果-${new Date().toISOString().slice(0, 10)}.docx`;
-    const docStoragePath = `revisions/${revisionId}/${getNow()}-${docFileName}`;
+    // 但 Supabase Storage 路径必须纯 ASCII，否则上传会被拒绝
+    const docStoragePath = `revisions/${revisionId}/revised-${getNow()}.docx`;
 
     const retentionDays = parseInt(await getConfig('result_file_retention_days') || '3', 10);
     const expiresAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000).toISOString();
