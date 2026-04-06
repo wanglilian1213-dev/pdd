@@ -173,6 +173,77 @@ AI tools are here to stay. Engineers must adapt.
   const getJson = await getRes.json();
   log('13. get by id status:', getJson.data?.revision?.status || getJson.revision?.status);
 
+  // ----- 不支持文件类型的前置拒绝（Codex finding #2 回归测试） -----
+
+  // 辅助：拍快照后跑一次"应该失败"的提交，校验没有任何副作用
+  async function expectRejectedUpload(label, fileEntries) {
+    log(`${label}: snapshotting state then submitting bad upload...`);
+
+    const { count: revisionsBefore } = await admin
+      .from('revisions')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+    const { data: walletBefore } = await admin
+      .from('wallets')
+      .select('balance, frozen')
+      .eq('user_id', userId)
+      .single();
+
+    const fd = new FormData();
+    fd.append('instructions', 'should be rejected before any side effect');
+    for (const [name, mime, body] of fileEntries) {
+      fd.append('files', new Blob([body], { type: mime }), name);
+    }
+
+    const res = await fetch(`${API}/api/revision/create`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${jwt}` },
+      body: fd,
+    });
+    const json = await res.json();
+    log(`   status=${res.status} body=${JSON.stringify(json).slice(0, 200)}`);
+
+    if (res.status !== 400) fail(`${label}: expected 400, got ${res.status}`);
+    if (!/不支持的文件类型/.test(json.error || '')) {
+      fail(`${label}: expected error to mention 不支持的文件类型, got ${json.error}`);
+    }
+
+    const { count: revisionsAfter } = await admin
+      .from('revisions')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId);
+    if (revisionsAfter !== revisionsBefore) {
+      fail(`${label}: revisions row count changed (${revisionsBefore} → ${revisionsAfter}) — request should not have created a row`);
+    }
+
+    const { data: walletAfter } = await admin
+      .from('wallets')
+      .select('balance, frozen')
+      .eq('user_id', userId)
+      .single();
+    if (walletAfter.balance !== walletBefore.balance || walletAfter.frozen !== walletBefore.frozen) {
+      fail(`${label}: wallet changed (balance ${walletBefore.balance}→${walletAfter.balance}, frozen ${walletBefore.frozen}→${walletAfter.frozen}) — bad upload must not move money`);
+    }
+
+    log(`   ✅ ${label} cleanly rejected, no side effects`);
+  }
+
+  log('14. Reject .docx upload before any side effect');
+  await expectRejectedUpload('14', [
+    ['paper.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'fake docx body'],
+  ]);
+
+  log('15. Reject .rtf upload before any side effect');
+  await expectRejectedUpload('15', [
+    ['paper.rtf', 'application/rtf', '{\\rtf1 fake rtf}'],
+  ]);
+
+  log('16. Reject mixed pdf+docx (whole batch must be rejected)');
+  await expectRejectedUpload('16', [
+    ['ok.pdf', 'application/pdf', '%PDF-1.4 fake'],
+    ['bad.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'fake'],
+  ]);
+
   log('\n✅ ALL END-TO-END TESTS PASSED');
   log('   Revision ID:', revisionId);
   log('   Final word count:', finalRevision.word_count);
