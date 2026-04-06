@@ -477,6 +477,8 @@ Every reference must be from 2020 onwards.
 Every reference must be an academic scholar paper.
 Do not use book sources. References must be academic scholar papers, not books.
 
+You have access to the web_search tool. Before writing any in-text citation or any entry in the references section, you MUST use web_search to verify that the cited work actually exists. Search for the exact title, the author name combined with the year, and the DOI when possible. Only cite a work after web_search returns a credible match (a publisher page, a Crossref entry, a journal landing page, or an indexed scholarly database). If web_search cannot find a real source for a claim, weaken or remove the claim instead of inventing a citation. Never fabricate authors, titles, journals, years, DOIs, or URLs. Every reference in the final references section must correspond to a real paper that you confirmed via web_search during this turn.
+
 The reasoning effort should be high.
 Think very hard and deep.
 Make sure the answer is detailed, specific, and comprehensive.
@@ -533,6 +535,9 @@ export function buildCitationVerificationSystemPrompt(citationStyle: string, req
 Keep at least ${requiredReferenceCount} references.
 All references must be from 2020 onwards.
 All references must remain academic scholar paper sources, not book sources.
+
+You have access to the web_search tool. For every reference in the references section, you MUST use web_search to verify that the work actually exists (search for title, author+year, or DOI). If web_search confirms the work, keep it and ensure the formatting matches ${citationStyle}. If web_search cannot find the work, replace it with a real paper that supports the same in-text claim, found via web_search. Never leave a fabricated reference in the paper. Never invent DOIs, URLs, journals, or author names.
+
 Fix any formatting issues. Output the corrected paper text only.
 Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
 Return clean academic prose only.`;
