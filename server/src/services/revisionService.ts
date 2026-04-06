@@ -3,7 +3,11 @@ import { anthropic } from '../lib/anthropic';
 import { AppError } from '../lib/errors';
 import { freezeCredits, settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
-import { getRevisionMaterialContent } from './revisionMaterialService';
+import {
+  getRevisionMaterialContent,
+  SUPPORTED_REVISION_EXTENSIONS,
+  getFileExtension,
+} from './revisionMaterialService';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { captureError } from '../lib/errorMonitor';
 
@@ -16,6 +20,22 @@ export type RevisionStatus = 'processing' | 'completed' | 'failed';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * 文件类型白名单校验。在 createRevision 第一步调用，确保不支持的格式
+ * 在建单/冻结/上传任何副作用之前就被 400 拒绝。
+ */
+export function validateRevisionFileTypes(files: Express.Multer.File[]): void {
+  for (const file of files) {
+    const ext = getFileExtension(file.originalname);
+    if (!SUPPORTED_REVISION_EXTENSIONS.has(ext)) {
+      throw new AppError(
+        400,
+        `不支持的文件类型：${file.originalname}。当前仅支持 PDF、PNG/JPG/WEBP/GIF 图片、TXT/MD 纯文本。请将 Word 文档导出为 PDF 后再上传。`,
+      );
+    }
+  }
+}
 
 function estimateWordCount(files: Express.Multer.File[]): number {
   let total = 0;
@@ -110,6 +130,9 @@ export async function createRevision(
   instructions: string,
   files: Express.Multer.File[],
 ) {
+  // 0. 文件类型白名单（前置校验：在建单、冻结、上传前就拒绝）
+  validateRevisionFileTypes(files);
+
   // 1. 主动检查是否有进行中的修改（友好提示，唯一索引也会兜底）
   const { data: active } = await supabaseAdmin
     .from('revisions')

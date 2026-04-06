@@ -8,16 +8,24 @@ interface StoredRevisionFile {
   storage_path: string;
 }
 
-const IMAGE_EXTENSIONS: Record<string, 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'> = {
+export const IMAGE_EXTENSIONS: Record<string, 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'> = {
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
   gif: 'image/gif',
 };
-const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown']);
+export const TEXT_EXTENSIONS = new Set(['txt', 'md', 'markdown']);
+export const PDF_EXTENSION = 'pdf';
 
-function getFileExtension(filename: string): string {
+// 统一白名单：revisionService 在建单前用它做前置校验，避免坏文件混进后台流程
+export const SUPPORTED_REVISION_EXTENSIONS = new Set<string>([
+  PDF_EXTENSION,
+  ...Object.keys(IMAGE_EXTENSIONS),
+  ...TEXT_EXTENSIONS,
+]);
+
+export function getFileExtension(filename: string): string {
   const segments = filename.toLowerCase().split('.');
   return segments.length > 1 ? segments.pop() || '' : '';
 }
