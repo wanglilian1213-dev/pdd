@@ -1,20 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMainOpenAIResponsesOptions, type MainOpenAIStage } from './openaiMainConfig';
+import { buildMainOpenAIResponsesOptions, type MainOpenAIStage, type ReasoningEffort } from './openaiMainConfig';
 import { env } from './runtimeEnv';
 
-const expectedEffortByStage: Record<MainOpenAIStage, 'medium' | 'high'> = {
+const expectedEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
   outline_generation: 'medium',
   outline_regeneration: 'medium',
   outline_translation: 'medium',
-  draft_generation: 'high',
+  draft_generation: 'xhigh',
   word_calibration: 'medium',
   citation_verification: 'medium',
 };
 
 for (const [stage, expectedEffort] of Object.entries(expectedEffortByStage) as Array<[
   MainOpenAIStage,
-  'medium' | 'high',
+  ReasoningEffort,
 ]>) {
   test(`buildMainOpenAIResponsesOptions uses current env model and reasoning for ${stage}`, () => {
     const options = buildMainOpenAIResponsesOptions(stage);

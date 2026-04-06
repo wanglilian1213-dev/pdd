@@ -9,6 +9,7 @@ function buildRawEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
     OPENAI_API_KEY: 'openai-key',
     OPENAI_MODEL: 'gpt-5.4',
+    ANTHROPIC_API_KEY: 'anthropic-key',
     UNDETECTABLE_API_KEY: 'undetectable-key',
     ALLOWED_ORIGINS: 'https://pindaidai.uk,http://localhost:3000',
     OPS_WHITELIST_EMAILS: 'ops@example.com',
