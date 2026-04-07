@@ -959,6 +959,9 @@ export default function Workspace() {
                     <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-2">
                       <Bot className="w-5 h-5 text-red-700" /> 觉得 AI 痕迹过重？
                     </h3>
+                    <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                      请注意：自动降AI有可能会导致文章字数膨胀，如需精准润色降AI / 获取 Turnitin AI 检测报告请联系客服。
+                    </p>
                     <p className="text-sm text-gray-600 mb-6">
                       您可以使用自动降AI功能，系统将重写部分文本结构以降低检测率。
                     </p>
