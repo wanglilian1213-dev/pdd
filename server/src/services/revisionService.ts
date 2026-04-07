@@ -265,6 +265,16 @@ export async function executeRevision(revisionId: string, userId: string) {
       ],
     });
 
+    // 验证 extended thinking 是否真的被上游执行：sub2api 不会动 thinking 字段，
+    // 但如果 model id 在 normalize 阶段被映射成不支持 adaptive 的版本，会被静默忽略。
+    // thinking_blocks > 0 → 已生效；= 0 → 切 explicit 模式 {type:'enabled',budget_tokens:8000}
+    const thinkingBlocks = response.content.filter((b) => (b as any).type === 'thinking');
+    console.log(
+      `[revision] anthropic response: stop=${response.stop_reason}, ` +
+        `blocks=${response.content.length}, thinking_blocks=${thinkingBlocks.length}, ` +
+        `usage=${JSON.stringify(response.usage)}`,
+    );
+
     // 4. Extract result text + 计算实际成本（先算好但还不结算）
     const resultText = extractTextFromResponse(response);
     const wordCount = countWords(resultText);
