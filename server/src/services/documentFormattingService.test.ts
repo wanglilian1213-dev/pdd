@@ -149,6 +149,26 @@ This is the first real body paragraph.`, {
   assert.equal(model.paragraphs.some((paragraph) => paragraph.text.includes('.txt')), false);
 });
 
+test('buildPaperLayoutModel preserves leading numbering inside markdown table cells when enableMedia is on', () => {
+  const model = buildPaperLayoutModel(
+    `研究方法步骤
+
+| 步骤 | 描述 |
+| --- | --- |
+| 1. 准备 | 收集材料 |
+| 2. 执行 | 实施方案 |`,
+    { enableMedia: true },
+  );
+
+  const tableParagraph = model.paragraphs.find((paragraph) => paragraph.kind === 'table');
+  assert.ok(tableParagraph, 'expected a table paragraph');
+  assert.deepEqual(tableParagraph?.tableRows, [
+    ['步骤', '描述'],
+    ['1. 准备', '收集材料'],
+    ['2. 执行', '实施方案'],
+  ]);
+});
+
 test('buildPaperLayoutModel removes a duplicated first body title even when punctuation style differs slightly', () => {
   const model = buildPaperLayoutModel(`The Impact of Social Media Use on University Students’ Mental Health
 

@@ -156,7 +156,17 @@ function cleanInlineFormatting(value: string) {
     .trim();
 }
 
-function splitIntoBlocks(text: string) {
+/**
+ * 切分文本为段落块。**保留原始行**（不剥离 `1. ` / `# ` / `- ` 等 markdown 前缀），
+ * 这样表格 cell 里的编号（"1. 准备"）不会被悄悄吞掉。
+ *
+ * 下游使用约定：
+ *  - 表格 / chart placeholder 检测必须用原始行
+ *  - heading 检测和 body paragraph 构建必须先调 `stripBlockMarkers` 把前缀剥掉
+ *    （`buildParagraph` 内部还会再走 `parseInlineRuns` → `stripLeadingMarkdownSyntax`，
+ *    所以 body 路径其实可以省一次显式剥离，但显式更清晰）
+ */
+function splitIntoBlocks(text: string): string[][] {
   const normalized = text.replace(/\r\n/g, '\n').trim();
   if (!normalized) {
     return [];
@@ -166,9 +176,16 @@ function splitIntoBlocks(text: string) {
     .split(/\n\s*\n/)
     .map((block) => block
       .split('\n')
-      .map((line) => stripLeadingMarkdownSyntax(line))
-      .filter(Boolean))
+      .map((line) => line.replace(/\s+$/g, ''))
+      .filter((line) => line.trim().length > 0))
     .filter((lines) => lines.length > 0);
+}
+
+/** 把一个 raw block 的每一行剥掉 markdown 前缀。仅供 heading 检测/正文构建使用。 */
+function stripBlockMarkers(rawBlock: string[]): string[] {
+  return rawBlock
+    .map((line) => stripLeadingMarkdownSyntax(line))
+    .filter(Boolean);
 }
 
 function isReferenceHeading(text: string) {
@@ -421,10 +438,12 @@ export function buildPaperLayoutModel(text: string, options: PaperLayoutOptions 
   const { bodyBlocks, referenceHeading, referenceBlocks } = findReferenceSections(remainingBlocks);
   let bodyStarted = false;
 
-  for (const block of bodyBlocks) {
+  for (const rawBlock of bodyBlocks) {
     // 媒体路径专用：chart 占位 token 独占一段 → chart_image
-    if (options.enableMedia && isChartPlaceholderBlock(block)) {
-      const paragraph = buildChartImageParagraphModel(block[0]!.trim());
+    // 用 raw lines 检测：占位 token 形如 [[CHART_PLACEHOLDER_N]]，不带 markdown 前缀，
+    // 用 raw 还是 stripped 都能匹配
+    if (options.enableMedia && isChartPlaceholderBlock(rawBlock)) {
+      const paragraph = buildChartImageParagraphModel(rawBlock[0]!.trim());
       if (!bodyStarted) {
         paragraph.pageBreakBefore = true;
         bodyStarted = true;
@@ -435,8 +454,10 @@ export function buildPaperLayoutModel(text: string, options: PaperLayoutOptions 
 
     // 媒体路径专用：markdown 表格 → table（必须在 heading 检测之前，
     // 否则单行表格头会被误识别为 heading）
-    if (options.enableMedia && isTableBlock(block)) {
-      const rows = parseTableBlock(block);
+    // 关键：必须用 raw lines 调 parseTableBlock，否则 cell 里的 "1. 准备" 会被
+    // stripLeadingMarkdownSyntax 吞成 "准备"，论文里的步骤表/阶段表编号会无声丢失。
+    if (options.enableMedia && isTableBlock(rawBlock)) {
+      const rows = parseTableBlock(rawBlock);
       if (rows.length > 0) {
         const paragraph = buildTableParagraphModel(rows);
         if (!bodyStarted) {
@@ -447,6 +468,10 @@ export function buildPaperLayoutModel(text: string, options: PaperLayoutOptions 
         continue;
       }
     }
+
+    // 非媒体路径：剥离 markdown 前缀后再做 heading / body 分类
+    const block = stripBlockMarkers(rawBlock);
+    if (block.length === 0) continue;
 
     if (isHeadingBlock(block)) {
       const paragraph = buildParagraph('heading', normalizeBlockText(block));
@@ -582,15 +607,27 @@ function buildChartNodes(rendered: RenderedChart | undefined): Paragraph[] {
     ];
   }
 
-  // 渲染失败兜底：用斜体提示句占位，整篇文档不会因为单图失败而 fail
+  // 渲染失败兜底：用两段斜体提示占位（按用户决定：允许部分成功，整篇照常交付）
   const title = rendered?.spec.title || '图表';
   return [
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      spacing: { before: 240, after: 240 },
+      spacing: { before: 240, after: 60 },
       children: [
         new TextRun({
-          text: `${title}（图表暂时无法渲染，请稍后重试）`,
+          text: title,
+          italics: true,
+          font: FONT_FAMILY,
+          size: DOCX_FONT_SIZE,
+        }),
+      ],
+    }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 240 },
+      children: [
+        new TextRun({
+          text: '（图表暂时无法渲染，请稍后重试或联系客服）',
           italics: true,
           font: FONT_FAMILY,
           size: DOCX_FONT_SIZE,

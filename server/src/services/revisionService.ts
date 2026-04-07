@@ -51,12 +51,22 @@ const REVISION_SYSTEM_PROMPT = `你是一名严谨的学术论文修改助手。
 }
 [CHART_END]
 
-DSL 要求：
-- chartjs 字段必须是合法的 Chart.js v3 JSON 配置（type / data / options）
-- title 中文论文用「图 N：xxx」，英文论文用「Figure N: xxx」，按图表出现顺序编号
+DSL 硬性规则（违反任何一条都会导致图渲染失败）：
+- chartjs 字段必须是合法的 Chart.js v3 JSON 配置（type / data / options），不能出现 callbacks、函数字符串、未在下方列出的字段
+- chartjs.type 必须是以下之一，其他类型一律禁止：line / bar / pie / doughnut / radar / scatter / bubble / polarArea
+- chartjs.data.labels 必须是字符串数组，长度 ≤ 50，每个字符串 ≤ 80 字符
+- chartjs.data.datasets 必须是数组，长度 ≤ 5
+- 每个 dataset 的 data 字段必须是**纯数字数组**（line/bar/pie/doughnut/radar/polarArea），长度 ≤ 100
+  - 例外：scatter / bubble 类型可以用 {x: number, y: number} 或 {x, y, r} 对象
+  - 不允许出现字符串数字（"12.5"），不允许出现 null
+- 每个 dataset 的 label 字段 ≤ 80 字符
+- title 文本 ≤ 80 字符；中文论文用「图 N：xxx」，英文论文用「Figure N: xxx」，按图表出现顺序编号
+- options 字段只允许 plugins.title / plugins.legend / scales.{x,y}.beginAtZero，其他 options 字段不要写
+- 整个 [CHART_BEGIN]…[CHART_END] 块（含 JSON）大小 ≤ 30KB
 - 一个 [CHART_BEGIN]...[CHART_END] 块只放一张图
 - 块的前后必须各有一个空行，独立成段，不要嵌在列表或引用块里
-- 支持的 chart 类型：line / bar / pie / doughnut / radar / scatter / bubble / polarArea
+
+如果用户提供的数据点超过上述限制（比如有 200 个时间点），请你**自己做聚合或截断**（按区间聚合到 ≤ 50 个代表点，或挑选有代表性的时点），不要把全集塞进 dataset.data。聚合方式可以在正文里用一句话说明。
 
 表格生成（table）：
 使用标准 Markdown 表格语法，系统会自动渲染为真实 Word 表格：
