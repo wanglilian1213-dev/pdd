@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { FileText, Download, Clock, CheckCircle2, AlertCircle, RefreshCw, Search, Filter, Loader2 } from 'lucide-react';
+import { FileText, Download, Clock, CheckCircle2, AlertCircle, RefreshCw, Search, Filter, Loader2, Info } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -109,6 +109,11 @@ export default function Tasks() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">我的任务</h1>
         <p className="text-sm text-gray-500 mt-1">查看历史生成记录与下载交付文件。</p>
+      </div>
+
+      <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        <Info className="w-4 h-4 mt-0.5 shrink-0" />
+        <span>历史写作文件保留 <strong>3 天</strong>，过期后系统会自动删除，请及时下载到本地。</span>
       </div>
 
       <Card className="border-gray-200 shadow-sm">
