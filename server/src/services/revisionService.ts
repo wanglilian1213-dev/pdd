@@ -8,8 +8,66 @@ import {
   SUPPORTED_REVISION_EXTENSIONS,
   getFileExtension,
 } from './revisionMaterialService';
-import { buildFormattedPaperDocBuffer } from './documentFormattingService';
+import { buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
+import { parseRevisionOutput } from './revisionContentParser';
+import { renderCharts, type RenderedChart } from './chartRenderService';
 import { captureError } from '../lib/errorMonitor';
+
+// ---------------------------------------------------------------------------
+// System prompt：把 Claude 从「乐于助人的聊天助手」拉成「严格的论文修订工」。
+// 关键约束：
+//  1. 严格遵循指令（不展开详细列「不许做什么」，按用户要求）
+//  2. 严格基于上传原文做最小修改
+//  3. 输出即最终交付物，不带开场白、不带修改总结、不带代码块
+//  4. 图表用 [CHART_BEGIN]…[CHART_END] DSL（server 端会真实渲染为 PNG 嵌入 docx）
+//  5. 表格用标准 Markdown 表格（server 端会转成 Word 原生 Table）
+// ---------------------------------------------------------------------------
+const REVISION_SYSTEM_PROMPT = `你是一名严谨的学术论文修改助手。你的唯一任务是基于用户上传的原始文档，按照用户给出的修改指令，输出修改后的完整论文最终稿。
+
+绝对规则：
+1. 严格遵循用户指令。指令要做什么就做什么。
+2. 严格基于用户上传的原始文档作为底稿。所有修改建立在原文之上，保留原作者的论证逻辑、术语和文风，做最小必要的修改。
+3. 你的输出就是最终交付物。直接输出修改后的完整论文全文，不要任何开场白、不要任何结尾总结、不要任何"以上修改包括"之类的话。
+
+图表生成（chart / graph / 折线图 / 柱状图 / 饼图 / 雷达图 / 散点图等）：
+当用户要求添加或修改图表时，必须使用以下专用 DSL 输出。系统会自动把它渲染为真实图片嵌入 Word 文档，不要输出 Python / matplotlib / R / 任何代码：
+
+[CHART_BEGIN]
+{
+  "title": "图 1：示例标题",
+  "width": 720,
+  "height": 440,
+  "chartjs": {
+    "type": "line",
+    "data": {
+      "labels": ["A", "B", "C"],
+      "datasets": [{ "label": "数据", "data": [1, 2, 3] }]
+    },
+    "options": {
+      "plugins": { "title": { "display": true, "text": "示例标题" } },
+      "scales": { "y": { "beginAtZero": true } }
+    }
+  }
+}
+[CHART_END]
+
+DSL 要求：
+- chartjs 字段必须是合法的 Chart.js v3 JSON 配置（type / data / options）
+- title 中文论文用「图 N：xxx」，英文论文用「Figure N: xxx」，按图表出现顺序编号
+- 一个 [CHART_BEGIN]...[CHART_END] 块只放一张图
+- 块的前后必须各有一个空行，独立成段，不要嵌在列表或引用块里
+- 支持的 chart 类型：line / bar / pie / doughnut / radar / scatter / bubble / polarArea
+
+表格生成（table）：
+使用标准 Markdown 表格语法，系统会自动渲染为真实 Word 表格：
+
+| 列 1 | 列 2 | 列 3 |
+| --- | --- | --- |
+| 数据 | 数据 | 数据 |
+
+表格前后必须各有一个空行。表格标题用单独一段写在表格上方，格式「表 N：xxx」。
+
+注意：用户上传的文档若原本含图片，由于技术限制你看不到图片二进制内容，只能看到文字。如果用户提到「原文中已有的图」，请基于上下文文字描述重新生成。`;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,7 +89,7 @@ export function validateRevisionFileTypes(files: Express.Multer.File[]): void {
     if (!SUPPORTED_REVISION_EXTENSIONS.has(ext)) {
       throw new AppError(
         400,
-        `不支持的文件类型：${file.originalname}。当前仅支持 PDF、PNG/JPG/WEBP/GIF 图片、TXT/MD 纯文本。请将 Word 文档导出为 PDF 后再上传。`,
+        `不支持的文件类型：${file.originalname}。当前支持 PDF、DOCX、PNG/JPG/WEBP/GIF 图片、TXT/MD 纯文本。`,
       );
     }
   }
@@ -244,9 +302,26 @@ export async function executeRevision(revisionId: string, userId: string) {
     //    Opus 4.6 推荐写法：thinking.adaptive + output_config.effort=max
     //    （旧写法 thinking.enabled+budget_tokens 已 deprecated）
     //    output_config 是 SDK 类型尚未补齐的新字段，用 spread + as any 透传
+    //
+    //    系统提示见顶部 REVISION_SYSTEM_PROMPT 常量。
+    //    用户消息用结构化模板，把任务/指令/输出要求三段分开，让 Claude 更难跑偏。
+    //    max_tokens 提到 80000：旧值 16000 对长论文会被截断；如果上游拒绝再降到 32000。
+    const userMessage = `【任务】基于上方提供的原始文档，按以下指令输出修改后的完整论文。
+
+【用户指令】
+${revision.instructions}
+
+【输出要求】
+- 输出完整的修改后论文全文
+- 严格基于原文做最小必要的修改
+- 图表用 [CHART_BEGIN]…[CHART_END] DSL 输出
+- 表格用 Markdown 表格输出
+- 直接以论文内容开始，正文结束即停止`;
+
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
-      max_tokens: 16000,
+      max_tokens: 80000,
+      system: REVISION_SYSTEM_PROMPT,
       thinking: {
         type: 'adaptive',
       } as any,
@@ -258,7 +333,7 @@ export async function executeRevision(revisionId: string, userId: string) {
             ...materialBlocks,
             {
               type: 'text',
-              text: `请根据以下要求修改上述文章：\n\n${revision.instructions}`,
+              text: userMessage,
             },
           ],
         },
@@ -275,15 +350,40 @@ export async function executeRevision(revisionId: string, userId: string) {
         `usage=${JSON.stringify(response.usage)}`,
     );
 
-    // 4. Extract result text + 计算实际成本（先算好但还不结算）
-    const resultText = extractTextFromResponse(response);
-    const wordCount = countWords(resultText);
+    // 4. Extract result text + 解析图表 DSL + 渲染图表
+    //    rawText 含 [CHART_BEGIN]…[CHART_END] 块
+    //    parseRevisionOutput 会把它替换为 [[CHART_PLACEHOLDER_N]] 占位 token
+    //    并返回需要渲染的 charts 数组
+    const rawText = extractTextFromResponse(response);
+    const { text: textWithPlaceholders, charts } = parseRevisionOutput(rawText);
+
+    // 并发渲染所有图表（每张独立 retry，互不影响；失败的会在 docx 里降级为占位段，
+    // 整篇文档不会因为单图失败而 fail）
+    const rendered = await renderCharts(charts.map((c) => c.spec));
+    const renderedOk = rendered.filter((r) => r.png).length;
+    console.log(
+      `[revision] charts parsed=${charts.length}, rendered_ok=${renderedOk}, ` +
+        `rendered_failed=${charts.length - renderedOk}`,
+    );
+
+    // 构造 token → RenderedChart 的映射表，给 docx builder 用
+    const mediaMap = new Map<string, RenderedChart>();
+    charts.forEach((c, idx) => {
+      mediaMap.set(c.token, rendered[idx]!);
+    });
+
+    // 字数统计：去掉占位 token 再算，避免占位字符把字数虚高
+    const cleanForCount = textWithPlaceholders.replace(/\[\[CHART_PLACEHOLDER_\d+\]\]/g, '');
+    const wordCount = countWords(cleanForCount);
     const pricePerK = parseInt(await getConfig('revision_price_per_1000') || '250', 10);
     const actualCost = computeCost(wordCount, pricePerK);
     const costToSettle = Math.min(actualCost, frozenCreditsAmount);
 
-    // 5. Generate Word document
-    const docBuffer = await buildFormattedPaperDocBuffer(resultText);
+    // 5. Generate Word document with embedded charts + native tables
+    const docBuffer = await buildFormattedPaperDocBufferWithMedia(
+      textWithPlaceholders,
+      mediaMap,
+    );
     // 面向用户的展示名（下载文件名）可以用中文
     const docFileName = `修改结果-${new Date().toISOString().slice(0, 10)}.docx`;
     // 但 Supabase Storage 路径必须纯 ASCII，否则上传会被拒绝
@@ -327,7 +427,9 @@ export async function executeRevision(revisionId: string, userId: string) {
       .from('revisions')
       .update({
         status: 'completed',
-        result_text: resultText,
+        // 保存"占位 token 已剥离"的纯文本版本，避免 DB 里出现 [[CHART_PLACEHOLDER_N]]
+        // （图表本体已嵌进 docx 文件了，DB 文本只是给前端预览/审计用）
+        result_text: cleanForCount,
         word_count: wordCount,
         updated_at: new Date().toISOString(),
       })
