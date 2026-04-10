@@ -60,12 +60,20 @@ export async function streamResponseText(
   params: Parameters<typeof openai.responses.stream>[0],
 ): Promise<{ text: string; response: any }> {
   const stream = openai.responses.stream(params);
-  let text = '';
+  let doneText = '';
+  let deltaText = '';
+  // Primary: accumulate from 'done' events (canonical complete text per content part)
   stream.on('response.output_text.done', (ev: any) => {
-    text += ev.text;
+    doneText += ev.text;
+  });
+  // Fallback: accumulate from 'delta' events (incremental chunks, more universally
+  // forwarded by SSE gateways like sub2api)
+  stream.on('response.output_text.delta', (ev: any) => {
+    deltaText += ev.delta;
   });
   const response = await stream.finalResponse();
-  // Fallback: if response.completed still has output (future fix), use it
+  // Prefer done (authoritative), fall back to delta, then to response.output
+  let text = doneText || deltaText;
   if (!text) {
     text = extractOutputText(response);
   }

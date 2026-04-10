@@ -263,8 +263,23 @@ export function assessOutlineReadiness(
 
   if (!paperTitle) {
     reasons.push('missing title');
-  } else if (containsPlaceholder(paperTitle) || looksLikeGenericTitle(paperTitle, blockedFileTitles)) {
-    reasons.push('invalid title');
+  } else if (containsPlaceholder(paperTitle)) {
+    reasons.push('invalid title: contains placeholder text');
+  } else {
+    const matchedPattern = GENERIC_TITLE_PATTERNS.find((pattern) => pattern.test(paperTitle));
+    if (matchedPattern) {
+      const matched = paperTitle.match(matchedPattern);
+      reasons.push(`invalid title: contains blocked phrase '${matched ? matched[0] : 'generic pattern'}'`);
+    } else {
+      const normalizedTitle = normalize(stripKnownFileExtensions(paperTitle));
+      const matchedFile = blockedFileTitles.find((fileTitle) => {
+        if (fileTitle && fileTitle.localeCompare(paperTitle, undefined, { sensitivity: 'accent' }) === 0) return true;
+        return normalize(stripKnownFileExtensions(fileTitle)) === normalizedTitle;
+      });
+      if (matchedFile) {
+        reasons.push(`invalid title: matches uploaded file name '${matchedFile}'`);
+      }
+    }
   }
 
   if (!researchQuestion) {

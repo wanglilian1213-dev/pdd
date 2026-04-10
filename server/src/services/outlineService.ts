@@ -1,4 +1,5 @@
 import { streamResponseText } from '../lib/openai';
+import { callWithUpstreamRetry } from '../lib/upstreamRetry';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
 import { updateTaskStage, failTask } from './taskService';
@@ -85,6 +86,8 @@ function parseOutlineJson(content: string, fallback: ParsedOutlineResponse): Par
   }
 }
 
+const THEME_REVIEW_PARSE_ERROR = 'theme_review_parse_error';
+
 function parseOutlineThemeReview(content: string): OutlineThemeReviewResult {
   try {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -96,7 +99,7 @@ function parseOutlineThemeReview(content: string): OutlineThemeReviewResult {
   } catch {
     return {
       aligned: false,
-      reason: 'theme review parsing failed',
+      reason: THEME_REVIEW_PARSE_ERROR,
     };
   }
 }
@@ -143,16 +146,17 @@ async function repairOutlineBulletCounts(
       violationSummary: formatOutlineBulletViolations(violations),
     });
 
-    const { text: repairedText } = await streamResponseText({
-      ...buildMainOpenAIResponsesOptions(stage),
-      instructions: prompt.systemPrompt,
-      input: [
-        {
-          role: 'user' as const,
-          content: prompt.userPrompt,
-        },
-      ],
-    });
+    const { text: repairedText } = await callWithUpstreamRetry('outline_bullet_repair', () =>
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions(stage),
+        instructions: prompt.systemPrompt,
+        input: [
+          {
+            role: 'user' as const,
+            content: prompt.userPrompt,
+          },
+        ],
+      }), 2);
 
     const repaired = parseOutlineJson(repairedText, currentPayload);
 
@@ -207,24 +211,25 @@ async function repairOutlineReadiness(
       qualityIssueSummary: assessment.reasons.join(', '),
     });
 
-    const { text: readinessText } = await streamResponseText({
-      ...buildMainOpenAIResponsesOptions(stage),
-      instructions: prompt.systemPrompt,
-      input: [
-        {
-          role: 'user' as const,
-          content: options.materialParts
-            ? [
-                {
-                  type: 'input_text',
-                  text: prompt.userPrompt,
-                },
-                ...options.materialParts,
-              ]
-            : prompt.userPrompt,
-        },
-      ],
-    });
+    const { text: readinessText } = await callWithUpstreamRetry('outline_readiness_repair', () =>
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions(stage),
+        instructions: prompt.systemPrompt,
+        input: [
+          {
+            role: 'user' as const,
+            content: options.materialParts
+              ? [
+                  {
+                    type: 'input_text',
+                    text: prompt.userPrompt,
+                  },
+                  ...options.materialParts,
+                ]
+              : prompt.userPrompt,
+          },
+        ],
+      }), 2);
 
     current = parseOutlineJson(readinessText, current);
   }
@@ -266,24 +271,33 @@ async function reviewOutlineThemeAlignment(
     specialRequirements: options.specialRequirements,
   });
 
-  const { text: reviewText } = await streamResponseText({
-    ...buildMainOpenAIResponsesOptions(stage),
-    instructions: prompt.systemPrompt,
-    input: [
-      {
-        role: 'user' as const,
-        content: [
+  const MAX_REVIEW_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
+    const { text: reviewText } = await callWithUpstreamRetry('outline_theme_review', () =>
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions(stage),
+        instructions: prompt.systemPrompt,
+        input: [
           {
-            type: 'input_text',
-            text: prompt.userPrompt,
+            role: 'user' as const,
+            content: [
+              {
+                type: 'input_text',
+                text: prompt.userPrompt,
+              },
+              ...(options.materialParts ?? []),
+            ],
           },
-          ...options.materialParts,
         ],
-      },
-    ],
-  });
+      }), 2);
 
-  return parseOutlineThemeReview(reviewText);
+    const result = parseOutlineThemeReview(reviewText);
+    if (result.reason !== THEME_REVIEW_PARSE_ERROR) return result;
+    console.warn(`[theme-review] parse failed on attempt ${attempt}/${MAX_REVIEW_ATTEMPTS}, raw:`, reviewText?.slice(0, 200));
+  }
+
+  // Two consecutive parse failures — default to aligned to avoid false-positive kills
+  return { aligned: true, reason: 'parse failed twice, defaulting to aligned' };
 }
 
 async function repairOutlineThemeAlignment(
@@ -297,59 +311,68 @@ async function repairOutlineThemeAlignment(
     requiredReferenceCount: number;
   },
 ) {
-  const review = await reviewOutlineThemeAlignment(stage, payload, {
+  const MAX_REPAIR_ATTEMPTS = 2;
+  let current = payload;
+
+  for (let attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS; attempt++) {
+    const review = await reviewOutlineThemeAlignment(stage, current, {
+      specialRequirements: options.specialRequirements,
+      materialParts: options.materialParts,
+    });
+
+    if (review.aligned) return current;
+
+    console.log('[theme-repair] attempt', attempt, 'reason:', review.reason, 'title:', current.paper_title);
+
+    const prompt = buildRepairOutlinePrompt({
+      currentOutline: current.outline,
+      currentPaperTitle: current.paper_title,
+      currentResearchQuestion: current.research_question,
+      currentTargetWords: current.target_words,
+      currentCitationStyle: current.citation_style,
+      requiredSectionCount: options.requiredSectionCount,
+      requiredReferenceCount: options.requiredReferenceCount,
+      specialRequirements: options.specialRequirements,
+      editInstruction: options.editInstruction,
+      violationSummary: 'None',
+      qualityIssueSummary: `Theme drift review failed: ${review.reason || 'The title, research question, and outline do not answer the actual task requirements.'}`,
+    });
+
+    const { text: repairedThemeText } = await callWithUpstreamRetry('outline_theme_repair', () =>
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions(stage),
+        instructions: prompt.systemPrompt,
+        input: [
+          {
+            role: 'user' as const,
+            content: options.materialParts
+              ? [
+                  {
+                    type: 'input_text',
+                    text: prompt.userPrompt,
+                  },
+                  ...options.materialParts,
+                ]
+              : prompt.userPrompt,
+          },
+        ],
+      }), 2);
+
+    current = parseOutlineJson(repairedThemeText, current);
+  }
+
+  // Final check after all repair attempts
+  const finalReview = await reviewOutlineThemeAlignment(stage, current, {
     specialRequirements: options.specialRequirements,
     materialParts: options.materialParts,
   });
 
-  if (review.aligned) {
-    return payload;
+  if (!finalReview.aligned) {
+    console.error('[theme-repair] still misaligned after', MAX_REPAIR_ATTEMPTS, 'attempts:', finalReview.reason, 'title:', current.paper_title);
+    throw new AppError(500, '大纲生成失败，请稍后重试。', finalReview.reason);
   }
 
-  const prompt = buildRepairOutlinePrompt({
-    currentOutline: payload.outline,
-    currentPaperTitle: payload.paper_title,
-    currentResearchQuestion: payload.research_question,
-    currentTargetWords: payload.target_words,
-    currentCitationStyle: payload.citation_style,
-    requiredSectionCount: options.requiredSectionCount,
-    requiredReferenceCount: options.requiredReferenceCount,
-    specialRequirements: options.specialRequirements,
-    editInstruction: options.editInstruction,
-    violationSummary: 'None',
-    qualityIssueSummary: `Theme drift review failed: ${review.reason || 'The title, research question, and outline do not answer the actual task requirements.'}`,
-  });
-
-  const { text: repairedThemeText } = await streamResponseText({
-    ...buildMainOpenAIResponsesOptions(stage),
-    instructions: prompt.systemPrompt,
-    input: [
-      {
-        role: 'user' as const,
-        content: options.materialParts
-          ? [
-              {
-                type: 'input_text',
-                text: prompt.userPrompt,
-              },
-              ...options.materialParts,
-            ]
-          : prompt.userPrompt,
-      },
-    ],
-  });
-
-  const repaired = parseOutlineJson(repairedThemeText, payload);
-  const repairedReview = await reviewOutlineThemeAlignment(stage, repaired, {
-    specialRequirements: options.specialRequirements,
-    materialParts: options.materialParts,
-  });
-
-  if (!repairedReview.aligned) {
-    throw new AppError(500, '大纲生成失败，请稍后重试。');
-  }
-
-  return repaired;
+  return current;
 }
 
 export function mapOutlineGenerationError(err: unknown) {
@@ -685,22 +708,23 @@ export async function generateOutline(taskId: string, userId: string) {
       knownCourseCode: regexCourseCode,
     });
 
-    const { text: content } = await streamResponseText({
-      ...buildMainOpenAIResponsesOptions('outline_generation'),
-      instructions: prompt.systemPrompt,
-      input: [
-        {
-          role: 'user' as const,
-          content: [
-            {
-              type: 'input_text',
-              text: prompt.userPrompt,
-            },
-            ...materialContent.parts,
-          ],
-        },
-      ],
-    });
+    const { text: content } = await callWithUpstreamRetry('outline_generation', () =>
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions('outline_generation'),
+        instructions: prompt.systemPrompt,
+        input: [
+          {
+            role: 'user' as const,
+            content: [
+              {
+                type: 'input_text',
+                text: prompt.userPrompt,
+              },
+              ...materialContent.parts,
+            ],
+          },
+        ],
+      }), 2);
 
     // Parse the merged response — extract requirements, course code, and outline
     const mergedJson = parseMergedOutlineResponse(content);
@@ -805,7 +829,8 @@ export async function generateOutline(taskId: string, userId: string) {
     return outline;
   } catch (err: any) {
     const mappedError = mapOutlineGenerationError(err);
-    await failTask(taskId, 'outline_generating', mappedError.userMessage, false);
+    const techDetail = err instanceof Error ? `${err.name}: ${err.message}` : String(err || '');
+    await failTask(taskId, 'outline_generating', mappedError.userMessage, false, techDetail);
     throw mappedError;
   }
   // No finally cleanup — files are reused across stages and cleaned up on task completion/failure
@@ -960,22 +985,23 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
       editInstruction,
     });
 
-    const { text: content } = await streamResponseText({
-      ...buildMainOpenAIResponsesOptions('outline_regeneration'),
-      instructions: prompt.systemPrompt,
-      input: [
-        {
-          role: 'user' as const,
-          content: [
-            {
-              type: 'input_text',
-              text: prompt.userPrompt,
-            },
-            ...materialContent.parts,
-          ],
-        },
-      ],
-    });
+    const { text: content } = await callWithUpstreamRetry('outline_regeneration', () =>
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions('outline_regeneration'),
+        instructions: prompt.systemPrompt,
+        input: [
+          {
+            role: 'user' as const,
+            content: [
+              {
+                type: 'input_text',
+                text: prompt.userPrompt,
+              },
+              ...materialContent.parts,
+            ],
+          },
+        ],
+      }), 2);
     const bulletFixed = await repairOutlineBulletCounts(
       'outline_regeneration',
       parseOutlineJson(content, {

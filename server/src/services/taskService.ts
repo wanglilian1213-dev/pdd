@@ -197,7 +197,7 @@ export async function updateTaskStage(taskId: string, stage: string, extraFields
   }
 }
 
-export async function failTask(taskId: string, failureStage: string, failureReason: string, refunded: boolean) {
+export async function failTask(taskId: string, failureStage: string, failureReason: string, refunded: boolean, technicalDetail?: string) {
   const { error } = await supabaseAdmin
     .from('tasks')
     .update({
@@ -216,7 +216,12 @@ export async function failTask(taskId: string, failureStage: string, failureReas
   await supabaseAdmin.from('task_events').insert({
     task_id: taskId,
     event_type: 'task_failed',
-    detail: { stage: failureStage, reason: failureReason, refunded },
+    detail: {
+      stage: failureStage,
+      reason: failureReason,
+      refunded,
+      ...(technicalDetail ? { technical_detail: technicalDetail } : {}),
+    },
   });
 }
 

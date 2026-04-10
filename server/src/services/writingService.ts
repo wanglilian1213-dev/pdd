@@ -1,4 +1,5 @@
 import { streamResponseText } from '../lib/openai';
+import { callWithUpstreamRetry, isTransientUpstreamError } from '../lib/upstreamRetry';
 import { supabaseAdmin } from '../lib/supabase';
 import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
@@ -164,52 +165,8 @@ async function withDraftGenerationTimeout<T>(
 }
 
 // ─── Transient upstream retry ─────────────────────────────────────────────
-// sub2api → ChatGPT Codex 后端的 SSE 流式接口偶发抖动 (stream_read_error /
-// upstream_error / 502 / 524 / ECONNRESET 等)，每一次都会把整篇论文烧掉。
-// 下面的 helper 在 stage timeout 内对这类瞬时错误自动重试。
-//
-// 设计要点:
-//  - 接受工厂函数 (每次重试都要重新建一个新的 stream)
-//  - 只 match 上游/网络类错误，绝不 match WritingStageTimeoutError 和业务错误
-//  - 线性 backoff (5s, 10s)，避免指数把 stage 预算吃光
-//  - maxAttempts 由调用方按 stage 预算反推 (draft=3 / word=2 / citation=2)
-const TRANSIENT_OPENAI_ERROR_CODES = new Set([
-  'stream_read_error',
-  'upstream_error',
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'EPIPE',
-  'ENOTFOUND',
-  'EAI_AGAIN',
-]);
-const TRANSIENT_HTTP_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522, 524]);
-const TRANSIENT_MESSAGE_RE =
-  /stream_read_error|upstream_error|socket hang up|ECONNRESET|ETIMEDOUT|EPIPE|fetch failed|premature close|aborted|Cloudflare|\b5\d\d\b/i;
-
-function isTransientUpstreamError(error: unknown): boolean {
-  if (error instanceof WritingStageTimeoutError) return false;
-  if (!error || typeof error !== 'object') return false;
-  const e = error as {
-    code?: unknown;
-    type?: unknown;
-    status?: unknown;
-    message?: unknown;
-    cause?: unknown;
-  };
-
-  if (typeof e.code === 'string' && TRANSIENT_OPENAI_ERROR_CODES.has(e.code)) return true;
-  if (typeof e.type === 'string' && e.type === 'upstream_error') return true;
-  if (typeof e.status === 'number' && TRANSIENT_HTTP_STATUS.has(e.status)) return true;
-  if (typeof e.message === 'string') {
-    // 业务错误 / 鉴权错误明确不重试
-    if (e.message.startsWith('draft_invalid:')) return false;
-    if (/Invalid key|Unauthorized|forbidden|invalid_api_key/i.test(e.message)) return false;
-    if (TRANSIENT_MESSAGE_RE.test(e.message)) return true;
-  }
-  // openai SDK 偶尔把底层 fetch 错误塞到 cause 里
-  if (e.cause && isTransientUpstreamError(e.cause)) return true;
-  return false;
-}
+// Shared logic lives in lib/upstreamRetry.ts. This wrapper excludes
+// WritingStageTimeoutError from being classified as transient.
 
 const MAIN_RETRY_ATTEMPTS = {
   draft_generation: 3,
@@ -217,27 +174,17 @@ const MAIN_RETRY_ATTEMPTS = {
   citation_verification: 2,
 } as const;
 
-async function callMainOpenAIWithRetry<T>(
+function callMainOpenAIWithRetry<T>(
   stage: 'draft_generation' | 'word_calibration' | 'citation_verification',
   build: () => Promise<T>,
   maxAttempts: number = MAIN_RETRY_ATTEMPTS[stage],
 ): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await build();
-    } catch (error) {
-      lastError = error;
-      if (!isTransientUpstreamError(error) || attempt === maxAttempts) throw error;
-      const backoffMs = 5_000 * attempt;
-      const reason = (error as { message?: string })?.message || String(error);
-      console.warn(
-        `[${stage}] transient upstream error on attempt ${attempt}/${maxAttempts}, retrying in ${backoffMs}ms: ${reason}`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    }
-  }
-  throw lastError;
+  return callWithUpstreamRetry(
+    stage,
+    build,
+    maxAttempts,
+    (err) => err instanceof WritingStageTimeoutError,
+  );
 }
 
 function getWordCountRange(targetWords: number) {
@@ -505,6 +452,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
   } catch (err: any) {
     console.error(`Writing pipeline failed for task ${taskId}:`, err);
+    const techDetail = err instanceof Error ? `${err.name}: ${err.message}` : String(err || '');
 
     const { data: task } = await supabaseAdmin
       .from('tasks')
@@ -515,13 +463,13 @@ export async function startWritingPipeline(taskId: string, userId: string) {
     if (task && task.frozen_credits > 0) {
       try {
         await refundCredits(task.user_id, task.frozen_credits, 'task', taskId, `正文生成失败退款：${task.frozen_credits} 积分`);
-        await failTask(taskId, task.stage, buildWritingFailureReason(task.stage, err), true);
+        await failTask(taskId, task.stage, buildWritingFailureReason(task.stage, err), true, techDetail);
       } catch (refundErr) {
         console.error(`Refund failed for task ${taskId}:`, refundErr);
-        await failTask(taskId, task.stage, '正文生成失败，退款异常，请联系客服处理。', false);
+        await failTask(taskId, task.stage, '正文生成失败，退款异常，请联系客服处理。', false, techDetail);
       }
     } else {
-      await failTask(taskId, 'writing', '正文生成失败。', false);
+      await failTask(taskId, 'writing', '正文生成失败。', false, techDetail);
     }
   }
 }

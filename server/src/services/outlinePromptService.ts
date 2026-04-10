@@ -169,6 +169,19 @@ Follow the fixed task requirements in the system instructions and return JSON on
 }
 
 export function buildRepairOutlinePrompt(input: RepairOutlinePromptInput): OutlinePrompt {
+  const qualitySummary = normalizeText(input.qualityIssueSummary, 'None');
+  const hasTitleIssue = qualitySummary.includes('invalid title');
+
+  const titleConstraintBlock = hasTitleIssue
+    ? `
+
+CRITICAL title rules — the current title was rejected for: ${qualitySummary}
+The paper title MUST NOT:
+- Be identical to any uploaded file name (even without its extension).
+- Contain any of these generic phrases: "assignment brief", "marking criteria", "rubric", "writing guide", "task information", "syllabus", "report instructions".
+The paper title MUST be a specific, research-focused title that clearly reflects the actual essay topic derived from the task materials. For example, instead of "Strategy", use something like "Competitive Advantages of Digital Transformation in the Retail Sector".`
+    : '';
+
   return {
     systemPrompt: `You are correcting an English academic paper outline.
 
@@ -183,7 +196,7 @@ ${buildFixedRequirementBlock({
 
 ${OUTLINE_PLANNING_RULES}
 
-${OUTLINE_TOPIC_RULES}
+${OUTLINE_TOPIC_RULES}${titleConstraintBlock}
 
 ${OUTLINE_RESPONSE_SCHEMA}`,
     userPrompt: `The current outline breaks the bullet-count rule in one or more sections.
@@ -213,7 +226,7 @@ Sections that must be fixed:
 ${input.violationSummary}
 
 Other quality issues that must be fixed:
-${normalizeText(input.qualityIssueSummary, 'None')}
+${qualitySummary}
 
 Rewrite the outline so every section follows the rule exactly. Keep each bullet on one line starting with "- ", keep the fixed task requirements unchanged, and return JSON only.`,
   };

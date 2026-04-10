@@ -7,10 +7,10 @@ function file(name: string): Express.Multer.File {
   return { originalname: name } as Express.Multer.File;
 }
 
-test('validateRevisionFileTypes 拒绝 docx', () => {
-  assert.throws(
+test('validateRevisionFileTypes 接受 docx', () => {
+  assert.doesNotThrow(
     () => validateRevisionFileTypes([file('paper.docx')]),
-    (err: unknown) => err instanceof AppError && err.statusCode === 400 && /不支持的文件类型/.test(err.userMessage),
+    'should accept docx after mammoth support was added',
   );
 });
 
@@ -46,8 +46,8 @@ test('validateRevisionFileTypes 接受 pdf/png/jpg/webp/gif/txt/md/markdown', ()
 
 test('validateRevisionFileTypes 混合输入：一个不支持的就整组拒绝', () => {
   assert.throws(
-    () => validateRevisionFileTypes([file('ok.pdf'), file('bad.docx')]),
-    /不支持的文件类型：bad\.docx/,
+    () => validateRevisionFileTypes([file('ok.pdf'), file('bad.odt')]),
+    /不支持的文件类型：bad\.odt/,
   );
 });
 
