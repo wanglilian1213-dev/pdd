@@ -5,7 +5,9 @@ import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
-import { buildFormattedPaperDocBuffer } from './documentFormattingService';
+import { buildFormattedPaperDocBuffer, buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
+import { anthropic } from '../lib/anthropic';
+import type { RenderedChart, ChartSpec } from './chartRenderService';
 import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
 import { getOrUploadMaterialContent, type StoredMaterialFile } from './materialInputService';
 import {
@@ -26,6 +28,7 @@ const WORD_CALIBRATION_TIMEOUT_MS = 900_000;
 const CITATION_VERIFICATION_TIMEOUT_MS = 1_200_000;
 const WORD_CALIBRATION_MAX_ATTEMPTS = 5;
 const REFERENCE_REPAIR_MAX_ATTEMPTS = 2;
+const CHART_ENHANCEMENT_TIMEOUT_MS = 300_000; // 5 minutes
 
 const CRITICAL_PAPER_REASONS = new Set([
   'empty paper',
@@ -431,14 +434,17 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       versionBase,
     );
 
-    // Step 4: Deliver
+    // Step 3.5: Chart enhancement (best-effort, never fails the task)
     await updateTaskStage(taskId, 'delivering');
+    const chartResult = await enhanceWithCharts(verified, paperTitle, researchQuestion);
+
+    // Step 4: Deliver
     await deliverResults(taskId, userId, verified, {
       ...task,
       target_words: unifiedRequirements.targetWords,
       citation_style: unifiedRequirements.citationStyle,
       required_reference_count: unifiedRequirements.requiredReferenceCount,
-    }, versionBase);
+    }, versionBase, chartResult);
 
     // Success: settle
     await settleCredits(userId, task.frozen_credits);
@@ -1056,7 +1062,174 @@ async function verifyCitations(
   return verified;
 }
 
-async function deliverResults(taskId: string, userId: string, finalText: string, task: any, versionBase = 0) {
+// ─── Chart Enhancement (Claude native image generation) ─────────────────────
+
+function buildChartEnhancementSystemPrompt(): string {
+  return `You are an academic paper visualization specialist. Your task is to analyze a completed academic paper and enhance it with 1-2 visual charts and/or tables WHERE APPROPRIATE.
+
+ASSESSMENT RULES — decide whether charts/tables are suitable:
+- SUITABLE: The paper discusses data comparisons, trends over time, proportional distributions, multi-factor relationships, process flows, statistical findings, or survey results.
+- NOT SUITABLE: The paper is purely theoretical, philosophical, literary analysis, or contains no quantifiable data or comparisons.
+- When in doubt, do NOT add charts or tables. It is better to have no visuals than forced, unhelpful ones.
+
+IF THE PAPER IS NOT SUITABLE:
+- Output the paper text exactly as-is, with zero modifications.
+
+IF THE PAPER IS SUITABLE — follow these rules precisely:
+
+CHART RULES:
+- Add 1-2 charts maximum. Each chart must visualize data or relationships ALREADY discussed in the paper. Never fabricate data.
+- For each chart, insert a placeholder token on its own line at the appropriate position: [[CHART_PLACEHOLDER_1]], [[CHART_PLACEHOLDER_2]]
+- The placeholder must be on its own line, with a blank line before and after it.
+- Near each placeholder, add a brief reference sentence in the text (e.g., "As illustrated in Figure 1, ..." or "Figure 2 demonstrates that ...").
+- Then GENERATE the actual chart as an image. The image should be a clean, professional academic chart with:
+  - Clear axis labels and title
+  - Professional color scheme (blues, grays, teals — avoid garish colors)
+  - White background
+  - Legible font sizes
+  - Appropriate chart type for the data (bar chart for comparisons, line chart for trends, pie chart for proportions, etc.)
+- Generate chart images in the same order as their placeholders (image 1 = CHART_PLACEHOLDER_1, image 2 = CHART_PLACEHOLDER_2).
+
+TABLE RULES:
+- If some data in the paper is better presented as a table, use standard Markdown table syntax:
+
+| Column 1 | Column 2 | Column 3 |
+| --- | --- | --- |
+| Data | Data | Data |
+
+- Tables must have a blank line before and after.
+- Add a caption line above the table: "Table 1: Description"
+
+ABSOLUTE CONSTRAINTS:
+- Do NOT modify any existing text in the paper except to add figure/table reference sentences.
+- Do NOT rephrase, reorder, or rewrite any existing sentences or paragraphs.
+- Do NOT add new arguments, evidence, or references that were not in the original paper.
+- Do NOT use Markdown heading syntax (#), bold (**), or any other Markdown formatting in the paper body text.
+- The paper's section headings, references section, and citation style must remain exactly as they were.
+- Output the COMPLETE paper text — do not truncate or summarize.`;
+}
+
+interface ChartEnhancementResult {
+  text: string;
+  mediaMap: Map<string, RenderedChart>;
+}
+
+function parseChartEnhancementResponse(response: any): {
+  text: string;
+  images: { png: Buffer; index: number }[];
+} {
+  const textParts: string[] = [];
+  const images: { png: Buffer; index: number }[] = [];
+  let imageIndex = 1;
+
+  if (!response?.content || !Array.isArray(response.content)) {
+    return { text: '', images: [] };
+  }
+
+  for (const block of response.content) {
+    if (block.type === 'text') {
+      textParts.push(block.text);
+    } else if (block.type === 'image') {
+      try {
+        const data = block.source?.data;
+        if (data) {
+          images.push({
+            png: Buffer.from(data, 'base64'),
+            index: imageIndex++,
+          });
+        }
+      } catch {
+        console.warn(`[chart-enhance] failed to decode image block ${imageIndex}`);
+      }
+    }
+    // thinking blocks are silently skipped
+  }
+
+  return { text: textParts.join('\n\n'), images };
+}
+
+async function enhanceWithCharts(
+  verifiedText: string,
+  paperTitle: string,
+  researchQuestion: string,
+): Promise<ChartEnhancementResult> {
+  const empty: ChartEnhancementResult = {
+    text: verifiedText,
+    mediaMap: new Map<string, RenderedChart>(),
+  };
+
+  try {
+    const response = await Promise.race([
+      anthropic.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 16000,
+        system: buildChartEnhancementSystemPrompt(),
+        thinking: {
+          type: 'adaptive',
+        } as any,
+        ...({ output_config: { effort: 'max' } } as any),
+        messages: [
+          {
+            role: 'user',
+            content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). Analyze it and enhance with charts and/or tables if appropriate.\n\n${verifiedText}`,
+          },
+        ],
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('chart enhancement timeout')), CHART_ENHANCEMENT_TIMEOUT_MS),
+      ),
+    ]);
+
+    const { text: enhancedText, images } = parseChartEnhancementResponse(response);
+
+    if (!enhancedText) {
+      console.warn('[chart-enhance] Claude returned empty text, using original');
+      return empty;
+    }
+
+    // Safety check: Claude must not significantly alter the paper text
+    const cleanEnhanced = enhancedText
+      .replace(/\[\[CHART_PLACEHOLDER_\d+\]\]/g, '')
+      .replace(/^\|[^\n]*\|$/gm, '')  // strip markdown table rows
+      .trim();
+    const originalWords = countMainBodyWords(verifiedText);
+    const enhancedWords = countMainBodyWords(cleanEnhanced);
+
+    if (originalWords > 0 && Math.abs(enhancedWords - originalWords) > originalWords * 0.08) {
+      console.warn(
+        `[chart-enhance] AI mutated text (original=${originalWords}, enhanced=${enhancedWords}), discarding`,
+      );
+      return empty;
+    }
+
+    // No images generated — Claude decided no charts needed (may still have tables)
+    if (images.length === 0) {
+      console.log('[chart-enhance] no chart images generated (may have tables)');
+      return { text: enhancedText, mediaMap: new Map() };
+    }
+
+    // Build mediaMap: match images to placeholders by order
+    const mediaMap = new Map<string, RenderedChart>();
+    for (const img of images) {
+      const token = `[[CHART_PLACEHOLDER_${img.index}]]`;
+      const spec: ChartSpec = {
+        title: `Figure ${img.index}`,
+        width: 600,
+        height: 400,
+        chartjs: {},
+      };
+      mediaMap.set(token, { spec, png: img.png, width: 600, height: 400 });
+    }
+
+    console.log(`[chart-enhance] generated ${images.length} chart(s) for paper "${paperTitle}"`);
+    return { text: enhancedText, mediaMap };
+  } catch (err: any) {
+    console.warn('[chart-enhance] failed, delivering without charts:', err?.message || err);
+    return empty;
+  }
+}
+
+async function deliverResults(taskId: string, userId: string, finalText: string, task: any, versionBase = 0, chartData?: ChartEnhancementResult) {
   const wordCount = finalText.split(/\s+/).filter(Boolean).length;
   const retentionDays = (await getConfig('result_file_retention_days')) || 3;
   const expiresAt = new Date();
@@ -1071,10 +1244,19 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     content: finalText,
   });
 
-  const docBuffer = await buildFormattedPaperDocBuffer(finalText, {
-    paperTitle: displayTitle,
-    courseCode: task.course_code,
-  });
+  // Use media-aware docx builder when chart data is available
+  const textForDoc = chartData?.text ?? finalText;
+  const mediaMap = chartData?.mediaMap ?? new Map<string, RenderedChart>();
+  const hasMedia = mediaMap.size > 0 || /^\|[^\n]*\|$/m.test(textForDoc);
+  const docBuffer = hasMedia
+    ? await buildFormattedPaperDocBufferWithMedia(textForDoc, mediaMap, {
+        paperTitle: displayTitle,
+        courseCode: task.course_code,
+      })
+    : await buildFormattedPaperDocBuffer(finalText, {
+        paperTitle: displayTitle,
+        courseCode: task.course_code,
+      });
   const finalDoc = buildFinalDocDescriptor(taskId, task.paper_title || task.title, 'Academic Essay');
 
   await storeGeneratedTaskFile({
