@@ -564,6 +564,7 @@ function buildDocxTable(rows: string[][]): Table {
     width: { size: 100, type: WidthType.PERCENTAGE },
     rows: rows.map((row, rowIdx) => new TableRow({
       children: row.map((cell) => new TableCell({
+        margins: { top: 80, bottom: 80, left: 120, right: 120 },
         children: [new Paragraph({
           children: [new TextRun({
             text: cell,

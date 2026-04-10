@@ -1066,21 +1066,20 @@ async function verifyCitations(
 // ─── Chart Enhancement (Claude + Chart DSL + QuickChart rendering) ──────────
 
 function buildChartEnhancementSystemPrompt(): string {
-  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and enhance it with 1-2 visual charts and/or tables WHERE APPROPRIATE.
+  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and enhance it with 1-2 visual charts and optionally tables.
 
-ASSESSMENT RULES — decide whether charts/tables are suitable:
-- SUITABLE: The paper discusses data comparisons, trends over time, proportional distributions, multi-factor relationships, process flows, statistical findings, or survey results.
-- NOT SUITABLE: The paper is purely theoretical, philosophical, literary analysis, or contains no quantifiable data or comparisons.
-- When in doubt, do NOT add charts or tables. It is better to have no visuals than forced, unhelpful ones.
+MANDATORY CHART REQUIREMENT:
+You MUST include at least 1 chart (and up to 2). Almost every academic paper can benefit from at least one figure that summarizes, compares, or visualizes key data, concepts, frameworks, or relationships discussed in the paper. Even if the paper does not contain raw numbers, you can create:
+- A conceptual comparison chart (e.g., bar chart comparing factors, dimensions, or categories discussed)
+- A framework visualization (e.g., radar chart showing multiple dimensions of analysis)
+- A trend or relationship chart based on data mentioned in references
+- A proportional chart (e.g., pie/doughnut showing distribution of themes, factors, or components)
 
-IF THE PAPER IS NOT SUITABLE:
-- Output the paper text exactly as-is, with zero modifications.
-
-IF THE PAPER IS SUITABLE — follow these rules precisely:
+The ONLY exception where you may skip charts is if the paper is a purely abstract philosophical reflection with zero comparisons, categories, or frameworks of any kind. This is extremely rare.
 
 CHART RULES:
-- Add 1-2 charts maximum. Each chart must visualize data or relationships ALREADY discussed in the paper. Never fabricate data.
-- Use the following DSL to define charts. The system will automatically render them into real images embedded in the Word document. Do NOT output Python, matplotlib, R, SVG, or any code. Do NOT output markdown image links. Only use this DSL:
+- Add 1-2 charts. Chart data must be derived from information ALREADY discussed in the paper — statistics, comparisons, frameworks, categories, or referenced data. You may synthesize reasonable representative values to illustrate concepts discussed in the text, but do not invent unrelated data.
+- Use the following DSL to define charts. The system will automatically render them into real images embedded in the Word document. Do NOT output Python, matplotlib, R, SVG, or any code. Do NOT output markdown image links like ![...](url). Only use this exact DSL format:
 
 [CHART_BEGIN]
 {
@@ -1160,7 +1159,7 @@ async function enhanceWithCharts(
     const response = await Promise.race([
       anthropic.messages.create({
         model: 'claude-opus-4-6',
-        max_tokens: 16000,
+        max_tokens: 64000,
         system: buildChartEnhancementSystemPrompt(),
         thinking: {
           type: 'adaptive',
@@ -1179,10 +1178,19 @@ async function enhanceWithCharts(
     ]);
 
     // Extract text from Claude response (skip thinking blocks)
-    const rawText = (response as any).content
+    const resp = response as any;
+    const rawText = resp.content
       ?.filter((b: any) => b.type === 'text')
       .map((b: any) => b.text)
       .join('\n\n') || '';
+
+    console.log(
+      `[chart-enhance] stop=${resp.stop_reason}, ` +
+      `blocks=${resp.content?.length ?? 0}, ` +
+      `text_len=${rawText.length}, ` +
+      `has_chart_dsl=${rawText.includes('[CHART_BEGIN')}, ` +
+      `usage=${JSON.stringify(resp.usage ?? {})}`,
+    );
 
     if (!rawText) {
       console.warn('[chart-enhance] Claude returned empty text, using original');
