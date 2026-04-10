@@ -7,7 +7,8 @@ import { getConfig } from './configService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 import { buildFormattedPaperDocBuffer, buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
 import { anthropic } from '../lib/anthropic';
-import type { RenderedChart, ChartSpec } from './chartRenderService';
+import { renderCharts, type RenderedChart } from './chartRenderService';
+import { parseRevisionOutput } from './revisionContentParser';
 import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
 import { getOrUploadMaterialContent, type StoredMaterialFile } from './materialInputService';
 import {
@@ -1062,10 +1063,10 @@ async function verifyCitations(
   return verified;
 }
 
-// ─── Chart Enhancement (Claude native image generation) ─────────────────────
+// ─── Chart Enhancement (Claude + Chart DSL + QuickChart rendering) ──────────
 
 function buildChartEnhancementSystemPrompt(): string {
-  return `You are an academic paper visualization specialist. Your task is to analyze a completed academic paper and enhance it with 1-2 visual charts and/or tables WHERE APPROPRIATE.
+  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and enhance it with 1-2 visual charts and/or tables WHERE APPROPRIATE.
 
 ASSESSMENT RULES — decide whether charts/tables are suitable:
 - SUITABLE: The paper discusses data comparisons, trends over time, proportional distributions, multi-factor relationships, process flows, statistical findings, or survey results.
@@ -1079,16 +1080,43 @@ IF THE PAPER IS SUITABLE — follow these rules precisely:
 
 CHART RULES:
 - Add 1-2 charts maximum. Each chart must visualize data or relationships ALREADY discussed in the paper. Never fabricate data.
-- For each chart, insert a placeholder token on its own line at the appropriate position: [[CHART_PLACEHOLDER_1]], [[CHART_PLACEHOLDER_2]]
-- The placeholder must be on its own line, with a blank line before and after it.
-- Near each placeholder, add a brief reference sentence in the text (e.g., "As illustrated in Figure 1, ..." or "Figure 2 demonstrates that ...").
-- Then GENERATE the actual chart as an image. The image should be a clean, professional academic chart with:
-  - Clear axis labels and title
-  - Professional color scheme (blues, grays, teals — avoid garish colors)
-  - White background
-  - Legible font sizes
-  - Appropriate chart type for the data (bar chart for comparisons, line chart for trends, pie chart for proportions, etc.)
-- Generate chart images in the same order as their placeholders (image 1 = CHART_PLACEHOLDER_1, image 2 = CHART_PLACEHOLDER_2).
+- Use the following DSL to define charts. The system will automatically render them into real images embedded in the Word document. Do NOT output Python, matplotlib, R, SVG, or any code. Do NOT output markdown image links. Only use this DSL:
+
+[CHART_BEGIN]
+{
+  "title": "Figure 1: Example Title",
+  "width": 720,
+  "height": 440,
+  "chartjs": {
+    "type": "bar",
+    "data": {
+      "labels": ["Category A", "Category B", "Category C"],
+      "datasets": [{ "label": "Metric", "data": [10, 20, 30] }]
+    },
+    "options": {
+      "plugins": { "title": { "display": true, "text": "Example Title" } },
+      "scales": { "y": { "beginAtZero": true } }
+    }
+  }
+}
+[CHART_END]
+
+- Insert the chart block at the appropriate position WITHIN the paper body sections. NEVER place charts after the References section.
+- The [CHART_BEGIN]...[CHART_END] block must be on its own lines with a blank line before and after.
+- Near each chart, add a brief reference sentence in the text (e.g., "As illustrated in Figure 1, ..." or "Figure 2 demonstrates that ...").
+
+DSL HARD RULES (violating any of these will cause rendering failure):
+- chartjs must be a valid Chart.js v3 JSON config (type / data / options). No callbacks, function strings, or unlisted fields.
+- chartjs.type must be one of: line / bar / pie / doughnut / radar / scatter / bubble / polarArea. No other types.
+- chartjs.data.labels must be a string array, length <= 50, each string <= 80 characters.
+- chartjs.data.datasets must be an array, length <= 5.
+- Each dataset.data must be a pure number array (for line/bar/pie/doughnut/radar/polarArea), length <= 100. Exception: scatter/bubble types may use {x: number, y: number} or {x, y, r} objects. No string numbers ("12.5"), no null values.
+- Each dataset.label <= 80 characters.
+- title <= 80 characters. Use "Figure N: xxx" format, numbered in order of appearance.
+- options: only plugins.title / plugins.legend / scales.{x,y}.beginAtZero are allowed. Do not write other options fields.
+- The entire [CHART_BEGIN]...[CHART_END] block (including JSON) must be <= 30KB.
+- One chart per [CHART_BEGIN]...[CHART_END] block.
+- If data exceeds limits (e.g., 200 time points), aggregate or truncate to <= 50 representative points.
 
 TABLE RULES:
 - If some data in the paper is better presented as a table, use standard Markdown table syntax:
@@ -1098,9 +1126,13 @@ TABLE RULES:
 | Data | Data | Data |
 
 - Tables must have a blank line before and after.
-- Add a caption line above the table: "Table 1: Description"
+- Add a caption line above the table: "Table N: Description"
+- Tables must NOT contain in-text citations or references (e.g., no "(Author, 2023)" inside table cells).
+- Tables should only present data summaries, comparisons, or frameworks.
+- Tables must be placed WITHIN the paper body sections, NEVER after the References section.
 
 ABSOLUTE CONSTRAINTS:
+- ALL charts and tables must be placed WITHIN the paper body sections, NEVER after the References section.
 - Do NOT modify any existing text in the paper except to add figure/table reference sentences.
 - Do NOT rephrase, reorder, or rewrite any existing sentences or paragraphs.
 - Do NOT add new arguments, evidence, or references that were not in the original paper.
@@ -1112,40 +1144,6 @@ ABSOLUTE CONSTRAINTS:
 interface ChartEnhancementResult {
   text: string;
   mediaMap: Map<string, RenderedChart>;
-}
-
-function parseChartEnhancementResponse(response: any): {
-  text: string;
-  images: { png: Buffer; index: number }[];
-} {
-  const textParts: string[] = [];
-  const images: { png: Buffer; index: number }[] = [];
-  let imageIndex = 1;
-
-  if (!response?.content || !Array.isArray(response.content)) {
-    return { text: '', images: [] };
-  }
-
-  for (const block of response.content) {
-    if (block.type === 'text') {
-      textParts.push(block.text);
-    } else if (block.type === 'image') {
-      try {
-        const data = block.source?.data;
-        if (data) {
-          images.push({
-            png: Buffer.from(data, 'base64'),
-            index: imageIndex++,
-          });
-        }
-      } catch {
-        console.warn(`[chart-enhance] failed to decode image block ${imageIndex}`);
-      }
-    }
-    // thinking blocks are silently skipped
-  }
-
-  return { text: textParts.join('\n\n'), images };
 }
 
 async function enhanceWithCharts(
@@ -1180,20 +1178,25 @@ async function enhanceWithCharts(
       ),
     ]);
 
-    const { text: enhancedText, images } = parseChartEnhancementResponse(response);
+    // Extract text from Claude response (skip thinking blocks)
+    const rawText = (response as any).content
+      ?.filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n\n') || '';
 
-    if (!enhancedText) {
+    if (!rawText) {
       console.warn('[chart-enhance] Claude returned empty text, using original');
       return empty;
     }
 
-    // Safety check: Claude must not significantly alter the paper text
-    const cleanEnhanced = enhancedText
-      .replace(/\[\[CHART_PLACEHOLDER_\d+\]\]/g, '')
-      .replace(/^\|[^\n]*\|$/gm, '')  // strip markdown table rows
+    // Safety check: Claude must not significantly alter the paper text.
+    // Strip chart DSL blocks + table rows before comparing word counts.
+    const cleanForCheck = rawText
+      .replace(/\[CHART_BEGIN\][\s\S]*?\[CHART_END\]/g, '')
+      .replace(/^\|[^\n]*\|$/gm, '')
       .trim();
     const originalWords = countMainBodyWords(verifiedText);
-    const enhancedWords = countMainBodyWords(cleanEnhanced);
+    const enhancedWords = countMainBodyWords(cleanForCheck);
 
     if (originalWords > 0 && Math.abs(enhancedWords - originalWords) > originalWords * 0.08) {
       console.warn(
@@ -1202,27 +1205,26 @@ async function enhanceWithCharts(
       return empty;
     }
 
-    // No images generated — Claude decided no charts needed (may still have tables)
-    if (images.length === 0) {
-      console.log('[chart-enhance] no chart images generated (may have tables)');
-      return { text: enhancedText, mediaMap: new Map() };
+    // Parse chart DSL → placeholders + chart specs (reuse revision parser)
+    const { text: textWithPlaceholders, charts } = parseRevisionOutput(rawText);
+
+    if (charts.length === 0) {
+      // No charts — Claude decided none needed (may still have tables)
+      console.log('[chart-enhance] no charts generated (may have tables)');
+      return { text: textWithPlaceholders, mediaMap: new Map() };
     }
 
-    // Build mediaMap: match images to placeholders by order
+    // Render charts via QuickChart.io (reuse revision renderer)
+    const rendered = await renderCharts(charts.map((c) => c.spec));
     const mediaMap = new Map<string, RenderedChart>();
-    for (const img of images) {
-      const token = `[[CHART_PLACEHOLDER_${img.index}]]`;
-      const spec: ChartSpec = {
-        title: `Figure ${img.index}`,
-        width: 600,
-        height: 400,
-        chartjs: {},
-      };
-      mediaMap.set(token, { spec, png: img.png, width: 600, height: 400 });
-    }
+    charts.forEach((c, idx) => {
+      mediaMap.set(c.token, rendered[idx]!);
+    });
 
-    console.log(`[chart-enhance] generated ${images.length} chart(s) for paper "${paperTitle}"`);
-    return { text: enhancedText, mediaMap };
+    const ok = rendered.filter((r) => r.png).length;
+    console.log(`[chart-enhance] charts=${charts.length}, rendered_ok=${ok}, failed=${charts.length - ok}`);
+
+    return { text: textWithPlaceholders, mediaMap };
   } catch (err: any) {
     console.warn('[chart-enhance] failed, delivering without charts:', err?.message || err);
     return empty;
