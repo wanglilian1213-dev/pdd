@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { UploadCloud, FileText, Loader2, CheckCircle2, AlertCircle, Download, X, File, RefreshCw } from 'lucide-react';
 import { api } from '../../lib/api';
 import { triggerDownload } from '../../lib/downloadFile';
@@ -56,6 +57,8 @@ function getPollDelay(attempt: number) {
 // ---------------------------------------------------------------------------
 
 export default function Revision() {
+  const navigate = useNavigate();
+
   // --- Input state ---
   const [files, setFiles] = useState<File[]>([]);
   const [instructions, setInstructions] = useState('');
@@ -284,11 +287,19 @@ export default function Revision() {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">文章修改</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          上传需要修改的文章，输入修改要求，AI 将根据您的要求进行修改。
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">文章修改</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            上传需要修改的文章，输入修改要求，AI 将根据您的要求进行修改。
+          </p>
+        </div>
+        <button
+          onClick={() => navigate('/dashboard/tasks?tab=revisions')}
+          className="text-sm text-gray-500 hover:text-red-700 transition-colors whitespace-nowrap mt-1"
+        >
+          查看修改历史 &rarr;
+        </button>
       </div>
 
       {/* Error banner */}
