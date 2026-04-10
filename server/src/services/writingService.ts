@@ -1,4 +1,4 @@
-import { openai, extractOutputText } from '../lib/openai';
+import { streamResponseText } from '../lib/openai';
 import { supabaseAdmin } from '../lib/supabase';
 import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
@@ -671,10 +671,10 @@ async function repairReferenceIssues(
     try {
       const previousText = current;
 
-      const response = await withRewriteStageTimeout(
+      const { text: repairedText } = await withRewriteStageTimeout(
         'citation_verification',
         callMainOpenAIWithRetry('citation_verification', () =>
-          openai.responses.stream({
+          streamResponseText({
             ...buildMainOpenAIResponsesOptions('citation_verification'),
             instructions: buildReferenceRepairSystemPrompt(
               options.citationStyle,
@@ -687,11 +687,11 @@ async function repairReferenceIssues(
                 content: current,
               },
             ],
-          }).finalResponse(),
+          }),
         ),
       );
 
-      const repaired = extractOutputText(response) || current;
+      const repaired = repairedText || current;
 
       // Only use repaired version if it doesn't introduce critical issues
       const repairedAssessment = assessGeneratedPaper(repaired, {
@@ -791,9 +791,9 @@ ${options.brokenText}`;
 async function generateDraft(input: WritingContextInput): Promise<string> {
   const materialContent = await getOrUploadMaterialContent(input.taskId);
 
-  const response = await withDraftGenerationTimeout(
+  const { text: draftText } = await withDraftGenerationTimeout(
       callMainOpenAIWithRetry('draft_generation', () =>
-        openai.responses.stream({
+        streamResponseText({
           ...buildMainOpenAIResponsesOptions('draft_generation'),
           instructions: buildDraftGenerationSystemPrompt(
             input.targetWords,
@@ -817,20 +817,20 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
               ],
             },
           ],
-        }).finalResponse(),
+        }),
       ),
     );
 
-    let content = extractOutputText(response);
+    let content = draftText;
     let assessment = assessGeneratedPaper(content, {
       requiredReferenceCount: input.requiredReferenceCount,
       citationStyle: input.citationStyle,
     });
 
     if (!assessment.valid) {
-      const repairedResponse = await withDraftGenerationTimeout(
+      const { text: repairedDraftText } = await withDraftGenerationTimeout(
         callMainOpenAIWithRetry('draft_generation', () =>
-          openai.responses.stream({
+          streamResponseText({
             ...buildMainOpenAIResponsesOptions('draft_generation'),
             instructions: buildDraftGenerationSystemPrompt(
               input.targetWords,
@@ -856,11 +856,11 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
                 ],
               },
             ],
-          }).finalResponse(),
+          }),
         ),
       );
 
-      content = extractOutputText(repairedResponse) || content;
+      content = repairedDraftText || content;
       assessment = assessGeneratedPaper(content, {
         requiredReferenceCount: input.requiredReferenceCount,
         citationStyle: input.citationStyle,
@@ -938,10 +938,10 @@ async function calibrateWordCount(
       let calibrated = currentText;
 
       try {
-        const response = await withRewriteStageTimeout(
+        const { text: calibratedText } = await withRewriteStageTimeout(
           'word_calibration',
           callMainOpenAIWithRetry('word_calibration', () =>
-            openai.responses.stream({
+            streamResponseText({
               ...buildMainOpenAIResponsesOptions('word_calibration'),
               instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
               input: [
@@ -950,11 +950,11 @@ async function calibrateWordCount(
                   content: currentText,
                 },
               ],
-            }).finalResponse(),
+            }),
           ),
         );
 
-        calibrated = extractOutputText(response) || currentText;
+        calibrated = calibratedText || currentText;
       } catch (error) {
         if (!isWritingStageTimeoutError(error)) {
           throw error;
@@ -968,10 +968,10 @@ async function calibrateWordCount(
 
       if (!assessment.valid) {
         try {
-          const repairedResponse = await withRewriteStageTimeout(
+          const { text: repairedCalText } = await withRewriteStageTimeout(
             'word_calibration',
             callMainOpenAIWithRetry('word_calibration', () =>
-              openai.responses.stream({
+              streamResponseText({
                 ...buildMainOpenAIResponsesOptions('word_calibration'),
                 instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
                 input: [
@@ -985,11 +985,11 @@ async function calibrateWordCount(
                     }),
                   },
                 ],
-              }).finalResponse(),
+              }),
             ),
           );
 
-          const repaired = extractOutputText(repairedResponse) || currentText;
+          const repaired = repairedCalText || currentText;
           assessment = assessGeneratedPaper(repaired, {
             requiredReferenceCount,
             citationStyle,
@@ -1031,10 +1031,10 @@ async function verifyCitations(
   let verified = text;
 
   try {
-    const response = await withRewriteStageTimeout(
+    const { text: verifiedText } = await withRewriteStageTimeout(
       'citation_verification',
       callMainOpenAIWithRetry('citation_verification', () =>
-        openai.responses.stream({
+        streamResponseText({
           ...buildMainOpenAIResponsesOptions('citation_verification'),
           instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
           input: [
@@ -1043,11 +1043,11 @@ async function verifyCitations(
               content: text,
             },
           ],
-        }).finalResponse(),
+        }),
       ),
     );
 
-    verified = extractOutputText(response) || text;
+    verified = verifiedText || text;
   } catch (error) {
     if (!isWritingStageTimeoutError(error)) {
       throw error;
@@ -1060,10 +1060,10 @@ async function verifyCitations(
 
   if (!assessment.valid) {
     try {
-      const repairedResponse = await withRewriteStageTimeout(
+      const { text: repairedCiteText } = await withRewriteStageTimeout(
         'citation_verification',
         callMainOpenAIWithRetry('citation_verification', () =>
-          openai.responses.stream({
+          streamResponseText({
             ...buildMainOpenAIResponsesOptions('citation_verification'),
             instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
             input: [
@@ -1077,11 +1077,11 @@ async function verifyCitations(
                 }),
               },
             ],
-          }).finalResponse(),
+          }),
         ),
       );
 
-      const repaired = extractOutputText(repairedResponse) || text;
+      const repaired = repairedCiteText || text;
       assessment = assessGeneratedPaper(repaired, {
         requiredReferenceCount,
         citationStyle,
@@ -1212,10 +1212,10 @@ export async function generateCitationReport(
   // Keep report generation on the same tuning as citation verification until we
   // have a concrete need to split them into separate stages.
   // Timeout here is an explicit failure — do not silently deliver a fake report.
-  const response = await withRewriteStageTimeout(
+  const { text: rawReportText } = await withRewriteStageTimeout(
     'citation_verification',
     callMainOpenAIWithRetry('citation_verification', () =>
-      openai.responses.stream({
+      streamResponseText({
         ...buildMainOpenAIResponsesOptions('citation_verification'),
         instructions: prompt.systemPrompt,
         input: [
@@ -1224,10 +1224,9 @@ export async function generateCitationReport(
             content: `${prompt.userPrompt}\n\nEssay title: ${essayTitle}`,
           },
         ],
-      }).finalResponse(),
+      }),
     ),
   );
-  const rawReportText = extractOutputText(response);
 
   const parsed = parseCitationReportData(rawReportText, citationStyle);
   const now = new Date();

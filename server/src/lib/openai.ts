@@ -7,6 +7,17 @@ export const openai = new OpenAI({
 });
 
 /**
+ * Thrown when the upstream returns status=completed with output_tokens > 0
+ * but no actual text content — a silent failure that must be surfaced.
+ */
+export class EmptyResponseError extends Error {
+  constructor(public detail: Record<string, unknown>) {
+    super('上游 AI 返回空内容');
+    this.name = 'EmptyResponseError';
+  }
+}
+
+/**
  * Extract output text from an OpenAI Responses API response.
  *
  * With `openai.responses.create()` the server returns `output_text` directly.
@@ -35,4 +46,36 @@ export function extractOutputText(response: {
     return texts.join('');
   }
   return '';
+}
+
+/**
+ * Stream an OpenAI Responses API call and accumulate output text from SSE
+ * events. Since ~2026-04-07 the ChatGPT codex backend no longer populates
+ * `response.output` in the terminal `response.completed` SSE event, so
+ * `finalResponse().output_text` is always undefined. This helper listens
+ * for `response.output_text.done` events during the stream to capture the
+ * actual generated text.
+ */
+export async function streamResponseText(
+  params: Parameters<typeof openai.responses.stream>[0],
+): Promise<{ text: string; response: any }> {
+  const stream = openai.responses.stream(params);
+  let text = '';
+  stream.on('response.output_text.done', (ev: any) => {
+    text += ev.text;
+  });
+  const response = await stream.finalResponse();
+  // Fallback: if response.completed still has output (future fix), use it
+  if (!text) {
+    text = extractOutputText(response);
+  }
+  // Guard: upstream claims tokens produced but no text captured
+  if (!text && (response as any).usage?.output_tokens > 0) {
+    throw new EmptyResponseError({
+      id: (response as any).id,
+      status: (response as any).status,
+      output_tokens: (response as any).usage?.output_tokens,
+    });
+  }
+  return { text, response };
 }
