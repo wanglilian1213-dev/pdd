@@ -328,27 +328,29 @@ ${revision.instructions}
 - 表格用 Markdown 表格输出
 - 直接以论文内容开始，正文结束即停止`;
 
-    const response = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 80000,
-      system: REVISION_SYSTEM_PROMPT,
-      thinking: {
-        type: 'adaptive',
-      } as any,
-      ...({ output_config: { effort: 'max' } } as any),
-      messages: [
-        {
-          role: 'user',
-          content: [
-            ...materialBlocks,
-            {
-              type: 'text',
-              text: userMessage,
-            },
-          ],
-        },
-      ],
-    });
+    const response = await anthropic.messages
+      .stream({
+        model: 'claude-opus-4-6',
+        max_tokens: 80000,
+        system: REVISION_SYSTEM_PROMPT,
+        thinking: {
+          type: 'adaptive',
+        } as any,
+        ...({ output_config: { effort: 'max' } } as any),
+        messages: [
+          {
+            role: 'user',
+            content: [
+              ...materialBlocks,
+              {
+                type: 'text',
+                text: userMessage,
+              },
+            ],
+          },
+        ],
+      })
+      .finalMessage();
 
     // 验证 extended thinking 是否真的被上游执行：sub2api 不会动 thinking 字段，
     // 但如果 model id 在 normalize 阶段被映射成不支持 adaptive 的版本，会被静默忽略。
