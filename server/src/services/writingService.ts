@@ -449,15 +449,17 @@ export async function startWritingPipeline(taskId: string, userId: string) {
     await updateTaskStage(taskId, 'delivering');
     const chartResult = await enhanceWithCharts(polished, paperTitle, researchQuestion);
 
-    // Step 4: Deliver
-    await deliverResults(taskId, userId, polished, {
+    // Step 4: Deliver (store final version + Word file)
+    const taskMeta = {
       ...task,
       target_words: unifiedRequirements.targetWords,
       citation_style: unifiedRequirements.citationStyle,
       required_reference_count: unifiedRequirements.requiredReferenceCount,
-    }, versionBase, chartResult);
+    };
+    await deliverResults(taskId, userId, polished, taskMeta, versionBase, chartResult);
 
-    // Success: settle
+    // Success: settle + complete BEFORE citation report, so the task is never
+    // stuck at "delivering" even if the report generation crashes the process.
     await settleCredits(userId, task.frozen_credits);
     await completeTask(taskId);
 
@@ -466,6 +468,17 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       event_type: 'writing_completed',
       detail: { frozen_credits: task.frozen_credits },
     });
+
+    // Step 5: Citation report (best-effort, runs AFTER task is completed)
+    const retentionDays = (await getConfig('result_file_retention_days')) || 3;
+    const reportExpiry = new Date();
+    reportExpiry.setDate(reportExpiry.getDate() + retentionDays);
+    const displayTitle = normalizeDeliveryPaperTitle(
+      taskMeta.paper_title || taskMeta.title, 'Academic Essay',
+    );
+    await generateAndStoreCitationReport(
+      taskId, polished, taskMeta, displayTitle, reportExpiry,
+    );
 
   } catch (err: any) {
     console.error(`Writing pipeline failed for task ${taskId}:`, err);
@@ -1440,7 +1453,21 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     expiresAtIso: expiresAt.toISOString(),
     body: docBuffer,
   });
+}
 
+/**
+ * Generate citation report as a best-effort step AFTER the task is already
+ * marked complete.  If this crashes (e.g. OpenAI stream disconnect through
+ * sub2api/Cloudflare), the user still has their Word file and their credits
+ * are already settled — the task will not be stuck at "delivering".
+ */
+async function generateAndStoreCitationReport(
+  taskId: string,
+  finalText: string,
+  task: any,
+  displayTitle: string,
+  expiresAt: Date,
+) {
   try {
     const citationReport = await generateCitationReport(
       finalText,
@@ -1461,9 +1488,9 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
       expiresAtIso: expiresAt.toISOString(),
       body: reportBuffer,
     });
+    console.log(`[citation-report] task=${taskId} generated successfully`);
   } catch (reportErr) {
-    const isTimeout = reportErr instanceof Error && reportErr.name === 'WritingStageTimeoutError';
-    const reason = isTimeout ? 'timeout' : (reportErr instanceof Error ? reportErr.message : String(reportErr));
+    const reason = reportErr instanceof Error ? reportErr.message : String(reportErr);
     console.error(`[citation-report] task=${taskId} failed reason=${reason}`, reportErr);
   }
 }
