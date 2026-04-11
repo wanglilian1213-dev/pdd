@@ -1156,22 +1156,27 @@ async function enhanceWithCharts(
   };
 
   try {
+    // Use streaming to avoid Anthropic SDK timeout on long-running requests.
+    // Non-streaming calls with large max_tokens error out with
+    // "Streaming is required for operations that may take longer than 10 minutes".
+    const stream = anthropic.messages.stream({
+      model: 'claude-opus-4-6',
+      max_tokens: 64000,
+      system: buildChartEnhancementSystemPrompt(),
+      thinking: {
+        type: 'adaptive',
+      } as any,
+      ...({ output_config: { effort: 'max' } } as any),
+      messages: [
+        {
+          role: 'user',
+          content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). Analyze it and enhance with charts and/or tables if appropriate.\n\n${verifiedText}`,
+        },
+      ],
+    } as any);
+
     const response = await Promise.race([
-      anthropic.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 64000,
-        system: buildChartEnhancementSystemPrompt(),
-        thinking: {
-          type: 'adaptive',
-        } as any,
-        ...({ output_config: { effort: 'max' } } as any),
-        messages: [
-          {
-            role: 'user',
-            content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). Analyze it and enhance with charts and/or tables if appropriate.\n\n${verifiedText}`,
-          },
-        ],
-      }),
+      stream.finalMessage(),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('chart enhancement timeout')), CHART_ENHANCEMENT_TIMEOUT_MS),
       ),

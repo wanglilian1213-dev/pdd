@@ -115,14 +115,14 @@ IMPORTANT: Do NOT check or score citation formatting quality (e.g. APA/Harvard v
 
 Return JSON in this shape:
 {
-  "overall_score": number,
+  "overall_score": number (0-100 integer percentage, where 100 = perfect),
   "total_citations": number,
   "key_findings": ["string"],
   "citations": [
     {
       "citation_label": "string",
       "source_text": "string",
-      "score": number,
+      "score": number (0-100 integer percentage, where 100 = perfect),
       "assessment": "string",
       "details": [
         {
@@ -159,7 +159,9 @@ export function parseCitationReportData(
   const parsed = safeJsonParse(content);
   const rawCitations = Array.isArray(parsed?.citations) ? parsed!.citations as Array<Record<string, unknown>> : [];
   const citations: CitationEntry[] = rawCitations.map((citation, index) => {
-    const score = clampScore(Number(citation.score ?? 0));
+    const rawScore = Number(citation.score ?? 0);
+    // Model may return decimal (0-1) instead of percentage (0-100); normalise.
+    const score = clampScore(rawScore > 0 && rawScore <= 1 ? Math.round(rawScore * 100) : Math.round(rawScore));
     const details = Array.isArray(citation.details) ? citation.details as Array<Record<string, unknown>> : [];
     // Filter out any formatting-related criteria the model may still return
     const FORMATTING_KEYWORDS = /\bformat/i;
@@ -188,10 +190,15 @@ export function parseCitationReportData(
     };
   });
 
-  const totalCitations = Number(parsed?.total_citations ?? citations.length ?? 0);
-  const overallScore = clampScore(Number(parsed?.overall_score ?? (citations.length > 0
-    ? citations.reduce((sum, citation) => sum + citation.score, 0) / citations.length
-    : 0)));
+  // Use actual parsed count — Claude's reported total_citations may not match.
+  const totalCitations = citations.length;
+  const rawOverall = Number(parsed?.overall_score ?? 0);
+  const computedOverall = rawOverall > 0
+    ? (rawOverall > 0 && rawOverall <= 1 ? Math.round(rawOverall * 100) : Math.round(rawOverall))
+    : (citations.length > 0
+      ? Math.round(citations.reduce((sum, citation) => sum + citation.score, 0) / citations.length)
+      : 0);
+  const overallScore = clampScore(computedOverall);
   const keyFindings = Array.isArray(parsed?.key_findings) && parsed?.key_findings.length > 0
     ? parsed!.key_findings.map((item) => String(item))
     : ['The report was generated from the available citation information in the essay.'];
@@ -208,7 +215,7 @@ export function parseCitationReportData(
 
   const breakdown = breakdownDefinitions.map((definition) => {
     const count = citations.filter((citation) => citation.status === definition.status).length;
-    const denominator = totalCitations > 0 ? totalCitations : 1;
+    const denominator = citations.length > 0 ? citations.length : 1;
     return {
       label: definition.label,
       count,
