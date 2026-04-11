@@ -443,13 +443,13 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
     // Step 3.5: Polish (best-effort, never fails the task)
     await updateTaskStage(taskId, 'polishing');
-    const polished = await polishText(taskId, verified, versionBase);
+    const polished = await polishText(taskId, verified, versionBase, unifiedRequirements.targetWords);
 
     // Step 3.6: Chart enhancement (best-effort, never fails the task)
     await updateTaskStage(taskId, 'delivering');
     const chartResult = await enhanceWithCharts(polished, paperTitle, researchQuestion);
 
-    // Step 4: Deliver (store final version + Word file)
+    // Step 4: Deliver (store final version + Word file + citation report)
     const taskMeta = {
       ...task,
       target_words: unifiedRequirements.targetWords,
@@ -458,8 +458,28 @@ export async function startWritingPipeline(taskId: string, userId: string) {
     };
     await deliverResults(taskId, userId, polished, taskMeta, versionBase, chartResult);
 
-    // Success: settle + complete BEFORE citation report, so the task is never
-    // stuck at "delivering" even if the report generation crashes the process.
+    // Step 4.5: Citation report (best-effort, with process-level crash guard)
+    // The OpenAI stream call through sub2api/Cloudflare can throw uncaught
+    // exceptions that crash the Node process. The temporary handler prevents this.
+    const retentionDays = (await getConfig('result_file_retention_days')) || 3;
+    const reportExpiry = new Date();
+    reportExpiry.setDate(reportExpiry.getDate() + retentionDays);
+    const displayTitle = normalizeDeliveryPaperTitle(
+      taskMeta.paper_title || taskMeta.title, 'Academic Essay',
+    );
+    const uncaughtGuard = (err: Error) => {
+      console.error(`[citation-report] uncaught exception caught for task ${taskId}:`, err?.message || err);
+    };
+    process.on('uncaughtException', uncaughtGuard);
+    try {
+      await generateAndStoreCitationReport(
+        taskId, polished, taskMeta, displayTitle, reportExpiry,
+      );
+    } finally {
+      process.removeListener('uncaughtException', uncaughtGuard);
+    }
+
+    // Success: settle + complete
     await settleCredits(userId, task.frozen_credits);
     await completeTask(taskId);
 
@@ -468,17 +488,6 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       event_type: 'writing_completed',
       detail: { frozen_credits: task.frozen_credits },
     });
-
-    // Step 5: Citation report (best-effort, runs AFTER task is completed)
-    const retentionDays = (await getConfig('result_file_retention_days')) || 3;
-    const reportExpiry = new Date();
-    reportExpiry.setDate(reportExpiry.getDate() + retentionDays);
-    const displayTitle = normalizeDeliveryPaperTitle(
-      taskMeta.paper_title || taskMeta.title, 'Academic Essay',
-    );
-    await generateAndStoreCitationReport(
-      taskId, polished, taskMeta, displayTitle, reportExpiry,
-    );
 
   } catch (err: any) {
     console.error(`Writing pipeline failed for task ${taskId}:`, err);
@@ -1088,7 +1097,19 @@ async function verifyCitations(
 
 // ─── Polishing (Claude – reduce AI-generated feel) ─────────────────────────
 
-function buildPolishingSystemPrompt(): string {
+function buildPolishingSystemPrompt(targetWords: number, currentWords: number): string {
+  const { minWords, maxWords } = getWordCountRange(targetWords);
+  const needsCondense = currentWords > maxWords;
+  const needsExpand = currentWords < minWords;
+
+  const wordCountRule = needsCondense
+    ? `\nWORD COUNT CORRECTION (CRITICAL):
+The current main body is ${currentWords} words but the target is ${targetWords} words (allowed range: ${minWords}–${maxWords}). You MUST condense the main body to fall within that range while polishing. Cut redundant elaboration, merge repetitive sentences, tighten verbose phrasing — but keep all citations and references intact.`
+    : needsExpand
+      ? `\nWORD COUNT CORRECTION (CRITICAL):
+The current main body is ${currentWords} words but the target is ${targetWords} words (allowed range: ${minWords}–${maxWords}). You MUST expand the main body to fall within that range while polishing. Add supporting analysis, elaborate on key arguments — but do not invent new citations.`
+      : `\n- Keep word count within ±5% of current count`;
+
   return `You are an academic writing style editor. Your task is to reduce the "AI-generated" feel of the following academic paper while preserving its full content, structure, argument, and all citations.
 
 WHAT TO FIX:
@@ -1126,8 +1147,7 @@ ABSOLUTE CONSTRAINTS:
 - Do NOT alter ANY reference entries in the References section — reproduce character-for-character
 - Do NOT change section headings
 - Do NOT add or remove arguments, evidence, or claims
-- Do NOT change the structure or order of paragraphs/sections
-- Keep word count within ±5% of current count
+- Do NOT change the structure or order of paragraphs/sections${wordCountRule}
 - Do NOT use Markdown syntax (no #, **, __, \`, -, *)
 - Output the COMPLETE paper — no truncation, no preamble, no commentary`;
 }
@@ -1136,15 +1156,17 @@ async function polishText(
   taskId: string,
   inputText: string,
   versionBase: number,
+  targetWords: number,
 ): Promise<string> {
   try {
+    const currentWords = countMainBodyWords(inputText);
     // Polishing is a straightforward rewrite — no extended thinking needed.
     // Using thinking + max effort caused process crashes on Railway (likely OOM
     // from long thinking chains or stream disconnect during extended generation).
     const stream = anthropic.messages.stream({
       model: 'claude-opus-4-6',
       max_tokens: 16000,
-      system: buildPolishingSystemPrompt(),
+      system: buildPolishingSystemPrompt(targetWords, currentWords),
       messages: [
         {
           role: 'user',
@@ -1204,14 +1226,28 @@ async function polishText(
       return inputText;
     }
 
-    // Safety check 3: word count within ±5%
-    const origWords = countMainBodyWords(inputText);
+    // Safety check 3: word count must be within target ±10% (or at least not worse than before)
     const polishedWords = countMainBodyWords(polishedText);
-    if (origWords > 0 && Math.abs(polishedWords - origWords) > origWords * 0.05) {
+    const { minWords: targetMin, maxWords: targetMax } = getWordCountRange(targetWords);
+    const polishedInRange = polishedWords >= targetMin && polishedWords <= targetMax;
+    const origInRange = currentWords >= targetMin && currentWords <= targetMax;
+    // Reject only if: (a) original was in range but polished went out, or
+    // (b) original was out of range and polished made it worse (further from target)
+    if (origInRange && !polishedInRange) {
       console.warn(
-        `[polish] word count shifted from ${origWords} to ${polishedWords} for task ${taskId}, using original`,
+        `[polish] word count left target range: ${currentWords} → ${polishedWords} (target ${targetMin}-${targetMax}) for task ${taskId}, using original`,
       );
       return inputText;
+    }
+    if (!origInRange && !polishedInRange) {
+      const origDist = Math.abs(currentWords - targetWords);
+      const polishDist = Math.abs(polishedWords - targetWords);
+      if (polishDist > origDist) {
+        console.warn(
+          `[polish] word count further from target: ${currentWords} → ${polishedWords} (target ${targetWords}) for task ${taskId}, using original`,
+        );
+        return inputText;
+      }
     }
 
     // All checks passed — store polished version
@@ -1224,7 +1260,7 @@ async function polishText(
       content: polishedText,
     });
 
-    console.log(`[polish] success for task ${taskId}, words ${origWords} → ${polishedWords}`);
+    console.log(`[polish] success for task ${taskId}, words ${currentWords} → ${polishedWords} (target ${targetMin}-${targetMax})`);
     return polishedText;
   } catch (err: any) {
     console.warn(`[polish] failed for task ${taskId}, delivering without polishing:`, err?.message || err);
