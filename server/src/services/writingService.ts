@@ -447,7 +447,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
     // Step 3.6: Chart enhancement (best-effort, never fails the task)
     await updateTaskStage(taskId, 'delivering');
-    const chartResult = await enhanceWithCharts(polished, paperTitle, researchQuestion);
+    const chartResult = await enhanceWithCharts(polished, paperTitle, researchQuestion, unifiedRequirements.targetWords);
 
     // Step 4: Deliver (store final version + Word file + citation report)
     const taskMeta = {
@@ -1270,7 +1270,12 @@ async function polishText(
 
 // ─── Chart Enhancement (Claude + Chart DSL + QuickChart rendering) ──────────
 
-function buildChartEnhancementSystemPrompt(): string {
+function buildChartEnhancementSystemPrompt(targetWords?: number): string {
+  const { minWords, maxWords } = targetWords ? getWordCountRange(targetWords) : { minWords: 0, maxWords: Infinity };
+  const wordBudgetRule = targetWords
+    ? `\n- WORD COUNT BUDGET: After adding chart reference sentences and table captions, the main body word count (excluding [CHART_BEGIN]...[CHART_END] blocks and table rows) MUST remain between ${minWords} and ${maxWords} words. If adding reference sentences would push the count over the limit, shorten other body paragraphs to compensate — remove redundant elaboration or tighten phrasing, but keep all in-text citations.`
+    : '';
+
   return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and enhance it with 1-2 visual charts and optionally tables.
 
 MANDATORY CHART REQUIREMENT:
@@ -1337,11 +1342,10 @@ TABLE RULES:
 
 ABSOLUTE CONSTRAINTS:
 - ALL charts and tables must be placed WITHIN the paper body sections, NEVER after the References section.
-- Do NOT modify any existing text in the paper except to add figure/table reference sentences.
-- Do NOT rephrase, reorder, or rewrite any existing sentences or paragraphs.
+- When adding figure/table reference sentences, you MAY shorten other body paragraphs to compensate for the added words. Remove redundant elaboration or tighten verbose phrasing, but keep all in-text citations intact.
 - Do NOT add new arguments, evidence, or references that were not in the original paper.
 - Do NOT use Markdown heading syntax (#), bold (**), or any other Markdown formatting in the paper body text.
-- The paper's section headings, references section, and citation style must remain exactly as they were.
+- The paper's section headings, references section, and citation style must remain exactly as they were.${wordBudgetRule}
 - Output the COMPLETE paper text — do not truncate or summarize.`;
 }
 
@@ -1350,10 +1354,68 @@ interface ChartEnhancementResult {
   mediaMap: Map<string, RenderedChart>;
 }
 
+const POST_CHART_CONDENSE_TIMEOUT_MS = 600_000; // 10 minutes
+
+async function postChartCondense(
+  enhancedText: string,
+  targetWords: number,
+): Promise<string> {
+  const { minWords, maxWords } = getWordCountRange(targetWords);
+  const currentWords = countMainBodyWords(enhancedText);
+  console.log(`[post-chart-condense] starting: current=${currentWords}, target range=${minWords}-${maxWords}`);
+
+  const stream = anthropic.messages.stream({
+    model: 'claude-opus-4-6',
+    max_tokens: 16000,
+    system: `You are an academic writing editor. The paper below has charts and tables embedded using [CHART_BEGIN]...[CHART_END] DSL blocks. The main body word count (excluding chart DSL blocks, table rows, title, and references) is currently ${currentWords} words, but it must be between ${minWords} and ${maxWords} words.
+
+Condense the main body to fit within ${minWords}-${maxWords} words by:
+1. Removing redundant elaboration and filler phrases
+2. Merging sentences that say the same thing differently
+3. Tightening verbose phrasing
+
+ABSOLUTE CONSTRAINTS:
+- Do NOT alter or remove ANY [CHART_BEGIN]...[CHART_END] blocks — reproduce them exactly
+- Do NOT alter or remove ANY figure/table reference sentences (e.g. "As illustrated in Figure 1, ...")
+- Do NOT alter ANY in-text citations or the References section
+- Do NOT remove tables or table captions
+- Do NOT use Markdown syntax
+- Output the COMPLETE paper — no truncation, no preamble`,
+    messages: [{ role: 'user', content: enhancedText }],
+  });
+
+  stream.on('error', (err: any) => {
+    console.warn(`[post-chart-condense] stream error:`, err?.message || err);
+  });
+
+  const response = await Promise.race([
+    stream.finalMessage(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('post-chart condense timeout')), POST_CHART_CONDENSE_TIMEOUT_MS),
+    ),
+  ]);
+
+  const resp = response as any;
+  const condensed = resp.content
+    ?.filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n\n') || '';
+
+  if (!condensed) {
+    console.warn('[post-chart-condense] empty result, using original');
+    return enhancedText;
+  }
+
+  const condensedWords = countMainBodyWords(condensed);
+  console.log(`[post-chart-condense] done: ${currentWords} → ${condensedWords}`);
+  return condensed;
+}
+
 async function enhanceWithCharts(
   verifiedText: string,
   paperTitle: string,
   researchQuestion: string,
+  targetWords?: number,
 ): Promise<ChartEnhancementResult> {
   const empty: ChartEnhancementResult = {
     text: verifiedText,
@@ -1367,7 +1429,7 @@ async function enhanceWithCharts(
     const stream = anthropic.messages.stream({
       model: 'claude-opus-4-6',
       max_tokens: 64000,
-      system: buildChartEnhancementSystemPrompt(),
+      system: buildChartEnhancementSystemPrompt(targetWords),
       thinking: {
         type: 'adaptive',
       } as any,
@@ -1407,8 +1469,7 @@ async function enhanceWithCharts(
       return empty;
     }
 
-    // Safety check: Claude must not significantly alter the paper text.
-    // Strip chart DSL blocks + table rows before comparing word counts.
+    // Safety check: Strip chart DSL blocks + table rows, then check word count.
     const cleanForCheck = rawText
       .replace(/\[CHART_BEGIN\][\s\S]*?\[CHART_END\]/g, '')
       .replace(/^\|[^\n]*\|$/gm, '')
@@ -1416,15 +1477,48 @@ async function enhanceWithCharts(
     const originalWords = countMainBodyWords(verifiedText);
     const enhancedWords = countMainBodyWords(cleanForCheck);
 
-    if (originalWords > 0 && Math.abs(enhancedWords - originalWords) > originalWords * 0.08) {
-      console.warn(
-        `[chart-enhance] AI mutated text (original=${originalWords}, enhanced=${enhancedWords}), discarding`,
-      );
-      return empty;
+    console.log(`[chart-enhance] body words: original=${originalWords}, enhanced=${enhancedWords}`);
+
+    // Check if enhanced text is within target word range
+    let finalRawText = rawText;
+    if (targetWords) {
+      const { minWords, maxWords } = getWordCountRange(targetWords);
+      if (enhancedWords > maxWords || enhancedWords < minWords) {
+        console.warn(
+          `[chart-enhance] body ${enhancedWords} outside target range ${minWords}-${maxWords}, running safety-net condense`,
+        );
+        // Safety net: condense the enhanced text while keeping charts
+        try {
+          const condensed = await postChartCondense(rawText, targetWords);
+          const condensedClean = condensed
+            .replace(/\[CHART_BEGIN\][\s\S]*?\[CHART_END\]/g, '')
+            .replace(/^\|[^\n]*\|$/gm, '')
+            .trim();
+          const condensedWords = countMainBodyWords(condensedClean);
+          if (condensedWords >= minWords && condensedWords <= maxWords) {
+            console.log(`[chart-enhance] safety-net condense succeeded: ${enhancedWords} → ${condensedWords}`);
+            finalRawText = condensed;
+          } else {
+            console.warn(`[chart-enhance] safety-net condense still out of range (${condensedWords}), using original polished text`);
+            return empty;
+          }
+        } catch (condenseErr: any) {
+          console.warn(`[chart-enhance] safety-net condense failed:`, condenseErr?.message || condenseErr);
+          return empty;
+        }
+      }
+    } else {
+      // Fallback: original ±8% check when no target words available
+      if (originalWords > 0 && Math.abs(enhancedWords - originalWords) > originalWords * 0.08) {
+        console.warn(
+          `[chart-enhance] AI mutated text (original=${originalWords}, enhanced=${enhancedWords}), discarding`,
+        );
+        return empty;
+      }
     }
 
     // Parse chart DSL → placeholders + chart specs (reuse revision parser)
-    const { text: textWithPlaceholders, charts } = parseRevisionOutput(rawText);
+    const { text: textWithPlaceholders, charts } = parseRevisionOutput(finalRawText);
 
     if (charts.length === 0) {
       // No charts — Claude decided none needed (may still have tables)
