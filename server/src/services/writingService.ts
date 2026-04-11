@@ -1125,21 +1125,25 @@ async function polishText(
   versionBase: number,
 ): Promise<string> {
   try {
+    // Polishing is a straightforward rewrite — no extended thinking needed.
+    // Using thinking + max effort caused process crashes on Railway (likely OOM
+    // from long thinking chains or stream disconnect during extended generation).
     const stream = anthropic.messages.stream({
       model: 'claude-opus-4-6',
-      max_tokens: 64000,
+      max_tokens: 16000,
       system: buildPolishingSystemPrompt(),
-      thinking: {
-        type: 'adaptive',
-      } as any,
-      ...({ output_config: { effort: 'max' } } as any),
       messages: [
         {
           role: 'user',
           content: inputText,
         },
       ],
-    } as any);
+    });
+
+    // Guard against unhandled stream errors that could crash the process
+    stream.on('error', (err: any) => {
+      console.warn(`[polish] stream error for task ${taskId}:`, err?.message || err);
+    });
 
     const response = await Promise.race([
       stream.finalMessage(),
