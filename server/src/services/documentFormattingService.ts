@@ -578,8 +578,21 @@ function buildDocxTable(rows: string[][]): Table {
   });
 }
 
+// Default Word content area ≈ 624px (Letter page 8.5in − 1in margins × 96 DPI).
+// Leave some breathing room so the chart sits comfortably inside the text block.
+const MAX_DOC_CHART_WIDTH = 560;
+
 function buildChartNodes(rendered: RenderedChart | undefined): Paragraph[] {
   if (rendered?.png) {
+    // Scale image to fit within the page content area, preserving aspect ratio.
+    let w = rendered.width;
+    let h = rendered.height;
+    if (w > MAX_DOC_CHART_WIDTH) {
+      const scale = MAX_DOC_CHART_WIDTH / w;
+      w = MAX_DOC_CHART_WIDTH;
+      h = Math.round(h * scale);
+    }
+
     return [
       new Paragraph({
         alignment: AlignmentType.CENTER,
@@ -589,7 +602,7 @@ function buildChartNodes(rendered: RenderedChart | undefined): Paragraph[] {
             // docx 9.x 的 ImageRun 需要 type 字段
             type: 'png',
             data: rendered.png,
-            transformation: { width: rendered.width, height: rendered.height },
+            transformation: { width: w, height: h },
           } as any),
         ],
       }),
