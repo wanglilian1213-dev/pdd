@@ -3,15 +3,177 @@ import { AppError } from '../lib/errors';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { startHumanizeJobAtomic } from './atomicOpsService';
-import { storeGeneratedTaskFile } from './writingService';
+import { storeGeneratedTaskFile, countMainBodyWords, getWordCountRange } from './writingService';
 import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { recordAuditLog } from './auditLogService';
 import { captureError } from '../lib/errorMonitor';
 import { normalizeDeliveryPaperTitle } from './paperTitleService';
+import { anthropic } from '../lib/anthropic';
+import { extractReferenceEntries } from './paperQualityService';
+
+const CONDENSE_TIMEOUT_MS = 900_000; // 15 minutes
+const FORMAT_CHECK_TIMEOUT_MS = 600_000; // 10 minutes
+const CONDENSE_RATIO = 0.72; // Condense to 72% of target — with 30-40% inflation lands near 100%
+
+// ─── Condense & Format Check (Claude API) ───────────────────────────────────
+
+function buildCondenseSystemPrompt(targetWords: number, currentWords: number): string {
+  return `You are an academic writing editor specializing in concise writing. Condense the following academic paper to approximately ${targetWords} words in the main body (excluding title and references). Current main body: ${currentWords} words.
+
+CONDENSING RULES:
+1. Reduce to approximately ${targetWords} words.
+2. Preserve argument structure and all key claims.
+3. Remove redundant elaboration, filler phrases, unnecessary repetition.
+4. Merge sentences that say the same thing differently.
+5. Cut examples that merely restate an already-supported point.
+6. Tighten verbose phrasing ("in order to" → "to", "due to the fact that" → "because").
+7. Keep section headings exactly as-is.
+8. Reduce proportionally across all sections.
+
+ABSOLUTE CONSTRAINTS:
+- Do NOT remove or alter ANY in-text citation "(Author, Year)" or "[N]"
+- Do NOT remove or alter ANY reference entry — reproduce References section character-for-character
+- If removing a sentence would orphan a citation, keep that sentence
+- Do NOT use Markdown syntax
+- Output the COMPLETE condensed paper with title, all sections, and full References
+- No preamble, no commentary`;
+}
+
+function buildFormatCheckSystemPrompt(): string {
+  return `You are a formatting quality checker for academic papers. The paper below was processed by a humanization tool and may have formatting artifacts. Fix formatting issues ONLY. Do NOT rewrite any content.
+
+FIX THESE ONLY:
+1. Broken paragraphs — sentences split across lines mid-sentence
+2. Missing paragraph breaks — separate paragraphs merged into one
+3. Broken citations — e.g. "(Smith, 202 4)" → "(Smith, 2024)"
+4. Residual Markdown artifacts — any #, **, __, \`, -, * markers
+5. Broken reference entries — split, merged, or spacing-corrupted entries
+6. Doubled spaces, trailing whitespace
+7. Section headings merged into previous paragraph
+
+DO NOT:
+- Rewrite any sentences
+- Add new content
+- Remove any content
+- Change order of anything
+- "Improve" writing style
+
+Output the COMPLETE paper with formatting fixes. No Markdown. No preamble.`;
+}
+
+async function condensePaper(text: string, targetWordCount: number): Promise<string> {
+  const currentWords = countMainBodyWords(text);
+  console.log(`[humanize-condense] starting: current=${currentWords}, target=${targetWordCount}`);
+
+  const stream = anthropic.messages.stream({
+    model: 'claude-opus-4-6',
+    max_tokens: 64000,
+    system: buildCondenseSystemPrompt(targetWordCount, currentWords),
+    thinking: {
+      type: 'adaptive',
+    } as any,
+    ...({ output_config: { effort: 'max' } } as any),
+    messages: [
+      {
+        role: 'user',
+        content: text,
+      },
+    ],
+  } as any);
+
+  const response = await Promise.race([
+    stream.finalMessage(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('condense timeout')), CONDENSE_TIMEOUT_MS),
+    ),
+  ]);
+
+  const resp = response as any;
+  const condensed = resp.content
+    ?.filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n\n') || '';
+
+  console.log(
+    `[humanize-condense] stop=${resp.stop_reason}, ` +
+    `text_len=${condensed.length}, ` +
+    `usage=${JSON.stringify(resp.usage ?? {})}`,
+  );
+
+  if (!condensed) {
+    throw new Error('Claude returned empty text during condensing');
+  }
+
+  // Safety: reference count must be preserved
+  const origRefs = extractReferenceEntries(text);
+  const condensedRefs = extractReferenceEntries(condensed);
+  if (condensedRefs.length < origRefs.length) {
+    console.warn(`[humanize-condense] references dropped from ${origRefs.length} to ${condensedRefs.length}`);
+    throw new Error(`Condensing dropped references: ${origRefs.length} → ${condensedRefs.length}`);
+  }
+
+  const condensedWords = countMainBodyWords(condensed);
+  console.log(`[humanize-condense] success: ${currentWords} → ${condensedWords} words`);
+  return condensed;
+}
+
+async function formatCheckPaper(text: string): Promise<string> {
+  try {
+    const stream = anthropic.messages.stream({
+      model: 'claude-opus-4-6',
+      max_tokens: 64000,
+      system: buildFormatCheckSystemPrompt(),
+      thinking: {
+        type: 'adaptive',
+      } as any,
+      ...({ output_config: { effort: 'max' } } as any),
+      messages: [
+        {
+          role: 'user',
+          content: text,
+        },
+      ],
+    } as any);
+
+    const response = await Promise.race([
+      stream.finalMessage(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('format check timeout')), FORMAT_CHECK_TIMEOUT_MS),
+      ),
+    ]);
+
+    const resp = response as any;
+    const formatted = resp.content
+      ?.filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n\n') || '';
+
+    console.log(
+      `[humanize-format] stop=${resp.stop_reason}, ` +
+      `text_len=${formatted.length}, ` +
+      `usage=${JSON.stringify(resp.usage ?? {})}`,
+    );
+
+    if (!formatted) {
+      console.warn('[humanize-format] Claude returned empty text, using raw humanized text');
+      return text;
+    }
+
+    return formatted;
+  } catch (err: any) {
+    console.warn('[humanize-format] format check failed, using raw humanized text:', err?.message || err);
+    return text;
+  }
+}
+
+// ─── Deps interface ─────────────────────────────────────────────────────────
 
 interface ExecuteHumanizeDeps {
   humanizeText: (inputText: string) => Promise<HumanizeTextResult>;
+  condensePaper: (text: string, targetWordCount: number) => Promise<string>;
+  formatCheckPaper: (text: string) => Promise<string>;
+  getTargetWords: (taskId: string) => Promise<number>;
   insertDocumentVersion: (payload: {
     task_id: string;
     version: number;
@@ -36,6 +198,16 @@ interface ExecuteHumanizeDeps {
 
 const defaultExecuteHumanizeDeps: ExecuteHumanizeDeps = {
   humanizeText: (inputText) => undetectableClient.humanizeText(inputText),
+  condensePaper,
+  formatCheckPaper,
+  getTargetWords: async (taskId) => {
+    const { data } = await supabaseAdmin
+      .from('tasks')
+      .select('target_words')
+      .eq('id', taskId)
+      .single();
+    return data?.target_words || 1000;
+  },
   insertDocumentVersion: async (payload) => {
     await supabaseAdmin.from('document_versions').insert(payload);
   },
@@ -148,9 +320,37 @@ export async function executeHumanize(
   deps: ExecuteHumanizeDeps = defaultExecuteHumanizeDeps,
 ) {
   try {
-    const { documentId, output } = await deps.humanizeText(inputText);
+    // Step 1: Get target words and condense via Claude
+    const targetWords = await deps.getTargetWords(taskId);
+    const condensedTarget = Math.round(targetWords * CONDENSE_RATIO);
+    console.log(`[humanize] task ${taskId}: target=${targetWords}, condenseTarget=${condensedTarget}, inputWords=${wordCount}`);
+
+    const condensed = await deps.condensePaper(inputText, condensedTarget);
+    const condensedWords = condensed.split(/\s+/).filter(Boolean).length;
+    console.log(`[humanize] task ${taskId}: condensed to ${condensedWords} words`);
+
+    // Step 2: Humanize via Undetectable AI
+    const { documentId, output } = await deps.humanizeText(condensed);
     const humanized = output;
-    const newWordCount = humanized.split(/\s+/).filter(Boolean).length;
+    const humanizedWords = humanized.split(/\s+/).filter(Boolean).length;
+    console.log(`[humanize] task ${taskId}: humanized to ${humanizedWords} words (inflation: ${((humanizedWords / condensedWords - 1) * 100).toFixed(1)}%)`);
+
+    // Step 3: Format check via Claude (best-effort)
+    const formatted = await deps.formatCheckPaper(humanized);
+    const newWordCount = formatted.split(/\s+/).filter(Boolean).length;
+
+    // Step 4: Final word count check (warning only, does not block)
+    const { minWords, maxWords } = getWordCountRange(targetWords);
+    const mainBodyWords = countMainBodyWords(formatted);
+    if (mainBodyWords < minWords || mainBodyWords > maxWords) {
+      console.warn(
+        `[humanize] task ${taskId}: final main body ${mainBodyWords} outside target range ${minWords}-${maxWords}`,
+      );
+    } else {
+      console.log(`[humanize] task ${taskId}: final main body ${mainBodyWords} within range ${minWords}-${maxWords}`);
+    }
+
+    // Step 5: Store and deliver
     const taskMeta = await deps.loadTaskMeta(taskId);
 
     await deps.insertDocumentVersion({
@@ -158,7 +358,7 @@ export async function executeHumanize(
       version: 100 + Math.floor(deps.now().getTime() / 1000),
       stage: 'final',
       word_count: newWordCount,
-      content: humanized,
+      content: formatted,
     });
 
     const retentionDays = (await deps.getConfigValue('result_file_retention_days')) || 3;
@@ -166,7 +366,7 @@ export async function executeHumanize(
     expiresAt.setDate(expiresAt.getDate() + retentionDays);
     const displayTitle = normalizeDeliveryPaperTitle(taskMeta?.title, 'Academic Essay');
 
-    const docBuffer = await buildFormattedPaperDocBuffer(humanized, {
+    const docBuffer = await buildFormattedPaperDocBuffer(formatted, {
       paperTitle: displayTitle,
       courseCode: taskMeta?.course_code || null,
     });
@@ -200,6 +400,9 @@ export async function executeHumanize(
       detail: {
         job_id: jobId,
         word_count: newWordCount,
+        main_body_words: mainBodyWords,
+        condensed_words: condensedWords,
+        humanized_words: humanizedWords,
         provider: 'undetectable',
         provider_document_id: documentId,
         input_word_count: wordCount,
@@ -214,6 +417,8 @@ export async function executeHumanize(
       detail: {
         jobId,
         wordCount: newWordCount,
+        condensedWords,
+        humanizedWords,
       },
     });
 

@@ -54,6 +54,7 @@ const AUTO_CLEANUP_STAGES = new Set([
   'writing',
   'word_calibrating',
   'citation_checking',
+  'polishing',
   'delivering',
   'humanizing',
 ]);
@@ -89,7 +90,7 @@ async function cleanupStuckTasks() {
 
     console.log(`[cleanup] Processing stuck task ${task.id} at stage ${task.stage}`);
 
-    const paidStages = ['writing', 'word_calibrating', 'citation_checking', 'delivering'];
+    const paidStages = ['writing', 'word_calibrating', 'citation_checking', 'polishing', 'delivering'];
     const needsRefund = paidStages.includes(task.stage) && task.frozen_credits > 0;
 
     if (needsRefund) {

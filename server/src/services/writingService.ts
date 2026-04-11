@@ -14,6 +14,7 @@ import { getOrUploadMaterialContent, type StoredMaterialFile } from './materialI
 import {
   assessGeneratedPaper as assessGeneratedPaperInternal,
   summarizeReferenceCompliance,
+  extractReferenceEntries,
 } from './paperQualityService';
 import {
   buildCitationReportPrompt,
@@ -30,6 +31,7 @@ const CITATION_VERIFICATION_TIMEOUT_MS = 1_200_000;
 const WORD_CALIBRATION_MAX_ATTEMPTS = 5;
 const REFERENCE_REPAIR_MAX_ATTEMPTS = 2;
 const CHART_ENHANCEMENT_TIMEOUT_MS = 300_000; // 5 minutes
+const POLISHING_TIMEOUT_MS = 600_000; // 10 minutes
 
 const CRITICAL_PAPER_REASONS = new Set([
   'empty paper',
@@ -134,6 +136,7 @@ export function buildWritingFailureReason(stage: string, error: unknown) {
     writing: '初稿生成超时，积分已自动退回。请稍后重试。',
     word_calibrating: '字数校准超时，积分已自动退回。请稍后重试。',
     citation_checking: '引用检查超时，积分已自动退回。请稍后重试。',
+    polishing: '润色处理超时，积分已自动退回。请稍后重试。',
   };
 
   if (errorName === 'WritingStageTimeoutError' || isWritingStageTimeoutError(error)) {
@@ -154,6 +157,7 @@ export function buildWritingFailureReason(stage: string, error: unknown) {
     writing: '初稿生成过程中出现问题',
     word_calibrating: '字数校准过程中出现问题',
     citation_checking: '引用检查过程中出现问题',
+    polishing: '润色过程中出现问题',
     delivering: '文件交付过程中出现问题',
   };
 
@@ -304,6 +308,8 @@ export const writingServiceTestUtils = {
   runWordCalibrationAttempts,
 };
 
+export { countMainBodyWords, getWordCountRange };
+
 function deriveWritingTaskRequirements(task: {
   target_words?: number | null;
   citation_style?: string | null;
@@ -435,12 +441,16 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       versionBase,
     );
 
-    // Step 3.5: Chart enhancement (best-effort, never fails the task)
+    // Step 3.5: Polish (best-effort, never fails the task)
+    await updateTaskStage(taskId, 'polishing');
+    const polished = await polishText(taskId, verified, versionBase);
+
+    // Step 3.6: Chart enhancement (best-effort, never fails the task)
     await updateTaskStage(taskId, 'delivering');
-    const chartResult = await enhanceWithCharts(verified, paperTitle, researchQuestion);
+    const chartResult = await enhanceWithCharts(polished, paperTitle, researchQuestion);
 
     // Step 4: Deliver
-    await deliverResults(taskId, userId, verified, {
+    await deliverResults(taskId, userId, polished, {
       ...task,
       target_words: unifiedRequirements.targetWords,
       citation_style: unifiedRequirements.citationStyle,
@@ -1063,6 +1073,148 @@ async function verifyCitations(
   return verified;
 }
 
+// ─── Polishing (Claude – reduce AI-generated feel) ─────────────────────────
+
+function buildPolishingSystemPrompt(): string {
+  return `You are an academic writing style editor. Your task is to reduce the "AI-generated" feel of the following academic paper while preserving its full content, structure, argument, and all citations.
+
+WHAT TO FIX:
+1. Replace overused AI transition words with simpler alternatives:
+   - "Furthermore" / "Moreover" / "Additionally" → "Also", "Besides", "And", or restructure
+   - "Consequently" / "Subsequently" → "So", "Then", "As a result"
+   - "Indeed" / "Notably" / "Importantly" → remove or replace with context-specific phrasing
+   - "delve" / "delve into" → "examine", "explore", "look at"
+   - "leverage" / "utilize" / "harness" → "use", "apply", "draw on"
+   - "landscape" (metaphorical) → "field", "area", "situation"
+   - "multifaceted" / "nuanced" → be specific about the actual facets/nuances
+   - "It is important to note that" / "It is worth mentioning that" → cut the hedge, state it directly
+
+2. Vary sentence structure:
+   - Break consecutive same-pattern sentences (e.g. "This study...", "This approach...")
+   - Mix short (8-12 words) with long (25-35 words) sentences
+   - Not every sentence needs a subordinate clause
+
+3. Vary paragraph lengths:
+   - Some paragraphs 2-3 sentences, others 5-7
+   - Section opening/closing paragraphs can be shorter
+
+4. Make vague descriptions more specific:
+   - "plays a significant role" → state what role
+   - "has been widely discussed" → by whom, in what context
+   - "various factors" → name them or say "several factors including X and Y"
+
+5. Sound like a competent student, not a language model:
+   - Occasional first-person if appropriate
+   - Allow minor stylistic imperfections
+   - Natural rhythm over mechanical precision
+
+ABSOLUTE CONSTRAINTS:
+- Do NOT alter ANY in-text citations "(Author, Year)" or "[N]" — keep them character-for-character
+- Do NOT alter ANY reference entries in the References section — reproduce character-for-character
+- Do NOT change section headings
+- Do NOT add or remove arguments, evidence, or claims
+- Do NOT change the structure or order of paragraphs/sections
+- Keep word count within ±5% of current count
+- Do NOT use Markdown syntax (no #, **, __, \`, -, *)
+- Output the COMPLETE paper — no truncation, no preamble, no commentary`;
+}
+
+async function polishText(
+  taskId: string,
+  inputText: string,
+  versionBase: number,
+): Promise<string> {
+  try {
+    const stream = anthropic.messages.stream({
+      model: 'claude-opus-4-6',
+      max_tokens: 64000,
+      system: buildPolishingSystemPrompt(),
+      thinking: {
+        type: 'adaptive',
+      } as any,
+      ...({ output_config: { effort: 'max' } } as any),
+      messages: [
+        {
+          role: 'user',
+          content: inputText,
+        },
+      ],
+    } as any);
+
+    const response = await Promise.race([
+      stream.finalMessage(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('polishing timeout')), POLISHING_TIMEOUT_MS),
+      ),
+    ]);
+
+    const resp = response as any;
+    const polishedText = resp.content
+      ?.filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n\n') || '';
+
+    console.log(
+      `[polish] stop=${resp.stop_reason}, ` +
+      `blocks=${resp.content?.length ?? 0}, ` +
+      `text_len=${polishedText.length}, ` +
+      `usage=${JSON.stringify(resp.usage ?? {})}`,
+    );
+
+    if (!polishedText) {
+      console.warn(`[polish] Claude returned empty text for task ${taskId}, using original`);
+      return inputText;
+    }
+
+    // Safety check 1: reference count must be preserved
+    const origRefs = extractReferenceEntries(inputText);
+    const polishedRefs = extractReferenceEntries(polishedText);
+    if (polishedRefs.length < origRefs.length) {
+      console.warn(
+        `[polish] references dropped from ${origRefs.length} to ${polishedRefs.length} for task ${taskId}, using original`,
+      );
+      return inputText;
+    }
+
+    // Safety check 2: in-text citations must still be present
+    const citationPattern = /\([^)]+,\s*(19|20)\d{2}[a-z]?\)|\b[A-Z][A-Za-z-]+(?:\s+et al\.)?\s*\((19|20)\d{2}[a-z]?\)|\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/g;
+    const origCitations = (inputText.match(citationPattern) || []).length;
+    const polishedCitations = (polishedText.match(citationPattern) || []).length;
+    if (origCitations > 0 && polishedCitations < origCitations * 0.9) {
+      console.warn(
+        `[polish] in-text citations dropped from ${origCitations} to ${polishedCitations} for task ${taskId}, using original`,
+      );
+      return inputText;
+    }
+
+    // Safety check 3: word count within ±5%
+    const origWords = countMainBodyWords(inputText);
+    const polishedWords = countMainBodyWords(polishedText);
+    if (origWords > 0 && Math.abs(polishedWords - origWords) > origWords * 0.05) {
+      console.warn(
+        `[polish] word count shifted from ${origWords} to ${polishedWords} for task ${taskId}, using original`,
+      );
+      return inputText;
+    }
+
+    // All checks passed — store polished version
+    const wordCount = polishedText.split(/\s+/).filter(Boolean).length;
+    await supabaseAdmin.from('document_versions').insert({
+      task_id: taskId,
+      version: versionBase + 4,
+      stage: 'polished',
+      word_count: wordCount,
+      content: polishedText,
+    });
+
+    console.log(`[polish] success for task ${taskId}, words ${origWords} → ${polishedWords}`);
+    return polishedText;
+  } catch (err: any) {
+    console.warn(`[polish] failed for task ${taskId}, delivering without polishing:`, err?.message || err);
+    return inputText;
+  }
+}
+
 // ─── Chart Enhancement (Claude + Chart DSL + QuickChart rendering) ──────────
 
 function buildChartEnhancementSystemPrompt(): string {
@@ -1253,7 +1405,7 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
 
   await supabaseAdmin.from('document_versions').insert({
     task_id: taskId,
-    version: versionBase + 4,
+    version: versionBase + 5,
     stage: 'final',
     word_count: wordCount,
     content: finalText,

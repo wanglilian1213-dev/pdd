@@ -23,6 +23,9 @@ test('executeHumanize uses Undetectable output and stores humanized doc on succe
           documentId: 'remote-1',
           output: 'Humanized final text',
         }),
+        condensePaper: async (text) => text,
+        formatCheckPaper: async (text) => text,
+        getTargetWords: async () => 2000,
         insertDocumentVersion: async (payload) => {
           documentVersions.push(payload);
         },
@@ -88,6 +91,9 @@ test('executeHumanize refunds credits and marks failure when Undetectable call f
       humanizeText: async () => {
         throw new Error('Undetectable 处理超时');
       },
+      condensePaper: async (text) => text,
+      formatCheckPaper: async (text) => text,
+      getTargetWords: async () => 2000,
       insertDocumentVersion: async () => {
         throw new Error('should not insert document version on failure');
       },

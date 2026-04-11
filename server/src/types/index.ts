@@ -7,6 +7,7 @@ export type TaskStage =
   | 'writing'
   | 'word_calibrating'
   | 'citation_checking'
+  | 'polishing'
   | 'delivering'
   | 'completed'
   | 'humanizing';
@@ -15,7 +16,7 @@ export type TaskStatus = 'processing' | 'completed' | 'failed';
 export type LedgerType = 'recharge' | 'consume' | 'refund';
 export type CodeStatus = 'unused' | 'used' | 'voided';
 export type FileCategory = 'material' | 'final_doc' | 'citation_report' | 'humanized_doc';
-export type DocVersionStage = 'draft' | 'calibrated' | 'verified' | 'final';
+export type DocVersionStage = 'draft' | 'calibrated' | 'verified' | 'polished' | 'final';
 export type HumanizeStatus = 'processing' | 'completed' | 'failed';
 
 export interface ApiResponse<T = unknown> {
