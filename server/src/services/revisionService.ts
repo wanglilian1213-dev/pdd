@@ -11,6 +11,7 @@ import {
 import { buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
 import { parseRevisionOutput } from './revisionContentParser';
 import { renderCharts, type RenderedChart } from './chartRenderService';
+import mammoth from 'mammoth';
 import { captureError } from '../lib/errorMonitor';
 
 // ---------------------------------------------------------------------------
@@ -105,12 +106,27 @@ export function validateRevisionFileTypes(files: Express.Multer.File[]): void {
   }
 }
 
-function estimateWordCount(files: Express.Multer.File[]): number {
+async function estimateWordCount(files: Express.Multer.File[]): Promise<number> {
   let total = 0;
   for (const file of files) {
     const ext = file.originalname.toLowerCase().split('.').pop() || '';
+
     if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif'].includes(ext)) {
       total += 2000;
+    } else if (ext === 'docx') {
+      try {
+        const { value: text } = await mammoth.extractRawText({ buffer: file.buffer });
+        total += Math.max(500, Math.ceil(countWords(text) * 1.2));
+      } catch {
+        total += Math.max(500, Math.round(file.size / 8));
+      }
+    } else if (['txt', 'md', 'markdown'].includes(ext)) {
+      try {
+        const text = file.buffer.toString('utf8');
+        total += Math.max(500, Math.ceil(countWords(text) * 1.2));
+      } catch {
+        total += Math.max(500, Math.round(file.size / 8));
+      }
     } else if (ext === 'pdf') {
       total += Math.max(500, Math.round(file.size / 6));
     } else {
@@ -215,7 +231,7 @@ export async function createRevision(
 
   // 2. 估算字数并计算冻结金额
   const pricePerK = parseInt(await getConfig('revision_price_per_1000') || '250', 10);
-  const estimatedWords = estimateWordCount(files);
+  const estimatedWords = await estimateWordCount(files);
   const frozenAmount = computeCost(estimatedWords, pricePerK);
 
   // 3. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
