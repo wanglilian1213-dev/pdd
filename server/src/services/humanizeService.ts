@@ -62,6 +62,28 @@ DO NOT:
 Output the COMPLETE paper with formatting fixes. No Markdown. No preamble.`;
 }
 
+/**
+ * Split a paper into body and references section.
+ * The references section includes the heading line itself and everything after.
+ * If no References heading is found, referencesSection is empty string.
+ *
+ * Regex matches writingService.extractMainBodyText() for consistency.
+ */
+function splitBodyAndReferences(text: string): { body: string; referencesSection: string } {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const headingIndex = lines.findIndex(
+    (line) => /^(references|reference list|bibliography|works cited)\s*$/i.test(line.trim()),
+  );
+
+  if (headingIndex === -1) {
+    return { body: text, referencesSection: '' };
+  }
+
+  const body = lines.slice(0, headingIndex).join('\n').trimEnd();
+  const referencesSection = lines.slice(headingIndex).join('\n').trimEnd();
+  return { body, referencesSection };
+}
+
 async function condensePaper(text: string, targetWordCount: number): Promise<string> {
   const currentWords = countMainBodyWords(text);
   console.log(`[humanize-condense] starting: current=${currentWords}, target=${targetWordCount}`);
@@ -329,11 +351,25 @@ export async function executeHumanize(
     const condensedWords = condensed.split(/\s+/).filter(Boolean).length;
     console.log(`[humanize] task ${taskId}: condensed to ${condensedWords} words`);
 
-    // Step 2: Humanize via Undetectable AI
-    const { documentId, output } = await deps.humanizeText(condensed);
-    const humanized = output;
+    // Step 2: Separate references before sending to Undetectable.
+    // Undetectable is a black-box third-party service that rewrites ALL input text,
+    // destroying academic reference formatting.  We strip the References section,
+    // humanize only the body, then re-attach the original references.
+    const { body: bodyOnly, referencesSection } = splitBodyAndReferences(condensed);
+
+    if (referencesSection) {
+      console.log(`[humanize] task ${taskId}: references separated (${referencesSection.split('\n').length} lines), sending body only to Undetectable`);
+    } else {
+      console.warn(`[humanize] task ${taskId}: no References heading found in condensed text, sending full text to Undetectable`);
+    }
+
+    const { documentId, output } = await deps.humanizeText(bodyOnly);
+    const humanized = referencesSection
+      ? output.trimEnd() + '\n\n' + referencesSection
+      : output;
     const humanizedWords = humanized.split(/\s+/).filter(Boolean).length;
-    console.log(`[humanize] task ${taskId}: humanized to ${humanizedWords} words (inflation: ${((humanizedWords / condensedWords - 1) * 100).toFixed(1)}%)`);
+    const bodyWords = bodyOnly.split(/\s+/).filter(Boolean).length;
+    console.log(`[humanize] task ${taskId}: humanized to ${humanizedWords} words (body inflation: ${((output.split(/\s+/).filter(Boolean).length / (bodyWords || 1) - 1) * 100).toFixed(1)}%)`);
 
     // Step 3: Format check via Claude (best-effort)
     const formatted = await deps.formatCheckPaper(humanized);

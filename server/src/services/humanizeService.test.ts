@@ -129,3 +129,52 @@ test('executeHumanize refunds credits and marks failure when Undetectable call f
   assert.equal(taskUpdates.some((payload) => payload.stage === 'completed'), true);
   assert.equal(events.some((payload) => payload.event_type === 'humanize_failed'), true);
 });
+
+test('executeHumanize protects References from Undetectable rewriting', async () => {
+  const inputWithRefs = [
+    'This is the introduction paragraph of the academic paper.',
+    '',
+    'This is the body section discussing key findings.',
+    '',
+    'References',
+    '',
+    'Smith, J. (2024). Digital Transformation. Journal of Tech, 45(2), 120-135.',
+    'Jones, A. (2023). AI in Education. Academic Review, 12(1), 50-65.',
+  ].join('\n');
+
+  let humanizeInput = '';
+  let storedContent = '';
+
+  await executeHumanize(
+    'task-refs', 'user-refs', 'job-refs',
+    inputWithRefs, 100, 250,
+    {
+      humanizeText: async (text) => {
+        humanizeInput = text;
+        return { documentId: 'remote-refs', output: 'Rewritten body text by Undetectable.' };
+      },
+      condensePaper: async (text) => text,
+      formatCheckPaper: async (text) => text,
+      getTargetWords: async () => 2000,
+      insertDocumentVersion: async (payload) => { storedContent = payload.content; },
+      getConfigValue: async () => 3,
+      storeGeneratedTaskFile: async () => {},
+      settleCredits: async () => {},
+      refundCredits: async () => {},
+      updateHumanizeJob: async () => {},
+      updateTask: async () => {},
+      loadTaskMeta: async () => ({ title: 'Refs Test', course_code: null }),
+      insertTaskEvent: async () => {},
+      now: () => new Date('2026-04-13T00:00:00.000Z'),
+    },
+  );
+
+  // humanizeText should only receive body, not References
+  assert.ok(!humanizeInput.includes('References'), 'humanizeText should NOT receive References heading');
+  assert.ok(!humanizeInput.includes('Smith, J.'), 'humanizeText should NOT receive reference entries');
+
+  // Final stored content must contain original References intact
+  assert.ok(storedContent.includes('References'), 'final content must contain References heading');
+  assert.ok(storedContent.includes('Smith, J. (2024)'), 'final content must preserve first reference entry');
+  assert.ok(storedContent.includes('Jones, A. (2023)'), 'final content must preserve all reference entries');
+});
