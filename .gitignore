@@ -11,3 +11,4 @@ diagnose-sub2api-vs-official.mjs
 docs/private/
 .claude/
 tmp-check/
+tmp/
