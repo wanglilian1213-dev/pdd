@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../lib/supabase';
-import { anthropic } from '../lib/anthropic';
+import { openai, extractOutputText } from '../lib/openai';
+import { env } from '../lib/runtimeEnv';
 import { getConfig } from './configService';
 import { AppError } from '../lib/errors';
 
@@ -196,28 +197,21 @@ export async function sendChatMessage(
       content: typeof m.content === 'string' ? m.content.slice(0, 2000) : '',
     }));
 
-  // 4. Call Claude Haiku
-  const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages: [
+  // 4. Call GPT-5.4
+  const response = await openai.responses.create({
+    model: env.openaiModel,
+    instructions: systemPrompt,
+    max_output_tokens: 1024,
+    input: [
       ...sanitizedHistory.map(m => ({
         role: m.role as 'user' | 'assistant',
         content: m.content,
       })),
       { role: 'user' as const, content: message },
     ],
-  });
+  } as any);
 
-  const textParts: string[] = [];
-  for (const block of response.content) {
-    if (block.type === 'text') {
-      textParts.push(block.text);
-    }
-  }
-
-  const reply = textParts.join('\n') || '抱歉，我暂时无法回答这个问题。请联系人工客服微信：PDDService01';
+  const reply = extractOutputText(response) || '抱歉，我暂时无法回答这个问题。请联系人工客服微信：PDDService01';
 
   return { reply, remaining: limit.remaining };
 }

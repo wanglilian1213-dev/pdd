@@ -1,4 +1,5 @@
 import { streamResponseText } from '../lib/openai';
+import { env } from '../lib/runtimeEnv';
 import { callWithUpstreamRetry, isTransientUpstreamError } from '../lib/upstreamRetry';
 import { supabaseAdmin } from '../lib/supabase';
 import { updateTaskStage, failTask, completeTask } from './taskService';
@@ -1165,48 +1166,23 @@ async function polishText(
 ): Promise<string> {
   try {
     const currentWords = countMainBodyWords(inputText);
-    // Polishing is a straightforward rewrite — no extended thinking needed.
-    // Using thinking + max effort caused process crashes on Railway (likely OOM
-    // from long thinking chains or stream disconnect during extended generation).
-    const stream = anthropic.messages.stream({
-      model: 'claude-opus-4-6',
-      max_tokens: 16000,
-      system: buildPolishingSystemPrompt(targetWords, currentWords),
-      messages: [
-        {
-          role: 'user',
-          content: inputText,
-        },
-      ],
-    });
 
-    // Guard against unhandled stream errors that could crash the process
-    stream.on('error', (err: any) => {
-      console.warn(`[polish] stream error for task ${taskId}:`, err?.message || err);
-    });
-
-    const response = await Promise.race([
-      stream.finalMessage(),
+    const { text: polishedText } = await Promise.race([
+      streamResponseText({
+        model: env.openaiModel,
+        instructions: buildPolishingSystemPrompt(targetWords, currentWords),
+        reasoning: { effort: 'high' as any },
+        input: inputText,
+      } as any),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('polishing timeout')), POLISHING_TIMEOUT_MS),
       ),
     ]);
 
-    const resp = response as any;
-    const polishedText = resp.content
-      ?.filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
-      .join('\n\n') || '';
-
-    console.log(
-      `[polish] stop=${resp.stop_reason}, ` +
-      `blocks=${resp.content?.length ?? 0}, ` +
-      `text_len=${polishedText.length}, ` +
-      `usage=${JSON.stringify(resp.usage ?? {})}`,
-    );
+    console.log(`[polish] done, text_len=${polishedText.length}`);
 
     if (!polishedText) {
-      console.warn(`[polish] Claude returned empty text for task ${taskId}, using original`);
+      console.warn(`[polish] GPT returned empty text for task ${taskId}, using original`);
       return inputText;
     }
 
@@ -1397,7 +1373,7 @@ async function postChartCondense(
   console.log(`[post-chart-condense] starting: current=${currentWords}, target range=${minWords}-${maxWords}`);
 
   const stream = anthropic.messages.stream({
-    model: 'claude-opus-4-6',
+    model: 'claude-sonnet-4-6',
     max_tokens: 16000,
     system: `You are an academic writing editor. The paper below has charts and tables embedded using [CHART_BEGIN]...[CHART_END] DSL blocks. The main body word count (excluding chart DSL blocks, table rows, title, and references) is currently ${currentWords} words, but it must be between ${minWords} and ${maxWords} words.
 

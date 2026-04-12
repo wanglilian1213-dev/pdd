@@ -124,6 +124,7 @@
 
 - [x] 数据库迁移：`revisions` + `revision_files` 表 + `revision_price_per_1000` 配置
 - [x] 后端：Anthropic SDK 接入，`claude-opus-4-6-20250414` 开启 extended thinking
+- [x] 成本优化：客服聊天/降AI压缩/格式修复/润色 改走 GPT-5.4；图表后压缩 改走 claude-sonnet-4-6
 - [x] 后端：`revisionService` + `revisionMaterialService` + `routes/revision.ts`
 - [x] 前端：侧边栏 `/dashboard/revision` 入口 + `Revision.tsx` 三状态页面（输入 / 处理中 / 完成）
 - [x] 计费：250 积分 / 1000 字，复用现有 wallet RPC（freeze → settle → 差额 refund）

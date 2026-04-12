@@ -104,7 +104,7 @@ npx -y @aisuite/chub annotate --list
 - 认证：Supabase Auth
 - 数据和文件：Supabase Database + Storage
 - 业务接口：Railway 上的 Express 服务
-- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；文章修改走 Anthropic Claude API（`claude-opus-4-6-20250414`，开启 extended thinking）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
+- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；客服聊天、降 AI 前压缩、降 AI 后格式修复、论文润色也走 OpenAI（`gpt-5.4`，reasoning effort `high`）；文章修改和图表增强走 Anthropic Claude API（`claude-opus-4-6`，开启 extended thinking）；图表后压缩走 Anthropic Claude API（`claude-sonnet-4-6`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
 - 图表增强规则：正文写完后的图表增强环节不再强制加图；系统会把任务特殊要求和大纲传给 AI，由 AI 根据"任务是否要求了图表、文章里有没有真实数据适合可视化、文章类型是否适合"三个维度判断；表格的门槛比图表低，有对比性内容即可加；如果判断两者都不需要，就不加任何东西，原样交付
 - 交付排版规则：最终正文 `Word` 必须自动套固定论文模板，第 1 页是封面（课号 + 任务标题），正文从第 2 页开始，`Reference` 必须另起一页，正文和参考文献统一 `Times New Roman 12`、`1.5 倍行距`
@@ -119,6 +119,7 @@ npx -y @aisuite/chub annotate --list
 - 大纲章节检查规则：章节数量必须按大纲真实多行内容来数，不能先把换行抹掉再判断；否则会把正常的 3 章大纲误判成 1 章
 - 引用硬规则：正文和核验报告都要按统一任务要求检查引用数量、年份、类型和格式；引用必须使用 `2020` 年之后的 academic scholar paper，不允许 book
 - 正文超时规则：正文初稿单次最多 `30` 分钟；字数矫正每次最多 `15` 分钟；引用修正每次最多 `20` 分钟；降 AI 继续按约 `10` 分钟处理；卡住任务的总兜底默认改成 `45` 分钟
+- 降 AI 前压缩重试规则：GPT-5.4 单次压缩后检查字数，如果不在目标的 ±15% 范围内，以当前结果为输入继续压缩，最多额外重试 `3` 次；每次重试都检查引用数量，引用丢了就停止重试用上一轮结果
 - 降 AI 参考文献保护规则：降 AI 只把正文部分发给 Undetectable 处理，参考文献部分（从 `References` / `Bibliography` / `Works Cited` 标题行到文末）在发送前分离保护，处理完后原样拼回；如果压缩后文本找不到参考文献标题，降级为发送全文（和旧行为一致）
 - 文件命名规则：最终正文下载文件名固定优先用正式题目；只有老任务还没补出正式题目时，才回退到旧任务标题，并先去掉 `.txt/.pdf/.docx/.doc` 这类真实文件后缀，再做文件名安全清洗
 - 标题去重规则：封面标题和正文第一页第一行如果只是直引号 / 弯引号或普通空格差异，也必须按同一个标题处理，不能在成品里重复印两次
