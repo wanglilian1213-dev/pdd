@@ -6,11 +6,10 @@
 
 ## 必读文档
 
-开始动代码前，至少先读这 3 个文件：
+开始动代码前，至少先读这 2 个文件：
 
 - `DESIGN.md`：整体架构和分工
 - `PLAN.md`：当前真实进度、下一步和已知问题
-- `拼代代PRD.md`：业务规则最终来源
 
 如果这次改动会碰到第三方服务接入，也先看这个文件：
 
@@ -107,6 +106,7 @@ npx -y @aisuite/chub annotate --list
 - 业务接口：Railway 上的 Express 服务
 - AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；文章修改走 Anthropic Claude API（`claude-opus-4-6-20250414`，开启 extended thinking）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
+- 图表增强规则：正文写完后的图表增强环节不再强制加图；系统会把任务特殊要求和大纲传给 AI，由 AI 根据"任务是否要求了图表、文章里有没有真实数据适合可视化、文章类型是否适合"三个维度判断；表格的门槛比图表低，有对比性内容即可加；如果判断两者都不需要，就不加任何东西，原样交付
 - 交付排版规则：最终正文 `Word` 必须自动套固定论文模板，第 1 页是封面（课号 + 任务标题），正文从第 2 页开始，`Reference` 必须另起一页，正文和参考文献统一 `Times New Roman 12`、`1.5 倍行距`
 - 课号规则：不加新的输入框；系统在第一次生成大纲时自动从任务标题、特殊要求、材料文件里提取课号，提不出来就留空继续
 - 正式题目规则：正式文章题目和研究问题必须在第一次大纲生成时一起产出并落库；后面正文生成、封面、下载文件名、核验报告标题都统一优先用这套正式题目，不再直接拿第一个上传文件名当最终交付题目
@@ -147,10 +147,8 @@ npx -y @aisuite/chub annotate --list
 
 ```text
 拼代代/
-├── agent.md
 ├── DESIGN.md
 ├── PLAN.md
-├── 拼代代PRD.md
 ├── docs/
 │   ├── plans/
 │   └── private/                    # 本地私密文件，不提交
@@ -180,12 +178,26 @@ npx -y @aisuite/chub annotate --list
 | `/register` | Register | 注册 + 初始化 |
 | `/dashboard/workspace` | Workspace | 核心工作台 |
 | `/dashboard/revision` | Revision | 文章修改（上传文章 + 修改要求 → Claude 修改 → 下载） |
-| `/dashboard/tasks` | Tasks | 历史任务列表 |
+| `/dashboard/tasks` | Tasks | 历史任务列表 + 文章修改记录（tab 切换） |
 | `/dashboard/recharge` | Recharge | 余额和激活码兑换 |
 | `/activation-rules` | ActivationRules | 静态页 |
 | `/privacy-policy` | PrivacyPolicy | 静态页 |
 | `/terms-of-service` | TermsOfService | 静态页 |
 | `*` | NotFound | 所有不存在地址的兜底页 |
+
+## Claude 行为规范
+
+1. **先解释再动手** — 碰到 bug 或需要改动时，必须先用大白话跟用户讲清楚：出了什么问题、为什么出问题、打算怎么修、有没有别的方案。要多对话、多探讨，用户确认了再动手写代码。不允许闷头直接改
+2. **改完必须 push** — 代码改完、lint 和 build 通过后，必须立即 commit 并 push 到 `main`。不要等用户催，不要只 push 到 feature 分支
+3. **不许删自己正在用的目录** — 清理 git worktree 或临时文件时，先 `cd` 到安全目录再删。永远不要删除自己当前所在的工作目录
+4. **先读完文档再提问** — 如果答案已经写在 `CLAUDE.md`、`DESIGN.md`、`PLAN.md` 里，不要再问用户。先读完再说
+5. **用大白话沟通** — 所有跟用户的对话都用中文大白话，不要用专业术语堆砌。技术细节要翻译成用户能听懂的话
+
+## 测试
+
+- 后端测试框架：`node:test`（Node.js 内置）+ `tsx`（TypeScript 运行器）
+- 不要用 `vitest`、`jest` 或其他第三方测试框架，除非用户明确要求
+- 跑测试命令：`cd server && npx tsx --test src/**/*.test.ts`
 
 ## 代码规则
 
@@ -210,7 +222,7 @@ npx -y @aisuite/chub annotate --list
 
 1. 这个改动是不是和 `PLAN.md` 当前任务一致
 2. 这个改动是不是符合 `DESIGN.md` 的分层
-3. 这个改动涉及的业务规则，在 `拼代代PRD.md` 里怎么写
+3. 这个改动涉及的业务规则，在 `DESIGN.md` 或 `PLAN.md` 里怎么写
 4. 有没有影响线上 Railway 和 Supabase 配置
 5. 如果动到第三方 SDK 或接口，先查 `docs/context-hub.md` 和 Context Hub 当前资料
 
@@ -220,7 +232,6 @@ npx -y @aisuite/chub annotate --list
 2. 跑 `npm run build`
 3. 如果动了业务流程、部署方式、页面入口或真实进度，同步更新文档
 4. 每次改动后，都要一起检查并同步这些本地项目文件，避免实际进度和说明打架：
-   - `agent.md`
    - `PLAN.md`
    - `DESIGN.md`
    - `docs/plans/2026-03-30-final-release-state.md`

@@ -447,7 +447,12 @@ export async function startWritingPipeline(taskId: string, userId: string) {
 
     // Step 3.6: Chart enhancement (best-effort, never fails the task)
     await updateTaskStage(taskId, 'delivering');
-    const chartResult = await enhanceWithCharts(polished, paperTitle, researchQuestion, unifiedRequirements.targetWords);
+    const chartResult = await enhanceWithCharts(
+      polished, paperTitle, researchQuestion,
+      unifiedRequirements.targetWords,
+      task.special_requirements,
+      latestOutline.content,
+    );
 
     // Step 4: Deliver (store final version + Word file + citation report)
     const taskMeta = {
@@ -1270,25 +1275,52 @@ async function polishText(
 
 // ─── Chart Enhancement (Claude + Chart DSL + QuickChart rendering) ──────────
 
-function buildChartEnhancementSystemPrompt(targetWords?: number): string {
+function buildChartEnhancementSystemPrompt(targetWords?: number, specialRequirements?: string, outlineContent?: string): string {
   const { minWords, maxWords } = targetWords ? getWordCountRange(targetWords) : { minWords: 0, maxWords: Infinity };
   const wordBudgetRule = targetWords
     ? `\n- WORD COUNT BUDGET: After adding chart reference sentences and table captions, the main body word count (excluding [CHART_BEGIN]...[CHART_END] blocks and table rows) MUST remain between ${minWords} and ${maxWords} words. If adding reference sentences would push the count over the limit, shorten other body paragraphs to compensate — remove redundant elaboration or tighten phrasing, but keep all in-text citations.`
     : '';
 
-  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and enhance it with 1-2 visual charts and optionally tables.
+  const contextSection = [
+    specialRequirements?.trim()
+      ? `\nASSIGNMENT CONTEXT — SPECIAL REQUIREMENTS (use these to judge whether visuals are expected):\n${specialRequirements.trim()}`
+      : '',
+    outlineContent?.trim()
+      ? `\nPAPER OUTLINE (for context on structure and content type):\n${outlineContent.trim()}`
+      : '',
+  ].filter(Boolean).join('\n');
 
-MANDATORY CHART REQUIREMENT:
-You MUST include at least 1 chart (and up to 2). Almost every academic paper can benefit from at least one figure that summarizes, compares, or visualizes key data, concepts, frameworks, or relationships discussed in the paper. Even if the paper does not contain raw numbers, you can create:
-- A conceptual comparison chart (e.g., bar chart comparing factors, dimensions, or categories discussed)
-- A framework visualization (e.g., radar chart showing multiple dimensions of analysis)
-- A trend or relationship chart based on data mentioned in references
-- A proportional chart (e.g., pie/doughnut showing distribution of themes, factors, or components)
+  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and decide whether it genuinely benefits from charts and/or tables, then enhance it only when warranted.
 
-The ONLY exception where you may skip charts is if the paper is a purely abstract philosophical reflection with zero comparisons, categories, or frameworks of any kind. This is extremely rare.
+VISUALIZATION DECISION FRAMEWORK:
 
-CHART RULES:
-- Add 1-2 charts. Chart data must be derived from information ALREADY discussed in the paper — statistics, comparisons, frameworks, categories, or referenced data. You may synthesize reasonable representative values to illustrate concepts discussed in the text, but do not invent unrelated data.
+Before adding anything, analyze whether this paper genuinely benefits from visual elements.
+
+CHARTS / GRAPHS — add ONLY when at least one of these is true:
+  a) The assignment requirements or special instructions explicitly ask for figures, charts, graphs, visual aids, or diagrams.
+  b) The paper body contains real numerical data, statistics, survey results, or quantitative comparisons that would be clearer as a visualization.
+  c) The paper analyzes measurable trends, distributions, or quantitative relationships across multiple variables.
+
+DO NOT add charts when:
+  - The paper is a purely argumentative essay, reflective writing, literary analysis, or philosophical discussion with no quantitative content.
+  - The only way to make a chart would be to fabricate abstract "concept scores" or arbitrary percentages — this adds no real value.
+  - A chart would merely restate what the text already says clearly.
+
+If you add a chart, every data point MUST be derived from specific information already discussed in the paper. Do not invent data.
+
+TABLES — the bar is lower; add when any of these is true:
+  a) The paper compares multiple items, theories, cases, or methods across shared dimensions.
+  b) The paper presents a framework or classification that is easier to scan in tabular form.
+  c) The assignment requirements mention tables.
+
+DO NOT add tables when:
+  - The paper is a straightforward narrative with no comparative or categorical structure.
+
+IF NEITHER CHARTS NOR TABLES ARE WARRANTED:
+  Output the paper text exactly as-is, with zero modifications.
+
+CHART RULES (only applicable if you decide to add charts):
+- Add at most 2 charts. Chart data must be derived from information ALREADY discussed in the paper — statistics, comparisons, or referenced data. Do not invent data points that are not grounded in the paper's content.
 - Use the following DSL to define charts. The system will automatically render them into real images embedded in the Word document. Do NOT output Python, matplotlib, R, SVG, or any code. Do NOT output markdown image links like ![...](url). Only use this exact DSL format:
 
 [CHART_BEGIN]
@@ -1346,7 +1378,7 @@ ABSOLUTE CONSTRAINTS:
 - Do NOT add new arguments, evidence, or references that were not in the original paper.
 - Do NOT use Markdown heading syntax (#), bold (**), or any other Markdown formatting in the paper body text.
 - The paper's section headings, references section, and citation style must remain exactly as they were.${wordBudgetRule}
-- Output the COMPLETE paper text — do not truncate or summarize.`;
+- Output the COMPLETE paper text — do not truncate or summarize.${contextSection}`;
 }
 
 interface ChartEnhancementResult {
@@ -1416,6 +1448,8 @@ async function enhanceWithCharts(
   paperTitle: string,
   researchQuestion: string,
   targetWords?: number,
+  specialRequirements?: string,
+  outlineContent?: string,
 ): Promise<ChartEnhancementResult> {
   const empty: ChartEnhancementResult = {
     text: verifiedText,
@@ -1429,7 +1463,7 @@ async function enhanceWithCharts(
     const stream = anthropic.messages.stream({
       model: 'claude-opus-4-6',
       max_tokens: 64000,
-      system: buildChartEnhancementSystemPrompt(targetWords),
+      system: buildChartEnhancementSystemPrompt(targetWords, specialRequirements, outlineContent),
       thinking: {
         type: 'adaptive',
       } as any,
@@ -1437,7 +1471,7 @@ async function enhanceWithCharts(
       messages: [
         {
           role: 'user',
-          content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). Analyze it and enhance with charts and/or tables if appropriate.\n\n${verifiedText}`,
+          content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). First decide whether this paper genuinely needs charts and/or tables based on the visualization decision framework above. If it does, enhance accordingly. If not, output the paper unchanged.\n\n${verifiedText}`,
         },
       ],
     } as any);
