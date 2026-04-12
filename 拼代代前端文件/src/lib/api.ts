@@ -100,4 +100,11 @@ export const api = {
     request<any>(`/api/revision/list?limit=${limit}&offset=${offset}`),
   getRevisionDownloadUrl: (revisionId: string, fileId: string) =>
     request<any>(`/api/revision/${revisionId}/file/${fileId}/download`),
+
+  // Chat
+  sendChatMessage: (message: string, history: Array<{ role: string; content: string }>) =>
+    request<{ reply: string; remainingToday: number }>('/api/chat/message', {
+      method: 'POST',
+      body: JSON.stringify({ message, history }),
+    }),
 };

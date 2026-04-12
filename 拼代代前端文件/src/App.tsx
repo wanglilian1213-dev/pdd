@@ -19,6 +19,7 @@ import ActivationRules from './pages/ActivationRules';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
 import NotFound from './pages/NotFound';
+import ChatBubble from './components/chat/ChatBubble';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading, authBusy } = useAuth();
@@ -55,6 +56,7 @@ export default function App() {
 
         <Route path="*" element={<NotFound />} />
       </Routes>
+      <ChatBubble />
     </BrowserRouter>
   );
 }
