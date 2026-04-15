@@ -99,18 +99,20 @@
 
 3. 三个 deploy 全部 `success` 后，scoring 功能才真正上线
 
-### 旧债：Dependency Audit workflow 从 2026-04-07 起一直挂
+### 旧债：Dependency Audit workflow 从 2026-04-07 起一直挂 → 2026-04-16 已清
 
 - 触发的 3 个漏洞：
-  - `hono <=4.12.11`（frontend `server.cjs` 依赖）：cookie 校验、路径穿越、IP 匹配等（中危）
-  - `@hono/node-server <1.19.13`：重复斜杠中间件绕过（中危）
+  - `hono <=4.12.11`：cookie 校验、路径穿越、IP 匹配等（中危）— 实际上是 `shadcn` CLI 通过 `@modelcontextprotocol/sdk` 传递进来的 dev-time 依赖，`server.cjs` 用的是 Node 原生 `http`，生产 0 影响
+  - `@hono/node-server <1.19.13`：重复斜杠中间件绕过（中危）— 同上，dev-time 传递依赖
   - `vite <=6.4.1`：`.map` 路径穿越、WebSocket 任意文件读（高危，但只影响 dev server，生产构建不受影响）
-- 和 scoring 功能无关，不会影响线上运行
-- 修复方式（任一时间跑一次即可）：
-  ```bash
-  cd 拼代代前端文件 && npm audit fix && cd ..
-  git commit -am "chore(deps): fix frontend audit (hono/vite)" && git push
-  ```
+- **处理**：2026-04-16 在前端目录跑 `npm audit fix`，自动升级 8 个包 / 新增 2 / 删除 2，`npm audit` 结果 `0 vulnerabilities`，`npm run lint` + `npm run build` 全通过
+
+### 旧债：本机 Railway CLI 4.35 + Account Token 行为 → 2026-04-16 已查清
+
+- **本机 CLI 已升级到 4.37.3**（原 4.35.0）
+- 发现真相：UUID 格式的 Account Token **本来就不支持** `railway whoami` / `railway list` / `railway link` 这类账号级命令，CLI 会返回 `Unauthorized`；但带显式资源 ID 的 `railway up --project <id> --environment <id> --service <id> --ci` 是完全支持的（GitHub Actions 就是这么用的）
+- 之前以为是 CLI 版本问题，其实是 token 类型决定的行为，升级版本并不能改变这点
+- 本机真要 deploy，export token 后带三个资源 ID 即可；`docs/private/deployment-secrets.local.md` 已补充完整用法
 
 ## 2026-04-12 AI 智能客服上线
 
