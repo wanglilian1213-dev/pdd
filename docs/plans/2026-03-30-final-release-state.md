@@ -59,6 +59,59 @@
   4. 大小写匹配验证：上传 `Report_FINAL.docx`，如果 GPT 回写成 `report_final.docx` 仍能命中（已在 `computeSettledWords` 单测覆盖）
   5. 懒加载验证：`/dashboard/tasks` 默认 tab 不触发 `/api/scoring/list`；切到"评审记录"才触发；切回不重复请求
 
+## 2026-04-15 发布状态核对（Scoring 功能）
+
+### 已经完成
+
+- [x] 本地 git：工作树干净，无未提交改动
+- [x] GitHub `main`：commit `b10de9d` 已推送成功，HEAD 与 `origin/main` 哈希一致
+- [x] Supabase 迁移：通过 Management API 自助执行 `20260415000000_scorings.sql`，确认落库：
+  - `scorings` 表（14 列）+ `scoring_files` 表（12 列）已创建
+  - `idx_one_active_scoring_per_user` 部分唯一索引已建
+  - 两张表 RLS 已开，两个 SELECT policy 已创建
+  - `system_config.scoring_price_per_word = "0.1"` 已写入
+- [x] 后端 lint + build + 96 条单元测试全通过
+
+### 阻塞：Railway 部署失败（和本次 scoring 无关，但导致 `b10de9d` 没到线上）
+
+- GitHub secret `RAILWAY_API_TOKEN` 于 `2026-03-17` 创建，大约一个月后自动失效
+- 2026-04-15 本次 push 后，三个 Deploy workflow（`app` / `cleanup` / `拼代代前端`）全部以 `Unauthorized` 失败
+- 本机 `~/.railway/config.json` 里的 `user.token` 也同步过期（GraphQL 返回 `Not Authorized`）
+- 现象：**线上当前仍然跑的是上一版 `aa70976`（2026-04-12 23:35 部署），文章评审功能代码在仓库和 Supabase 都就位了，但前后端服务还没拿到新代码**
+
+### Railway 恢复步骤（需用户操作一次）
+
+1. 用户到 https://railway.com/account/tokens 生成一个新的 "Personal Token"（不要选 Service Token / Team Token，Actions workflow 用的是账号级 token）
+2. 把新 token 给 agent，agent 用以下命令一次更新到位：
+
+   ```bash
+   # 更新 GitHub Actions secret
+   gh secret set RAILWAY_API_TOKEN --repo wanglilian1213-dev/pdd --body "<NEW_TOKEN>"
+
+   # 手动触发三个 deploy workflow（不用再 push 一次）
+   gh workflow run "Deploy App"      --ref main
+   gh workflow run "Deploy Cleanup"  --ref main
+   gh workflow run "Deploy Frontend" --ref main
+
+   # 观察部署结果
+   gh run list --limit 3
+   ```
+
+3. 三个 deploy 全部 `success` 后，scoring 功能才真正上线
+
+### 旧债：Dependency Audit workflow 从 2026-04-07 起一直挂
+
+- 触发的 3 个漏洞：
+  - `hono <=4.12.11`（frontend `server.cjs` 依赖）：cookie 校验、路径穿越、IP 匹配等（中危）
+  - `@hono/node-server <1.19.13`：重复斜杠中间件绕过（中危）
+  - `vite <=6.4.1`：`.map` 路径穿越、WebSocket 任意文件读（高危，但只影响 dev server，生产构建不受影响）
+- 和 scoring 功能无关，不会影响线上运行
+- 修复方式（任一时间跑一次即可）：
+  ```bash
+  cd 拼代代前端文件 && npm audit fix && cd ..
+  git commit -am "chore(deps): fix frontend audit (hono/vite)" && git push
+  ```
+
 ## 2026-04-12 AI 智能客服上线
 
 - 删除第三方 BotPenguin 客服（无法访问用户数据），改为自建 AI 客服

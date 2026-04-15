@@ -19,6 +19,14 @@
 
 - `docs/private/deployment-secrets.local.md`：线上项目、域名、密钥和环境信息
 
+> **⚠️ 密钥 / 授权自取规则（硬规矩，以后所有 agent 都必须遵守）**
+>
+> - 所有线上服务的密钥、token、账号密码、服务 ID、项目 ID 全部写在 `docs/private/deployment-secrets.local.md`
+> - 需要用到 GitHub / Railway / Supabase / 运营账号时，**自己去读这个文件**，不要来问用户要
+> - 里面已经有：GitHub CLI 登录状态、Railway CLI token 路径 + 项目 ID + 服务 ID、Supabase service_role + CLI token + 项目 URL、运营账号密码
+> - 本机命令行工具已经登录：`gh`（GitHub CLI）、`railway`（Railway CLI）、`curl`（可直接用 service_role 调 Supabase REST API）
+> - 如果本机真的没有这个文件（新机器 / 新 agent），才来问用户要
+
 ## 当前线上情况
 
 - Railway 项目：`glistening-achievement`
