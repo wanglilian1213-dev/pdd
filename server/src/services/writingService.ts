@@ -6,7 +6,12 @@ import { updateTaskStage, failTask, completeTask } from './taskService';
 import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
-import { buildFormattedPaperDocBuffer, buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
+import {
+  buildFormattedPaperDocBuffer,
+  buildFormattedPaperDocBufferWithMedia,
+  extractBodyHeadingLines,
+  countBodyHeadingLines,
+} from './documentFormattingService';
 import { anthropic } from '../lib/anthropic';
 import { renderCharts, type RenderedChart } from './chartRenderService';
 import { parseRevisionOutput } from './revisionContentParser';
@@ -261,10 +266,12 @@ async function runWordCalibrationAttempts(options: {
   initialText: string;
   targetWords: number;
   maxAttempts?: number;
+  draftHeadings?: string[];
   rewrite: (text: string, attempt: number) => Promise<string>;
 }) {
   let latestText = options.initialText;
   const maxAttempts = options.maxAttempts || WORD_CALIBRATION_MAX_ATTEMPTS;
+  const expectedHeadingCount = options.draftHeadings?.length ?? 0;
   const initialRange = isMainBodyWordCountWithinRange(latestText, options.targetWords);
 
   if (initialRange.withinRange) {
@@ -275,10 +282,34 @@ async function runWordCalibrationAttempts(options: {
     };
   }
 
+  type AttemptRecord = {
+    text: string;
+    inRange: boolean;
+    wordCount: number;
+    distance: number;
+    headingCount: number;
+  };
+  const attempts: AttemptRecord[] = [];
+
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     latestText = await options.rewrite(latestText, attempt);
     const range = isMainBodyWordCountWithinRange(latestText, options.targetWords);
-    if (range.withinRange) {
+    const headingCount = countBodyHeadingLines(latestText);
+    const distance = range.withinRange
+      ? 0
+      : Math.min(
+          Math.abs(range.mainBodyWordCount - range.minWords),
+          Math.abs(range.mainBodyWordCount - range.maxWords),
+        );
+    attempts.push({
+      text: latestText,
+      inRange: range.withinRange,
+      wordCount: range.mainBodyWordCount,
+      distance,
+      headingCount,
+    });
+    if (range.withinRange && headingCount >= expectedHeadingCount) {
+      // 一次命中字数范围且 heading 数量齐全 → 立即返回
       return {
         text: latestText,
         attemptsUsed: attempt,
@@ -287,9 +318,21 @@ async function runWordCalibrationAttempts(options: {
     }
   }
 
-  const finalRange = isMainBodyWordCountWithinRange(latestText, options.targetWords);
+  // 所有尝试都不完美。两段式挑最优：
+  //  (a) 先从"heading 数量达标(>= 预期 - 1, 允许 ±1 容差)"的候选里挑 distance 最小的
+  //  (b) 如果过滤后空集（全部掉 heading），按 heading 数量多 + distance 小挑
+  const headingThreshold = Math.max(0, expectedHeadingCount - 1);
+  const structurallyOk = attempts.filter((a) => a.headingCount >= headingThreshold);
+  let best: AttemptRecord;
+  if (structurallyOk.length > 0) {
+    best = [...structurallyOk].sort((a, b) => a.distance - b.distance || b.headingCount - a.headingCount)[0]!;
+  } else {
+    best = [...attempts].sort((a, b) => b.headingCount - a.headingCount || a.distance - b.distance)[0]!;
+  }
+
+  const finalRange = isMainBodyWordCountWithinRange(best.text, options.targetWords);
   return {
-    text: latestText,
+    text: best.text,
     attemptsUsed: maxAttempts,
     ...finalRange,
   };
@@ -536,12 +579,14 @@ export function buildDraftGenerationSystemPrompt(
   citationStyle: string,
   requiredReferenceCount: number,
 ) {
+  const { minWords, maxWords } = getWordCountRange(targetWords);
   return `You are an academic writing expert.
 
 Write the entire article at once.
 Write all chapters from the provided outline in order.
 Each chapter must start with its section title as a plain-text heading on its own line, exactly as named in the outline.
-The target word count is approximately ${targetWords} words.
+The target word count is ${targetWords} words. The main body (excluding the paper title and the References section) MUST fall between ${minWords} and ${maxWords} words. Do NOT exceed ${maxWords} words under any circumstances. Do NOT fall below ${minWords} words.
+If you feel a tradeoff arises between word count and depth, write concisely and stay inside the ${minWords}-${maxWords} range — but NEVER sacrifice: (a) section headings (every section from the outline must appear as its own heading line), (b) the minimum required reference count of ${requiredReferenceCount}, (c) critical argumentation with specific evidence. Tighten phrasing instead.
 Use ${citationStyle} citation style.
 Write only the paper content, with no meta-commentary.
 Include proper in-text citations and a references section.
@@ -551,6 +596,12 @@ Every reference must be an academic scholar paper.
 Do not use book sources. References must be academic scholar papers, not books.
 
 You have access to the web_search tool. Before writing any in-text citation or any entry in the references section, you MUST use web_search to verify that the cited work actually exists. Search for the exact title, the author name combined with the year, and the DOI when possible. Only cite a work after web_search returns a credible match (a publisher page, a Crossref entry, a journal landing page, or an indexed scholarly database). If web_search cannot find a real source for a claim, weaken or remove the claim instead of inventing a citation. Never fabricate authors, titles, journals, years, DOIs, or URLs. Every reference in the final references section must correspond to a real paper that you confirmed via web_search during this turn.
+
+URL / DOI integrity rules (very strict):
+- Only include a URL or DOI in a reference entry if that EXACT URL / DOI appeared in the web_search results you just reviewed. Never construct, guess, or back-derive a DOI from the title / year / publisher pattern.
+- If web_search returned a verifiable DOI, prefer the canonical form: "https://doi.org/<DOI>". Avoid publisher-specific URLs when the DOI is available.
+- If web_search cannot confirm a verified URL AND cannot confirm a verified DOI for a citation, OMIT the URL field entirely from that reference entry. A complete reference without a URL is MUCH better than a reference with a fabricated link. Do NOT invent one to "look complete".
+- Never write a URL that redirects through a tracker, proxy, or shortener. Never encode titles inside URLs.
 
 The reasoning effort should be high.
 Think very hard and deep.
@@ -586,8 +637,18 @@ export function buildWordCalibrationSystemPrompt(
   targetWords: number,
   citationStyle: string,
   requiredReferenceCount: number,
+  draftHeadings: string[] = [],
 ) {
   const { minWords, maxWords } = getWordCountRange(targetWords);
+  const headingRule = draftHeadings.length > 0
+    ? `\n\nStructural preservation rules (very strict, must follow exactly):
+- The ORIGINAL draft contained these ${draftHeadings.length} section heading(s), in order: ${draftHeadings.map((h) => `"${h}"`).join(', ')}.
+- Your output MUST contain ALL ${draftHeadings.length} of these headings, each on its own line, word-for-word as above.
+- If the current input has lost or modified any of these headings, RESTORE them from the list above — do not invent new ones.
+- Never merge, rename, reorder, inline, or delete a heading to save words.
+- When condensing, only trim paragraph content between the headings; never touch the heading lines themselves.
+- Headings are plain text only — no # symbols, no bold markers, no list markers.`
+    : '';
 
   return `You are an academic writing editor. The current main body word count is ${currentWords} words. The target main body word count is ${targetWords} words, and the allowed range is ${minWords} to ${maxWords} words. ${currentWords < minWords ? 'Expand' : 'Condense'} the paper so the main body falls inside that exact range while maintaining quality and coherence.
 This calibration is for the main body word count only.
@@ -600,7 +661,7 @@ All references must be from 2020 onwards.
 All references must remain academic scholar paper sources, not book sources.
 Output only the revised paper.
 Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
-Return clean academic prose only.`;
+Return clean academic prose only.${headingRule}`;
 }
 
 export function buildCitationVerificationSystemPrompt(citationStyle: string, requiredReferenceCount: number) {
@@ -910,6 +971,9 @@ async function calibrateWordCount(
   versionBase = 0,
 ): Promise<string> {
   const initialRange = isMainBodyWordCountWithinRange(draft, targetWords);
+  // 一次性从原始 draft 提取 heading 列表，后续每次 calibration 的 prompt 都以此为 ground truth，
+  // 避免多轮重试中 heading 被删后无法恢复。
+  const draftHeadings = extractBodyHeadingLines(draft);
 
   if (initialRange.withinRange) {
     await supabaseAdmin.from('document_versions').insert({
@@ -926,6 +990,7 @@ async function calibrateWordCount(
     initialText: draft,
     targetWords,
     maxAttempts: WORD_CALIBRATION_MAX_ATTEMPTS,
+    draftHeadings,
     rewrite: async (currentText) => {
       const currentWords = countMainBodyWords(currentText);
       let calibrated = currentText;
@@ -936,7 +1001,7 @@ async function calibrateWordCount(
           callMainOpenAIWithRetry('word_calibration', () =>
             streamResponseText({
               ...buildMainOpenAIResponsesOptions('word_calibration'),
-              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
+              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings),
               input: [
                 {
                   role: 'user' as const,
@@ -966,7 +1031,7 @@ async function calibrateWordCount(
             callMainOpenAIWithRetry('word_calibration', () =>
               streamResponseText({
                 ...buildMainOpenAIResponsesOptions('word_calibration'),
-                instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount),
+                instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings),
                 input: [
                   {
                     role: 'user' as const,
@@ -1388,6 +1453,7 @@ ABSOLUTE CONSTRAINTS:
 - Do NOT alter ANY in-text citations or the References section
 - Do NOT remove tables or table captions
 - Do NOT use Markdown syntax
+- Do NOT alter, merge, remove, or inline ANY section headings — every section heading must stay on its own line, word-for-word as in the input
 - Output the COMPLETE paper — no truncation, no preamble`,
     messages: [{ role: 'user', content: enhancedText }],
   });
@@ -1479,15 +1545,26 @@ async function enhanceWithCharts(
       return empty;
     }
 
-    // Safety check: Strip chart DSL blocks + table rows, then check word count.
+    // Safety check: Strip chart DSL blocks + table rows, then check word count AND heading count.
     const cleanForCheck = rawText
       .replace(/\[CHART_BEGIN\][\s\S]*?\[CHART_END\]/g, '')
       .replace(/^\|[^\n]*\|$/gm, '')
       .trim();
     const originalWords = countMainBodyWords(verifiedText);
     const enhancedWords = countMainBodyWords(cleanForCheck);
+    const originalHeadingCount = countBodyHeadingLines(verifiedText);
+    const enhancedHeadingCount = countBodyHeadingLines(cleanForCheck);
 
-    console.log(`[chart-enhance] body words: original=${originalWords}, enhanced=${enhancedWords}`);
+    console.log(`[chart-enhance] body words: original=${originalWords}, enhanced=${enhancedWords}; headings: original=${originalHeadingCount}, enhanced=${enhancedHeadingCount}`);
+
+    // 如果 chart 增强把正文的 section heading 数量搞少了（GPT/Claude 偶尔合并 heading 入段落），
+    // 整篇回退到原始 verified 文本（不交付残缺结构），用户看到的就是不带图表但带完整小标题的版本。
+    if (originalHeadingCount > 0 && enhancedHeadingCount < originalHeadingCount - 1) {
+      console.warn(
+        `[chart-enhance] heading count dropped from ${originalHeadingCount} to ${enhancedHeadingCount}, discarding chart enhancement to preserve structure`,
+      );
+      return empty;
+    }
 
     // Check if enhanced text is within target word range
     let finalRawText = rawText;

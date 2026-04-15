@@ -198,16 +198,72 @@ function isHeadingBlock(lines: string[]) {
   }
 
   const text = lines[0]!.trim();
-  if (!text || text.length > 80) {
+  if (!text || text.length > 120) {
     return false;
   }
 
   return (
     /^[IVXLC]+\.\s+/i.test(text) ||
     /^\d+(\.\d+)*\s+/.test(text) ||
-    /^(introduction|background|literature review|analysis|discussion|conclusion|methodology|results|findings)$/i.test(text) ||
+    // 支持 "Section 1: Introduction" / "Section 2. Foo" / "Chapter 3: Bar" / "Part 1: Baz"
+    /^(section|chapter|part)\s+\d+\s*[:.]\s*\S/i.test(text) ||
+    /^(introduction|background|literature review|analysis|discussion|conclusion|methodology|results|findings|recommendations|limitations|executive summary|abstract)$/i.test(text) ||
     /^[A-Z][A-Za-z\s/&-]+$/.test(text)
   );
+}
+
+/**
+ * 判断一行文本是否是 heading。对外导出供 writingService / calibration 复用。
+ * 用法：`isSingleHeadingLine('Section 2: Macroeconomic Conditions')` → true。
+ */
+export function isSingleHeadingLine(line: string): boolean {
+  return isHeadingBlock([line]);
+}
+
+/**
+ * 从一段文本里提取所有独占一行的 heading（会先剥掉 title 和 References 之后的部分）。
+ * 用于 calibration / polish / chart-enhancement 的结构保留约束，让 prompt 有 ground truth。
+ */
+export function extractBodyHeadingLines(text: string): string[] {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) return [];
+
+  const rawLines = normalized.split('\n');
+  // Skip leading title (first non-empty line, if it's NOT a heading by our rules but just the paper title)
+  // A paper title is typically long and starts the doc; we don't want to count it as a body heading.
+  // Find first non-empty line index:
+  let startIdx = 0;
+  while (startIdx < rawLines.length && !rawLines[startIdx]!.trim()) startIdx += 1;
+  // Skip the title line if it looks like a long title (> 60 chars) OR if the 2nd non-empty line is also content
+  // Simplest rule: skip the very first non-empty line unconditionally when extracting body headings.
+  if (startIdx < rawLines.length) startIdx += 1;
+
+  // Find References / Bibliography heading to know where body ends.
+  let endIdx = rawLines.length;
+  for (let i = startIdx; i < rawLines.length; i += 1) {
+    const trimmed = rawLines[i]!.trim();
+    if (/^(references|reference list|bibliography|works cited)\s*$/i.test(trimmed)) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  const headings: string[] = [];
+  for (let i = startIdx; i < endIdx; i += 1) {
+    const trimmed = rawLines[i]!.trim();
+    if (!trimmed) continue;
+    // Only count lines that stand alone (surrounded by empty lines OR at block boundary).
+    // We use the same isHeadingBlock logic but apply it to single-line input.
+    if (isHeadingBlock([trimmed])) {
+      headings.push(trimmed);
+    }
+  }
+  return headings;
+}
+
+/** 统计正文 heading 数量的便捷方法。 */
+export function countBodyHeadingLines(text: string): number {
+  return extractBodyHeadingLines(text).length;
 }
 
 function buildParagraph(kind: PaperParagraphKind, text: string): PaperParagraphModel {

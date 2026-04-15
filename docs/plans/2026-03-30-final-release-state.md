@@ -59,6 +59,53 @@
   4. 大小写匹配验证：上传 `Report_FINAL.docx`，如果 GPT 回写成 `report_final.docx` 仍能命中（已在 `computeSettledWords` 单测覆盖）
   5. 懒加载验证：`/dashboard/tasks` 默认 tab 不触发 `/api/scoring/list`；切到"评审记录"才触发；切回不重复请求
 
+## 2026-04-16 主流程 4-Bug 修复
+
+2026-04-15 用户反馈主写作流程出了 4 个同时出现的问题（1000 字任务）：
+1. 大纲 4 章（应该 3 章）
+2. 最终交付正文 1146 字（超 ±10% 硬线 46 字 / +4.6%）
+3. 最后一条 reference 的 DOI HTTP 404（GPT 幻觉）
+4. 整篇无小标题
+
+通过线上数据诊断（任务 `985b1eed-6b25-42aa-b71c-790348c3ba7a`）+ 代码深度审视，锁定根因并一次性修复了 5 个栅栏 + 4 个加固点：
+
+### 根因
+
+- Bug 1：`outlinePromptService.ts` 把公式 `3 + ceil(target_words/1000) - 1` 告诉 GPT 让它自己算 → GPT 自由发挥返回 4。系统不强制回退公式。
+- Bug 2：`writingService.ts` L544 draft prompt 写 "approximately" 太软，draft 写到 1580 字（+58%），calibration 5 次压到 1152 还超 52 字。验证阶段只 +5 字（非 verified 反弹）。
+- Bug 3：系统从不验 URL/DOI 真实性；`web_search` 要求写进 prompt 但 GPT 可以跳过。
+- Bug 4：draft 本身有 4 个 heading，但 `buildWordCalibrationSystemPrompt` 没"保留 heading"约束，GPT 为压字删光 heading；且 `documentFormattingService.isHeadingBlock` 正则不认 "Section N: ..." 格式，即使 heading 保住了导出 Word 也只认 Introduction/Conclusion 两行。
+
+### 栅栏清单
+
+1. **Draft prompt 字数硬约束**（`writingService.ts` L544）：`approximately ${targetWords}` → `MUST fall between ${minWords} and ${maxWords}. Do NOT exceed ${maxWords}. ... If a tradeoff arises, stay on the lower side — but NEVER sacrifice heading structure, citation count ≥${requiredReferenceCount}, or critical argumentation.`
+2. **Calibration prompt 保 heading**（`writingService.ts` L584-620）：新参数 `draftHeadings: string[]`，prompt 追加 "The ORIGINAL draft contained these N section heading(s): ... Your output MUST contain ALL of them, each on its own line, word-for-word." 每次重试都基于**原始 draft**的 heading 列表（不是当前 input），避免多轮累积损失。
+3. **Calibration 最优候选**（`writingService.ts` `runWordCalibrationAttempts`）：5 次全失败时两段式挑：先过滤 `headingCount >= expected - 1` 的候选，再按"离范围最近"选；若全部 heading 不达标，按 heading 多 / distance 小选。原先直接返回最后一次。
+4. **章节公式强制** + **structure_evidence 白名单**：
+   - `outlinePromptService.ts` L260-282：删掉传给 GPT 的公式；要求 GPT 返回 `structure_evidence` 字段引用材料原文；默认 `required_section_count: null`。
+   - `taskRequirementService.ts` `deriveUnifiedTaskRequirements`：新增 `structureEvidence` 字段和 `trustSectionCount` 显式旁路。只有 GPT 提供 ≥25 字、含 "section/chapter/part" 关键词的 evidence 时才采纳；否则强制走公式。
+   - `trustSectionCount: true` 显式给 DB 恢复路径（`deriveStoredUnifiedRequirements`）和用户手动 override 路径（hasOverride 分支），避免回归。
+5. **`isHeadingBlock` 正则扩展** + 共享 util（`documentFormattingService.ts` L195-275）：
+   - 新增正则 `/^(section|chapter|part)\s+\d+\s*[:.]\s*\S/i` 支持 "Section 1: Introduction" / "Chapter 2. Foo"。
+   - 关键词表扩充 abstract / executive summary / recommendations / limitations。
+   - Heading 长度上限从 80 放宽到 120（学术小标题常超 80）。
+   - 导出 `isSingleHeadingLine` / `extractBodyHeadingLines` / `countBodyHeadingLines` 供 writing service 复用。
+6. **Chart enhancement heading 回退检查**（`writingService.ts` enhanceWithCharts）：Claude 返回后除检查字数，还检查 heading 数量；掉到 `原始 - 1` 以下直接丢弃 chart 增强结果，交付不带图表但结构完整的版本。`postChartCondense` prompt 追加 "Do NOT alter, merge, remove, or inline ANY section headings"。
+7. **DOI / URL 完整性规则**（`writingService.ts` draft prompt）：`web_search` 没验证过的 URL/DOI 一律不写，优先 `https://doi.org/<DOI>` 规范形式；无法验证时整条 URL 字段省略，空白 URL 优于伪造 URL。
+
+### 影响面
+
+- 改动 4 个后端文件：`writingService.ts` / `outlinePromptService.ts` / `outlineService.ts` / `taskRequirementService.ts` / `documentFormattingService.ts`
+- 不改前端、不改 DB schema、对旧任务零影响
+- 5 条新增单元测试覆盖 evidence 白名单、trust 旁路、公式强制、最优候选、heading 优先
+- 全量测试 262/263 pass（1 个失败是之前就存在的 `parseCitationReportData` 测试，与本次无关）
+
+### 验证
+
+- `cd server && npm run lint && npm run build` 全绿 ✓
+- `npx tsx --test src/**/*.test.ts` 262/263 ✓
+- 线上回归：重跑一个 1000 字任务，查 `document_versions` 5 段字数 + heading 数，确认 draft 字数 ≤ 1100 / calibrated heading 数 = draft heading 数 / final 字数在 900-1100 / reference DOI 能 HTTP HEAD 200
+
 ## 2026-04-15 发布状态核对（Scoring 功能）
 
 ### 已经完成

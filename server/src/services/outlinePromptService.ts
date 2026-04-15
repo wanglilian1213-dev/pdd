@@ -243,6 +243,7 @@ const MERGED_RESPONSE_SCHEMA = `Respond with valid JSON only in this shape:
   "target_words": number | null,
   "citation_style": "string" | null,
   "required_section_count": number | null,
+  "structure_evidence": "string or null",
   "paper_title": "a concrete English paper title",
   "research_question": "a concrete English research question",
   "outline": "the full outline text"
@@ -263,16 +264,18 @@ Read every attached material file directly. Perform ALL of the following tasks i
 
 Requirement extraction rules:
 - Only extract target_words and citation_style that are explicitly stated in the materials.
-- If the task materials explicitly specify a required article structure (e.g. listing specific required sections/chapters such as "Introduction, Literature Review, Methodology, Findings, Discussion, Conclusion"), count the number of required sections and return it as required_section_count.
-- Only extract required_section_count when the document clearly mandates a specific structure. Do not infer a section count from word count or topic complexity.
 - Do not infer defaults. If the materials do not clearly specify a value, return null.
 - The system will use defaults (1000 words, APA 7) when you return null for target_words or citation_style.
-- The system will compute required_section_count from target_words only when you return null for required_section_count.
+
+Required section count — STRICT rules (read carefully):
+- DEFAULT: return null for required_section_count and return null for structure_evidence. The system has its own formula and will override any number you provide unless you cite verifiable evidence.
+- Only return a non-null required_section_count when the materials LITERALLY enumerate a named list of required sections/chapters. Example of qualifying text: "The report must contain the following sections: 1. Introduction, 2. Literature Review, 3. Methodology, 4. Findings, 5. Discussion, 6. Conclusion." Ambiguous wording like "cover topics A, B, C, and conclusion" or "discuss multiple factors" does NOT qualify — return null.
+- When you DO return a non-null required_section_count, you MUST also return structure_evidence — a verbatim or near-verbatim quote from the materials (at least 25 characters) that names or enumerates those sections. If you cannot quote such text, return null for BOTH fields.
+- Do NOT compute required_section_count from target_words. Do NOT infer it from topic complexity. The system computes it from target_words using its own formula when you return null.
 
 Outline planning rules (apply after determining the target_words):
-- If required_section_count is extracted from the materials, use that value directly for the number of sections.
-- Otherwise, if target_words is found in the materials, compute: required_section_count = 3 + (ceil(target_words / 1000) - 1).
-- If neither is specified, use 3 sections as the default.
+- The system will compute a required section count from the formula: required_section_count = 3 + (ceil(target_words / 1000) - 1). Plan your outline assuming this exact number of top-level sections (including Introduction and Conclusion).
+- If you have legitimately extracted a different required_section_count with qualifying structure_evidence from the materials (per the strict rules above), plan your outline with that number instead; otherwise use the formula.
 - required_reference_count = ceil(target_words / 1000) * 5 (or 5 if target_words is null).
 - Introduction and Conclusion count within the total section count.
 - Every section must contain between 3 and 5 bullet points.

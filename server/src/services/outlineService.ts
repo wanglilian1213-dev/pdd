@@ -114,6 +114,8 @@ function deriveStoredUnifiedRequirements(source: {
     targetWords: typeof source.target_words === 'number' ? source.target_words : undefined,
     citationStyle: typeof source.citation_style === 'string' ? source.citation_style : undefined,
     requiredSectionCount: typeof source.required_section_count === 'number' ? source.required_section_count : undefined,
+    // DB 里存的 section count 已经过 merged prompt 阶段的 evidence 校验，这里是恢复场景，直接信任
+    trustSectionCount: true,
   });
 
   return {
@@ -728,11 +730,14 @@ export async function generateOutline(taskId: string, userId: string) {
 
     // Parse the merged response — extract requirements, course code, and outline
     const mergedJson = parseMergedOutlineResponse(content);
+    // 注意：这里不传 trustSectionCount=true，走严格的 structureEvidence 白名单。
+    // GPT 没提供合法 evidence 时，section count 会被回退为公式值，堵住 "1000 字返回 4 章" 这类自由发挥。
     const extractedRequirements = deriveUnifiedTaskRequirements(
       normalizeExtractedTaskRequirements(JSON.stringify({
         target_words: mergedJson.target_words,
         citation_style: mergedJson.citation_style,
         required_section_count: mergedJson.required_section_count,
+        structure_evidence: mergedJson.structure_evidence ?? null,
       })),
     );
 
@@ -841,6 +846,7 @@ interface MergedOutlineJson {
   target_words?: number | null;
   citation_style?: string | null;
   required_section_count?: number | null;
+  structure_evidence?: string | null;
   paper_title: string;
   research_question: string;
   outline: string;
@@ -855,6 +861,7 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
       target_words: typeof parsed.target_words === 'number' ? parsed.target_words : null,
       citation_style: typeof parsed.citation_style === 'string' ? parsed.citation_style : null,
       required_section_count: typeof parsed.required_section_count === 'number' ? parsed.required_section_count : null,
+      structure_evidence: typeof parsed.structure_evidence === 'string' ? parsed.structure_evidence : null,
       paper_title: typeof parsed.paper_title === 'string' ? parsed.paper_title : '',
       research_question: typeof parsed.research_question === 'string' ? parsed.research_question : '',
       outline: typeof parsed.outline === 'string' ? parsed.outline : content,
@@ -865,6 +872,7 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
       target_words: null,
       citation_style: null,
       required_section_count: null,
+      structure_evidence: null,
       paper_title: '',
       research_question: '',
       outline: content,
@@ -961,6 +969,8 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
           targetWords: overrides.targetWords ?? baseTargetWords,
           citationStyle: overrides.citationStyle ?? baseCitationStyle,
           requiredSectionCount: sectionCountForOverride,
+          // 用户手动 override（"改成 6 章"）或已落库的 section count 是可信来源，跳过 evidence 校验
+          trustSectionCount: true,
         })
       : deriveStoredUnifiedRequirements({
           target_words: baseTargetWords,

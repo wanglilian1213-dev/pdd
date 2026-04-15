@@ -39,7 +39,21 @@ test('normalizeExtractedTaskRequirements keeps nulls when extraction prompt shou
     targetWords: null,
     citationStyle: null,
     requiredSectionCount: null,
+    structureEvidence: null,
   });
+});
+
+test('normalizeExtractedTaskRequirements extracts structure_evidence when present', () => {
+  const payload = JSON.stringify({
+    target_words: 2500,
+    citation_style: 'APA 7',
+    required_section_count: 6,
+    structure_evidence: 'The report must contain: 1. Introduction, 2. Literature Review, 3. Methodology, 4. Findings, 5. Discussion, 6. Conclusion.',
+  });
+  const result = normalizeExtractedTaskRequirements(payload);
+
+  assert.equal(result.requiredSectionCount, 6);
+  assert.ok(result.structureEvidence && result.structureEvidence.includes('Literature Review'));
 });
 
 // --- parseRequirementOverrides tests ---
@@ -96,10 +110,13 @@ test('parseRequirementOverrides does not match 字符 字母 字体 etc', () => 
 // --- requiredSectionCount priority tests ---
 
 test('deriveUnifiedTaskRequirements uses document-specified section count over word-count formula', () => {
+  // 2026-04-16 新逻辑：采纳 GPT 传入的 section count 必须同时带 structureEvidence（白名单）
+  // 或者调用方显式 trustSectionCount=true（DB 恢复 / 用户手动 override 场景）
   const result = deriveUnifiedTaskRequirements({
     targetWords: 2500,
     citationStyle: 'Harvard',
     requiredSectionCount: 6,
+    structureEvidence: 'The report must be structured into six sections: Introduction, Literature Review, Methodology, Findings, Discussion, and Conclusion.',
   });
 
   assert.equal(result.requiredSectionCount, 6); // document says 6, formula would give 5
@@ -113,6 +130,37 @@ test('deriveUnifiedTaskRequirements falls back to formula when requiredSectionCo
   });
 
   assert.equal(result.requiredSectionCount, 5); // formula: 3 + (3 - 1) = 5
+});
+
+test('deriveUnifiedTaskRequirements: 1000 字 GPT 自由返回 4 章但无 evidence → 强制回退公式 3 章（2026-04-16 新增）', () => {
+  const result = deriveUnifiedTaskRequirements({
+    targetWords: 1000,
+    citationStyle: 'APA 7',
+    requiredSectionCount: 4,         // GPT 自由发挥
+    structureEvidence: null,          // 没有任何引用证据
+  });
+
+  assert.equal(result.requiredSectionCount, 3, '公式 3 章必须覆盖 GPT 的 4');
+});
+
+test('deriveUnifiedTaskRequirements: evidence 过短也不算数（2026-04-16 新增）', () => {
+  const result = deriveUnifiedTaskRequirements({
+    targetWords: 1000,
+    requiredSectionCount: 6,
+    structureEvidence: 'too short',   // < 25 字符
+  });
+
+  assert.equal(result.requiredSectionCount, 3); // 回退公式
+});
+
+test('deriveUnifiedTaskRequirements: trustSectionCount=true（DB 恢复 / 用户 override）绕过 evidence 直接采纳（2026-04-16 新增）', () => {
+  const result = deriveUnifiedTaskRequirements({
+    targetWords: 1000,
+    requiredSectionCount: 6,
+    trustSectionCount: true,
+  });
+
+  assert.equal(result.requiredSectionCount, 6); // DB/用户显式授权
 });
 
 test('deriveUnifiedTaskRequirements falls back to formula when requiredSectionCount is below minimum', () => {

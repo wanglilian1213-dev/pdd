@@ -10,6 +10,29 @@ interface ExtractedTaskRequirementPayload {
   targetWords?: number | null;
   citationStyle?: string | null;
   requiredSectionCount?: number | null;
+  /**
+   * 只有当 GPT 能从材料里引用一段明确列出 section 清单的文字时才会非空（e.g.
+   * "The report MUST contain: Introduction, Literature Review, Methodology, Findings, Discussion, Conclusion"）。
+   * 后端用这个做白名单判断；evidence 为 null / 过短 / 不含 section 类关键词时，强制回退公式。
+   */
+  structureEvidence?: string | null;
+  /**
+   * 当调用方能保证 requiredSectionCount 来自可信来源（例如 DB 持久化值、用户手动 override、
+   * 已经通过 evidence 校验的值），设为 true 跳过 structureEvidence 白名单检查、直接采纳。
+   * 默认 false —— 只有 GPT 首次从材料里引用到显式结构清单时才采纳。
+   */
+  trustSectionCount?: boolean;
+}
+
+/**
+ * 白名单判断：GPT 返回的 structure_evidence 是否足够支撑采纳它给的 section count。
+ * 要求：非空、至少 25 字、包含 section / chapter / part 这类关键词之一。
+ */
+function isStructureEvidenceSufficient(evidence: string | null | undefined): boolean {
+  if (!evidence) return false;
+  const trimmed = evidence.trim();
+  if (trimmed.length < 25) return false;
+  return /section|chapter|part\b|组成|章节|部分/i.test(trimmed);
 }
 
 export interface UnifiedTaskRequirements {
@@ -100,14 +123,17 @@ export function normalizeExtractedTaskRequirements(content: string): {
   targetWords: number | null;
   citationStyle: string | null;
   requiredSectionCount: number | null;
+  structureEvidence: string | null;
 } {
   const parsed = safeParseJson(content);
   const citationStyle = normalizeText(typeof parsed?.citation_style === 'string' ? parsed.citation_style : '');
+  const rawEvidence = typeof parsed?.structure_evidence === 'string' ? parsed.structure_evidence.trim() : '';
 
   return {
     targetWords: normalizeTargetWords(parsed?.target_words),
     citationStyle: citationStyle ? normalizeCitationStyle(citationStyle) : null,
     requiredSectionCount: normalizeSectionCount(parsed?.required_section_count),
+    structureEvidence: rawEvidence || null,
   };
 }
 
@@ -182,9 +208,18 @@ export function deriveUnifiedTaskRequirements(
   const targetWords = normalizeTargetWords(input.targetWords) ?? 1000;
   const citationStyle = normalizeCitationStyle(input.citationStyle || 'APA 7');
 
-  // Priority: document-specified section count > word-count formula
-  const requiredSectionCount = normalizeSectionCount(input.requiredSectionCount)
-    ?? computeRequiredSectionCount(targetWords);
+  // 章节数量决定逻辑（硬产品规则，优先级从高到低）：
+  //   1. 如果材料里明确列出 section 清单（GPT 能从材料里引证一段 >= 25 字、包含 section/chapter/part 关键词的文字），
+  //      采纳 GPT 返回的 requiredSectionCount；
+  //   2. 否则，一律走公式：3 章 + (ceil(targetWords / 1000) - 1)。
+  // 这样能挡住 "1000 字任务 GPT 自由发挥返回 4 章" 这种越俎代庖的情况，
+  // 又不会误伤 "老师明确要求 6 章" 的显式结构作业。
+  const gptSectionCount = normalizeSectionCount(input.requiredSectionCount);
+  const formulaSectionCount = computeRequiredSectionCount(targetWords);
+  const acceptGptSectionCount =
+    gptSectionCount != null &&
+    (input.trustSectionCount === true || isStructureEvidenceSufficient(input.structureEvidence));
+  const requiredSectionCount = acceptGptSectionCount ? gptSectionCount! : formulaSectionCount;
 
   return {
     targetWords,

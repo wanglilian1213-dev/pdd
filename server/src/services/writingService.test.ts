@@ -343,6 +343,7 @@ test('runWordCalibrationAttempts returns the fifth rewrite even when body word c
         initialText: string;
         targetWords: number;
         maxAttempts?: number;
+        draftHeadings?: string[];
         rewrite: (text: string, attempt: number) => Promise<string>;
       }) => Promise<{ text: string; attemptsUsed: number; withinRange: boolean }>)
     | undefined;
@@ -362,4 +363,85 @@ test('runWordCalibrationAttempts returns the fifth rewrite even when body word c
   assert.deepEqual(attempts, [1, 2, 3, 4, 5]);
   assert.equal(result.attemptsUsed, 5);
   assert.equal(result.withinRange, false);
+});
+
+test('runWordCalibrationAttempts: 5 次失败时挑离范围最近的 attempt（2026-04-16 新增）', async () => {
+  const runWordCalibrationAttempts = (writingServiceTestUtils as Record<string, unknown>).runWordCalibrationAttempts as
+    | ((options: {
+        initialText: string;
+        targetWords: number;
+        maxAttempts?: number;
+        draftHeadings?: string[];
+        rewrite: (text: string, attempt: number) => Promise<string>;
+      }) => Promise<{ text: string; attemptsUsed: number; withinRange: boolean; mainBodyWordCount: number }>)
+    | undefined;
+
+  // 5 次 attempt 的字数：1500 / 1300 / 1150 / 1400 / 1250
+  // 目标 1000 字，range [900, 1100]
+  // 最接近的是 1150（超 50），其次 1250（超 150）
+  // 老逻辑返回最后一次 1250；新逻辑应该返回 1150
+  const attemptsWordCounts = [1500, 1300, 1150, 1400, 1250];
+  let callIdx = 0;
+  const makeText = (words: number) =>
+    'Title\n\n' + 'word '.repeat(words) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com';
+
+  const result = await runWordCalibrationAttempts!({
+    initialText: makeText(1800),
+    targetWords: 1000,
+    rewrite: async () => {
+      const text = makeText(attemptsWordCounts[callIdx]!);
+      callIdx += 1;
+      return text;
+    },
+  });
+
+  assert.equal(result.withinRange, false);
+  assert.equal(result.attemptsUsed, 5);
+  assert.equal(result.mainBodyWordCount, 1150, '应该选第 3 次的 1150 字（离 1100 上限最近），而不是最后一次的 1250');
+});
+
+test('runWordCalibrationAttempts: heading 齐全的候选优先于 heading 掉了但字数近的（2026-04-16 新增）', async () => {
+  const runWordCalibrationAttempts = (writingServiceTestUtils as Record<string, unknown>).runWordCalibrationAttempts as
+    | ((options: {
+        initialText: string;
+        targetWords: number;
+        maxAttempts?: number;
+        draftHeadings?: string[];
+        rewrite: (text: string, attempt: number) => Promise<string>;
+      }) => Promise<{ text: string; attemptsUsed: number; withinRange: boolean; mainBodyWordCount: number }>)
+    | undefined;
+
+  // 5 次 attempt：
+  //  - attempt 1: 1200 字 + 保留 "Introduction"/"Conclusion" 2 个 heading（distance=100, heading=2）
+  //  - attempt 2: 1120 字 + 0 个 heading（distance=20, heading=0）← 距离更近但 heading 丢了
+  //  - attempts 3-5: 都 3000+ 字（很远, 无 heading）
+  // 新逻辑：先过滤 heading 达标（>= expected - 1 = 1），只有 attempt 1 达标 → 应选 attempt 1
+  const noHeadText = (words: number) =>
+    'Title\n\n' + 'word '.repeat(words) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com';
+  const withHeadingText = (words: number) =>
+    'Title\n\nIntroduction\n' + 'word '.repeat(Math.floor(words / 2)) + '\n\nConclusion\n' + 'word '.repeat(Math.ceil(words / 2)) + '\n\nReferences\nSmith, J. (2024). Example. https://example.com';
+
+  const callResults: string[] = [
+    withHeadingText(1200),
+    noHeadText(1120),
+    noHeadText(3000),
+    noHeadText(3100),
+    noHeadText(3200),
+  ];
+
+  let callIdx = 0;
+  const result = await runWordCalibrationAttempts!({
+    initialText: withHeadingText(1800),
+    targetWords: 1000,
+    draftHeadings: ['Introduction', 'Conclusion'],
+    rewrite: async () => {
+      const text = callResults[callIdx]!;
+      callIdx += 1;
+      return text;
+    },
+  });
+
+  assert.equal(result.withinRange, false);
+  // 1202 = 600 body + 1 "Introduction" heading + 601 body + 1 "Conclusion" heading（countMainBodyWords 算上 heading 行）
+  assert.equal(result.mainBodyWordCount, 1202, '应该优先保 heading 完整的 attempt (1200 body + 2 heading = 1202)');
 });

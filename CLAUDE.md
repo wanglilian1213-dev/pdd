@@ -119,6 +119,8 @@ npx -y @aisuite/chub annotate --list
 - AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；客服聊天、降 AI 前压缩、降 AI 后格式修复、论文润色也走 OpenAI（`gpt-5.4`，reasoning effort `high`）；文章修改和图表增强走 Anthropic Claude API（`claude-opus-4-6`，开启 extended thinking）；图表后压缩走 Anthropic Claude API（`claude-sonnet-4-6`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）；文章评审走 OpenAI Responses API（`gpt-5.4`，reasoning effort `high`，不联网搜索），20 分钟单次超时、JSON 软约束、格式错一次重试 1 次
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
 - 图表增强规则：正文写完后的图表增强环节不再强制加图；系统会把任务特殊要求和大纲传给 AI，由 AI 根据"任务是否要求了图表、文章里有没有真实数据适合可视化、文章类型是否适合"三个维度判断；表格的门槛比图表低，有对比性内容即可加；如果判断两者都不需要，就不加任何东西，原样交付
+- 图表增强 heading 保护规则（2026-04-16）：图表增强阶段 Claude 返回后除字数检查之外还要检查 heading 数量；如果 heading 数量掉到 `原始 - 1` 以下，整篇回退到原始 verified 版本（丢弃图表增强），交付带完整小标题的版本而不是残缺结构版；`postChartCondense` prompt 必须显式禁止修改 section heading
+- DOI / URL 完整性规则（2026-04-16）：初稿 prompt 要求 `web_search` 没验证过的 URL / DOI 一律不写；优先 `https://doi.org/<DOI>` 规范形式；如果 DOI 也没验证过，整条 URL 字段省略；禁止猜测 / 从 pattern 反推 / 使用 tracker 或 shortener；空白 URL 优于伪造 URL
 - 交付排版规则：最终正文 `Word` 必须自动套固定论文模板，第 1 页是封面（课号 + 任务标题），正文从第 2 页开始，`Reference` 必须另起一页，正文和参考文献统一 `Times New Roman 12`、`1.5 倍行距`
 - 课号规则：不加新的输入框；系统在第一次生成大纲时自动从任务标题、特殊要求、材料文件里提取课号，提不出来就留空继续
 - 正式题目规则：正式文章题目和研究问题必须在第一次大纲生成时一起产出并落库；后面正文生成、封面、下载文件名、核验报告标题都统一优先用这套正式题目，不再直接拿第一个上传文件名当最终交付题目
@@ -129,6 +131,10 @@ npx -y @aisuite/chub annotate --list
 - 统一任务要求规则：最少引用数量固定按"每 1000 字 5 条、向上取整"换算；章节数量固定按"1000 字 3 章、每多 1000 字多 1 章、向上取整"，并且章节总数包含 `Introduction` 和 `Conclusion`
 - 统一任务要求规则：大纲、正文、引用核验、核验报告都必须只认这一份统一任务要求结果，确认大纲这一步不再允许偷偷改字数和引用格式
 - 大纲章节检查规则：章节数量必须按大纲真实多行内容来数，不能先把换行抹掉再判断；否则会把正常的 3 章大纲误判成 1 章
+- 章节公式强制规则（2026-04-16）：`deriveUnifiedTaskRequirements` 默认强制用公式覆盖 GPT 返回的 `required_section_count`；只有 GPT 能从材料里 quote 到 ≥25 字、含 "section/chapter/part" 关键词的原文（`structureEvidence` 字段）时才采纳 GPT 返回的值；`trustSectionCount: true` 只在 DB 恢复 / 用户手动 override 场景显式绕过校验；禁止把公式写到大纲生成的 prompt 里让 GPT 自己算
+- Draft 字数硬约束规则（2026-04-16）：`buildDraftGenerationSystemPrompt` 的字数规则是 `MUST fall between ${minWords} and ${maxWords}. Do NOT exceed`，不再用 "approximately"；若字数和深度有冲突必须优先保持 section heading / 引用数量 / 批判性论证，字数靠精简措辞而不是砍结构
+- Calibration heading 保留规则（2026-04-16）：`buildWordCalibrationSystemPrompt` 接受 `draftHeadings: string[]` 参数，prompt 里明确传入原始 draft 的 heading 列表作为 ground truth（不是依赖 input 的当前 heading），每次重写都要求恢复丢失的 heading；`runWordCalibrationAttempts` 5 次全失败时按"先保 heading 数达标、再按字数距离"两段式挑最优候选，不再盲目返回最后一次
+- Heading 识别正则规则（2026-04-16）：`documentFormattingService.isHeadingBlock` 必须认 "Section N: Name" / "Chapter N. Name" / "Part N: Name" 这类格式，最大长度 120 字；`extractBodyHeadingLines` 和 `countBodyHeadingLines` 是共享 util，writingService / humanizeService / 未来任何压字 / 重写环节都必须复用同一套正则
 - 引用硬规则：正文和核验报告都要按统一任务要求检查引用数量、年份、类型和格式；引用必须使用 `2020` 年之后的 academic scholar paper，不允许 book
 - 正文超时规则：正文初稿单次最多 `30` 分钟；字数矫正每次最多 `15` 分钟；引用修正每次最多 `20` 分钟；降 AI 继续按约 `10` 分钟处理；卡住任务的总兜底默认改成 `45` 分钟
 - 降 AI 前压缩重试规则：GPT-5.4 单次压缩后检查字数，如果不在目标的 ±15% 范围内，以当前结果为输入继续压缩，最多额外重试 `3` 次；每次重试都检查引用数量，引用丢了就停止重试用上一轮结果
