@@ -9,6 +9,7 @@ import { captureError } from './lib/errorMonitor';
 export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;
   cleanupStuckRevisions: () => Promise<void>;
+  cleanupStuckScorings: () => Promise<void>;
   cleanupExpiredFiles: () => Promise<void>;
   cleanupExpiredMaterials: () => Promise<void>;
 }
@@ -193,6 +194,68 @@ async function cleanupStuckRevisions() {
   }
 }
 
+async function cleanupStuckScorings() {
+  const timeoutMinutes =
+    (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
+  const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
+
+  const { data: stuckScorings } = await supabaseAdmin
+    .from('scorings')
+    .select('id, user_id, frozen_credits, refunded')
+    .eq('status', 'processing')
+    .lt('updated_at', cutoff);
+
+  if (!stuckScorings || stuckScorings.length === 0) {
+    console.log('[cleanup] No stuck scorings found.');
+    return;
+  }
+
+  for (const scoring of stuckScorings) {
+    console.log(`[cleanup] Processing stuck scoring ${scoring.id}`);
+
+    if (!scoring.refunded && scoring.frozen_credits > 0) {
+      try {
+        await refundCredits(
+          scoring.user_id,
+          scoring.frozen_credits,
+          'scoring',
+          scoring.id,
+          `卡住评审自动退款：${scoring.frozen_credits} 积分`,
+        );
+        await supabaseAdmin
+          .from('scorings')
+          .update({
+            status: 'failed',
+            failure_reason: '评审处理超时，积分已自动退回。请重新提交。',
+            refunded: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', scoring.id);
+      } catch (err) {
+        console.error(`[cleanup] Refund failed for scoring ${scoring.id}:`, err);
+        await supabaseAdmin
+          .from('scorings')
+          .update({
+            status: 'failed',
+            failure_reason: '评审超时，退款异常，请联系客服。',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', scoring.id);
+      }
+    } else {
+      // 没冻结积分或已退过款，直接标记失败
+      await supabaseAdmin
+        .from('scorings')
+        .update({
+          status: 'failed',
+          failure_reason: '评审处理超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', scoring.id);
+    }
+  }
+}
+
 async function cleanupExpiredFiles() {
   const count = await deleteExpiredFiles();
   console.log(`[cleanup] Deleted ${count} expired files.`);
@@ -293,6 +356,7 @@ export function createDefaultCleanupDeps(): CleanupDeps {
   return {
     cleanupStuckTasks,
     cleanupStuckRevisions,
+    cleanupStuckScorings,
     cleanupExpiredFiles,
     cleanupExpiredMaterials,
   };
@@ -303,6 +367,7 @@ export async function runCleanupCycle(
 ) {
   await deps.cleanupStuckTasks();
   await deps.cleanupStuckRevisions();
+  await deps.cleanupStuckScorings();
   await deps.cleanupExpiredFiles();
   await deps.cleanupExpiredMaterials();
 }

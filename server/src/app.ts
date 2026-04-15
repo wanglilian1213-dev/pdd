@@ -44,12 +44,14 @@ export function createApp({ allowedOrigins, mountApiRoutes = true }: CreateAppOp
     const taskRoutes = (require('./routes/task') as typeof import('./routes/task')).default;
     const opsRoutes = (require('./routes/ops') as typeof import('./routes/ops')).default;
     const revisionRoutes = (require('./routes/revision') as typeof import('./routes/revision')).default;
+    const scoringRoutes = (require('./routes/scoring') as typeof import('./routes/scoring')).default;
     const chatRoutes = (require('./routes/chat') as typeof import('./routes/chat')).default;
 
     app.use('/api/user', authMiddleware, userRoutes);
     app.use('/api/recharge', authMiddleware, rechargeRoutes);
     app.use('/api/task', authMiddleware, taskRoutes);
     app.use('/api/revision', authMiddleware, revisionRoutes);
+    app.use('/api/scoring', authMiddleware, scoringRoutes);
     app.use('/api/chat', authMiddleware, chatRoutes);
     app.use('/api/ops', authMiddleware, opsMiddleware, opsRoutes);
   }

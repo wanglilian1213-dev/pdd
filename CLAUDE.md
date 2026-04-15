@@ -43,6 +43,10 @@
   - 正式题目不会再被评分标准文件名带偏
   - 大纲和正文主题会贴着真实任务要求走，不再写成"怎么写报告"
   - 最终正文下载文件名会优先使用正式题目，不再叫 `Report Marking Criteria.docx`
+- 2026-04-15 新上线功能：文章评审（`/dashboard/scoring`）
+  - 单价：0.1 积分/word（由 `system_config.scoring_price_per_word` 控制，可动态调整）
+  - 并发规则：同一用户同一时间只能有一个 `processing` 评审（scorings 表部分唯一索引兜底）
+  - 失败退款：任何失败路径（扫描件前置拒绝后的积分回退 / OpenAI 超时 / JSON 两次解析失败）都必须自动 refund
 
 ## 常用命令
 
@@ -104,7 +108,7 @@ npx -y @aisuite/chub annotate --list
 - 认证：Supabase Auth
 - 数据和文件：Supabase Database + Storage
 - 业务接口：Railway 上的 Express 服务
-- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；客服聊天、降 AI 前压缩、降 AI 后格式修复、论文润色也走 OpenAI（`gpt-5.4`，reasoning effort `high`）；文章修改和图表增强走 Anthropic Claude API（`claude-opus-4-6`，开启 extended thinking）；图表后压缩走 Anthropic Claude API（`claude-sonnet-4-6`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）
+- AI 调用：主写作链路走 OpenAI Responses API（统一走 `OPENAI_MODEL=gpt-5.4`）；客服聊天、降 AI 前压缩、降 AI 后格式修复、论文润色也走 OpenAI（`gpt-5.4`，reasoning effort `high`）；文章修改和图表增强走 Anthropic Claude API（`claude-opus-4-6`，开启 extended thinking）；图表后压缩走 Anthropic Claude API（`claude-sonnet-4-6`）；降 AI 走 Undetectable Humanization API（固定 `v11sr + More Human + University + Essay`）；文章评审走 OpenAI Responses API（`gpt-5.4`，reasoning effort `high`，不联网搜索），20 分钟单次超时、JSON 软约束、格式错一次重试 1 次
 - 正文首轮写作规则：只在第一次正文生成时额外带上强约束写作要求（整篇一次写完、所有章节都写、只用段落、不用项目符号、强调批判性论证和具体证据）；后续字数矫正和引用修正暂时不复用这套强约束
 - 图表增强规则：正文写完后的图表增强环节不再强制加图；系统会把任务特殊要求和大纲传给 AI，由 AI 根据"任务是否要求了图表、文章里有没有真实数据适合可视化、文章类型是否适合"三个维度判断；表格的门槛比图表低，有对比性内容即可加；如果判断两者都不需要，就不加任何东西，原样交付
 - 交付排版规则：最终正文 `Word` 必须自动套固定论文模板，第 1 页是封面（课号 + 任务标题），正文从第 2 页开始，`Reference` 必须另起一页，正文和参考文献统一 `Times New Roman 12`、`1.5 倍行距`
@@ -138,6 +142,13 @@ npx -y @aisuite/chub annotate --list
 - 文章修改计费规则：每 1000 字收费 250 积分（由 `system_config.revision_price_per_1000` 控制），按修改后的文章字数计费，不足 1000 字按 1000 字计；失败必须自动退款
 - 文章修改结算顺序规则：`settleCredits` 必须在所有副作用（Word 生成、storage 上传、`revision_files` 写入、`revisions` 状态更新）都稳定落库之后才能调用；任何在结算之后抛出的异常都会导致"失败单已收费"，因为 catch 块没法再正确退款。同理 `createRevision` 里冻结成功后的任何前置失败必须先 `refundCredits` 再处理记录，绝不允许直接删除带冻结的记录
 - 文章修改卡死回收规则：`revisions` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckRevisions` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标记 failed，避免服务重启 / 进程崩溃后冻结积分永久卡住
+- 文章评审规则：文章评审功能与主写作流程和文章修改流程完全独立，走 OpenAI Responses API（`gpt-5.4`，reasoning effort `high`，不联网搜索），同一时间一个用户只能有一个进行中的评审请求
+- 文章评审计费规则：单价 0.1 积分/word（由 `system_config.scoring_price_per_word` 控制），汉字按字、英文按词；冻结按所有上传文件精确字数总和，结算按 GPT 识别为 `article` 文件的精确字数（`clamp(0, input_word_count)` 兜底），差额自动退款；失败必须自动退款
+- 文章评审前置拒绝规则：扫描件 PDF（pdf-parse 抽文字为空或 ≥90% 私用区字符）必须在上传阶段就拒绝，不冻结；所有上传文件都是图片（没有可提取文字的文件）也在上传阶段拒绝；`.doc/.rtf/.odt` 等不支持扩展名同样拒绝
+- 文章评审结算顺序规则：`settleCredits` 必须在所有副作用（PDF 生成、storage 上传、`scoring_files` 写入、`scorings` 状态更新）都稳定落库之后才能调用；任何结算之前抛出的异常必须先 `refundCredits` 再标 `failed`
+- 文章评审分数锚点规则：百分制 0-100，75-84 区间代表"良好（符合要求即应落此区间）"；任何达到作业基本要求的文章不允许给出 <75 的分数；prompt 里必须明确写死五段式分数锚点（95-100/85-94/75-84/60-74/<60）和容忍度清单（少于 3 个拼写错误、语法正确的长句等不扣分）
+- 文章评审 JSON 校验规则：GPT 返回的 JSON 必须通过 `parseScoringJson + validateScoringJson` 双层校验；维度权重和落在 [95, 105] 容差区间；格式错一次最多重试 1 次，两次都错则全额退款 + 标 `failed`
+- 文章评审卡死回收规则：`scorings` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckScorings` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标 failed
 - 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败
 - 安全规则：前端 Supabase 地址和公开 key 只能从环境变量读取，不能再在源码里写真实兜底值
 - 安全规则：后端跨域白名单必须走 `ALLOWED_ORIGINS`，不能再全开放
@@ -180,7 +191,8 @@ npx -y @aisuite/chub annotate --list
 | `/register` | Register | 注册 + 初始化 |
 | `/dashboard/workspace` | Workspace | 核心工作台 |
 | `/dashboard/revision` | Revision | 文章修改（上传文章 + 修改要求 → Claude 修改 → 下载） |
-| `/dashboard/tasks` | Tasks | 历史任务列表 + 文章修改记录（tab 切换） |
+| `/dashboard/scoring` | Scoring | 文章评审（上传文章 / rubric / brief → GPT 模拟学术评审 → PDF 报告 + 网页展示） |
+| `/dashboard/tasks` | Tasks | 历史任务列表 + 文章修改记录 + 评审记录（三 tab 切换） |
 | `/dashboard/recharge` | Recharge | 余额和激活码兑换 |
 | `/activation-rules` | ActivationRules | 静态页 |
 | `/privacy-policy` | PrivacyPolicy | 静态页 |
@@ -219,6 +231,7 @@ npx -y @aisuite/chub annotate --list
 3. 不能在收费阶段失败后不退款
 4. 不能为了图快，在公开仓库里写入密钥明文
 5. 不能推翻现有页面结构和主路由
+   - 例外：`/dashboard/scoring` 为 2026-04-15 用户明示授权新增的"文章评审"独立主路由，不算违反红线 #5
 
 ## 改代码前先检查
 

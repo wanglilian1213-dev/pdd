@@ -6,7 +6,8 @@ export type MainOpenAIStage =
   | 'outline_translation'
   | 'draft_generation'
   | 'word_calibration'
-  | 'citation_verification';
+  | 'citation_verification'
+  | 'scoring';
 
 export type ReasoningEffort = 'medium' | 'high' | 'xhigh';
 
@@ -18,6 +19,9 @@ const reasoningEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
   word_calibration: 'medium',
   // Citation report intentionally reuses citation_verification for now.
   citation_verification: 'medium',
+  // 文章打分评审：reasoning 拉满到 high，保证评分严谨（但不到 xhigh，节约成本）。
+  // 注意：绝不能进 stagesWithWebSearch —— 评审不联网，避免用户文章数据外流。
+  scoring: 'high',
 };
 
 // Stages that need to verify citations against the live web. The model is given

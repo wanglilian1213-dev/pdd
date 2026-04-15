@@ -15,6 +15,50 @@
 7. 交付正式 `Word` 正文和正式 `PDF` 引用报告
 8. 用户可选继续做降 AI
 
+## 2026-04-15 文章评审功能上线
+
+- 新增"文章评审"独立主功能，和主写作、文章修改完全并行
+- 入口：
+  - 侧边栏新增"文章评审"菜单（顺序：工作台 → 文章修改 → 文章评审 → 我的任务 → 账户额度），图标用 `Gauge`
+  - 新增主路由 `/dashboard/scoring`（此路由经用户 2026-04-15 明示授权新增，不算违反 `CLAUDE.md` 红线 #5）
+  - `/dashboard/tasks` 新增第 3 个 tab "评审记录"，与写作任务、文章修改并列
+- 计费：
+  - 单价 `0.1` 积分/word（由 `system_config.scoring_price_per_word` 控制，支持小数，`opsService.validateConfigValue` 已新增 `POSITIVE_NUMBER_CONFIG_KEYS` 小数校验分支）
+  - "word" 定义：汉字每字 1 个 + 英文按空格切词 + 中英混合相加（不引入中文分词库）
+  - 冻结按所有上传文件精确提取的 word 总和；结算按 GPT 识别为 `role=article` 的文件精确字数；差额自动退款
+  - `settled_words = clamp(sum of article word_count, 0, input_word_count)`；如果 GPT 没识别到任何 article 或文件名完全对不上，fallback 到 `input_word_count` 全额结算（保守兜底）
+  - 文件名匹配用宽松规则（trim + toLowerCase + 去路径前缀），避免 GPT 把 `Report.pdf` 回写成 `report.pdf` 时命中 0 条 article
+- 数据库：
+  - 新增 `scorings` 表（含部分唯一索引 `WHERE status='processing'`，确保同用户同时只能一个进行中评审）
+  - 新增 `scoring_files` 表（区分 `category='material' | 'report'`，report 按 `result_file_retention_days` 默认 3 天过期）
+  - 新增 `system_config.scoring_price_per_word = "0.1"`
+  - 迁移文件：`server/supabase/migrations/20260415000000_scorings.sql`
+- AI 调用：
+  - 走 OpenAI Responses API + streaming，`env.openaiModel` (`gpt-5.4`)，reasoning effort `high`
+  - `MainOpenAIStage` 新增 `'scoring'` 档，**绝不加入 `stagesWithWebSearch`**（评审不联网，避免用户文章数据外流）
+  - 单次 20 分钟硬超时；JSON 格式校验错一次重试一次，两次都错全额退款 + `failed`
+  - Prompt 硬规则：符合要求就给 75-84 分（反吹毛求疵锚点）；每处扣分必须配直接引用 + rubric/brief 条款 + 为什么是实质问题
+- PDF 报告：
+  - 复用现有 pdfkit 框架，Times-Roman 12pt，按真实内容自动分页
+  - 只出 PDF 不出 Word；过期 3 天复用 `result_file_retention_days`
+- 失败退款：
+  - 所有副作用（PDF 上传、storage、DB 写入）稳定落库后才 `settleCredits`
+  - 任何前置失败（扫描件 PDF、纯图片、余额不足、并发冲突、API 失败、JSON 2 次都错、PDF 上传失败）先 `refundCredits` 再标 `failed`
+- Cleanup 兜底：
+  - `cleanupRuntime.ts` 新增 `cleanupStuckScorings`，挂到 `CleanupDeps / runCleanupCycle`；超时（默认 45 分钟）自动 refund + `failed`
+- 前端轮询：5s 首次，+3s 步进，15s 封顶；总超时 25 分钟
+- 前置拒绝：
+  - 扫描件 PDF（`pdf-parse` 提取结果为空或 ≥90% 私用区 Unicode）→ 上传阶段前置 400，不冻结
+  - 全部是图片、没有可提取文字的文件 → 上传阶段前置 400，不冻结
+  - `.doc/.rtf/.odt` 格式（和 Revision 一致）→ 前置 400
+- 新依赖：`pdf-parse@^1.1.1`（纯 JS、~2MB、无原生依赖）
+- 回归步骤（线上部署后必须跑）：
+  1. 上传 1500 字中文 DOCX + rubric DOCX → 冻结约 150 积分 → 轮询 completed → 检查 `settled_credits <= frozen_credits` 且约等于 `scoring_word_count × 0.1` → 下载 PDF
+  2. 破坏性路径：扫描件 PDF / 纯图片 / 并发提交 / 卡死任务（手改 `updated_at` 到 45 分钟前跑 cleanup）
+  3. 反吹毛求疵验收（核心质量红线）：1000-1500 字合格范文不上传 rubric → 总分必须 75-84；如果 <75 说明 prompt 没压住，要先调 prompt 再正式上线
+  4. 大小写匹配验证：上传 `Report_FINAL.docx`，如果 GPT 回写成 `report_final.docx` 仍能命中（已在 `computeSettledWords` 单测覆盖）
+  5. 懒加载验证：`/dashboard/tasks` 默认 tab 不触发 `/api/scoring/list`；切到"评审记录"才触发；切回不重复请求
+
 ## 2026-04-12 AI 智能客服上线
 
 - 删除第三方 BotPenguin 客服（无法访问用户数据），改为自建 AI 客服
@@ -158,7 +202,7 @@
 
 每次以后再改这个最终版，都要同时做完下面这些动作：
 
-1. 更新 `agent.md`
+1. 更新 `CLAUDE.md`
 2. 更新 `PLAN.md`
 3. 更新 `DESIGN.md`
 4. 更新这份 `docs/plans/2026-03-30-final-release-state.md`

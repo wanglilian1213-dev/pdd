@@ -1,6 +1,6 @@
 # 拼代代 — 开发进度表
 
-> 最后更新：2026-04-12
+> 最后更新：2026-04-15
 >
 > 这个文件记录当前真实进度、下一步和已知问题。不要再把“已经做完”的内容写成待办。
 
@@ -22,7 +22,7 @@
   - 正式题目会优先贴着任务本身，而不是沿用 `Report Marking Criteria`
   - 当时线上前端、后端、清理服务都已经是当时主线的最新版本
 - 下一位 agent 接手时，优先看这 5 个文件就够了：
-  - `agent.md`
+  - `CLAUDE.md`
   - `PLAN.md`
   - `DESIGN.md`
   - `docs/plans/2026-03-30-final-release-state.md`
@@ -134,6 +134,32 @@
 - [x] 卡死兜底：cleanup 服务新增 `cleanupStuckRevisions`，超时自动 refund + failed
 - [x] Railway `app` + `cleanup` 已配置 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`
 
+### 文章评审（独立功能，2026-04-15 上线）
+
+- [x] 数据库迁移：`scorings` + `scoring_files` 表 + `scoring_price_per_word` 配置 + 部分唯一索引 `WHERE status='processing'`
+- [x] `opsService.validateConfigValue` 新增小数配置校验分支，支持 `scoring_price_per_word` 这类小数配置
+- [x] 后端：`scoringMaterialService` 精确字数提取（CJK 逐字 + 西文切词）+ 文件角色预判 + 扫描件 / 纯图片前置拒绝
+- [x] 后端：`scoringPromptService` 组装 SYSTEM/USER prompt + JSON 软校验（parseScoringJson + validateScoringJson）
+- [x] 后端：`scoringService` 主流程（建单 → 冻结 → 异步执行 → 结算 → 差额退款 / 失败全额退款）
+- [x] 后端：`scoringPdfService` 按 GPT JSON 渲染 PDF 评审报告（pdfkit + Times-Roman 12pt + 自动分页）
+- [x] 后端：`routes/scoring.ts` 5 个接口（create / current / list / detail / download）
+- [x] `openaiMainConfig.ts` 新增 `scoring` 阶段，reasoning effort `high`，不加入 `stagesWithWebSearch`
+- [x] AI 调用：OpenAI Responses API，`gpt-5.4`，20 分钟单次超时，JSON 格式错一次重试 1 次
+- [x] 计费：0.1 积分/word；汉字按字、英文按词；冻结按所有上传文件精确字数总和；结算按 GPT 识别为 `article` 文件的精确字数，`clamp(0, input_word_count)` 兜底
+- [x] 分数锚点：75-84 为"良好（符合要求即应落此区间）"写进 SYSTEM prompt；容忍度清单覆盖少量拼写错误、长句、非顶刊合法引用、语态风格偏好
+- [x] 同一时间一个用户只能一个 processing（唯一部分索引兜底）
+- [x] 失败自动退款：扫描件 / 纯图片前置拒绝时回退冻结；API 失败、JSON 两次解析失败、PDF 生成 / storage 上传 / DB 写失败都走 refund + 标记 failed
+- [x] settle 顺序：所有副作用（PDF、storage、DB 写）稳定落库后才结算；`alreadySettled` 标志兜底
+- [x] 卡死兜底：cleanup 服务新增 `cleanupStuckScorings`，超过 45 分钟自动 refund + failed
+- [x] 前端：侧边栏 `/dashboard/scoring` 入口（图标 `Gauge`）+ `Scoring.tsx` 四状态页面（输入 / 处理中 / 完成 / 失败）
+- [x] 前端：`Tasks.tsx` 新增第 3 个 tab "评审记录"，懒加载策略（切到才请求、同 tab 切回用缓存）
+- [x] 前端：轮询 `首次 5s → 每次 +3s → 封顶 15s → 总超时 25 分钟`
+- [x] 前端：上传阶段只按扩展名和大小展示，不在前端猜文件角色（避免前后端矛盾）
+- [x] 完成态交互：总评 / 分维度两个内嵌 tab，分维度卡片显示权重%、分数、优点/不足/建议 bullets；顶部总分徽章 + 改进建议清单；右上角下载 PDF 按钮
+- [x] 新增依赖：`pdf-parse@^1.1.1`（用于扫描件 PDF 检测）
+- [x] 单元测试：`scoringMaterialService.test.ts` + `scoringPromptService.test.ts` + `scoringService.test.ts` + cleanup 更新，共 96+ 条测试
+- [x] 文档同步：`CLAUDE.md` / `DESIGN.md` / `PLAN.md` / `docs/plans/2026-03-30-final-release-state.md` 全部更新；历史 `agent.md` 引用清理为 `CLAUDE.md`
+
 ### 线上环境
 
 - [x] Railway 已有项目 `glistening-achievement`
@@ -227,6 +253,7 @@
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-04-15 | 文章评审（Scoring）功能上线：新增 `/dashboard/scoring` 独立主路由，用户上传文章 + 可选 rubric/brief，GPT-5.4 按学术导师标准模拟评审并生成 PDF 报告；计费 0.1 积分/word（汉字按字、英文按词）；新增 `scorings` + `scoring_files` 表和 `scoring_price_per_word` 配置，部分唯一索引保证并发安全；SYSTEM prompt 明确 75-84 分锚点防止 AI 吹毛求疵；前置拒绝扫描件和纯图片上传；新增 `pdf-parse` 依赖；Tasks 页新增"评审记录" tab；所有文档里的 `agent.md` 引用清理为 `CLAUDE.md` |
 | 2026-04-13 | 降 AI 增加参考文献保护：在 Undetectable 处理前分离 References 部分，只发正文降 AI，处理完拼回原始参考文献，避免第三方服务破坏学术引用格式 |
 | 2026-04-12 | 图表增强从强制加图改成智能判断：prompt 改为三步决策框架（先判断是否需要图表、再判断是否需要表格、都不需要就不改）；调用时传入任务特殊要求和大纲内容作为决策依据 |
 | 2026-04-11 | 修复文章修改"余额不足"误报：`estimateWordCount` 对 DOCX 改成用 mammoth 提取真实字数（原来用文件体积 ÷ 8 会高估 3-5 倍），TXT/MD 也改成直接读 buffer 计数，加 20% 缓冲和 500 字兜底 |

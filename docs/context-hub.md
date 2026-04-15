@@ -61,7 +61,7 @@ npx -y @aisuite/chub annotate openai/chat --clear
 
 建议固定成下面这个顺序：
 
-1. 先看 `agent.md`
+1. 先看 `CLAUDE.md`
 2. 如果要改第三方接入，先跑 `Context Hub`
 3. 确认当前推荐写法后，再动代码
 4. 如果这次踩了新坑，补一条本机备注

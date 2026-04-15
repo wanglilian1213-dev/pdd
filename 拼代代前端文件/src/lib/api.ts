@@ -101,6 +101,28 @@ export const api = {
   getRevisionDownloadUrl: (revisionId: string, fileId: string) =>
     request<any>(`/api/revision/${revisionId}/file/${fileId}/download`),
 
+  // Scoring (文章评审)
+  createScoring: async (files: File[]) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const formData = new FormData();
+    files.forEach(f => formData.append('files', f));
+
+    const res = await fetch(`${API_BASE}/api/scoring/create`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${session.access_token}` },
+      body: formData,
+    });
+    return parseApiResponse<any>(res, '创建评审请求失败');
+  },
+  getScoringCurrent: () => request<any>('/api/scoring/current'),
+  getScoring: (id: string) => request<any>(`/api/scoring/${id}`),
+  getScoringList: (limit = 20, offset = 0) =>
+    request<any>(`/api/scoring/list?limit=${limit}&offset=${offset}`),
+  getScoringReportDownloadUrl: (scoringId: string, fileId: string) =>
+    request<any>(`/api/scoring/${scoringId}/file/${fileId}/download`),
+
   // Chat
   sendChatMessage: (message: string, history: Array<{ role: string; content: string }>) =>
     request<{ reply: string; remainingToday: number }>('/api/chat/message', {
