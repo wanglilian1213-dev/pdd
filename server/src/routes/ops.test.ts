@@ -268,7 +268,7 @@ test('POST /api/ops/users/:id/disable rejects invalid user id format', async () 
   }
 });
 
-test('PUT /api/ops/config/writing_price_per_1000 rejects non-positive value', async () => {
+test('PUT /api/ops/config/writing_price_per_word rejects non-positive value', async () => {
   const originalWhitelist = [...env.opsWhitelistEmails];
   env.opsWhitelistEmails.splice(0, env.opsWhitelistEmails.length, '1318823634@qq.com');
 
@@ -277,7 +277,7 @@ test('PUT /api/ops/config/writing_price_per_1000 rejects non-positive value', as
       return {
         select: () => ({
           eq: () => ({
-            maybeSingle: async () => ({ data: { key: 'writing_price_per_1000' }, error: null }),
+            maybeSingle: async () => ({ data: { key: 'writing_price_per_word' }, error: null }),
           }),
         }),
         upsert: async () => ({ error: null }),
@@ -288,7 +288,7 @@ test('PUT /api/ops/config/writing_price_per_1000 rejects non-positive value', as
 
   try {
     await withOpsServer('1318823634@qq.com', async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/ops/config/writing_price_per_1000`, {
+      const response = await fetch(`${baseUrl}/api/ops/config/writing_price_per_word`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ value: 0 }),

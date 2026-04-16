@@ -2,19 +2,18 @@ import { AppError } from '../lib/errors';
 import { validate as isUuid } from 'uuid';
 
 const POSITIVE_INTEGER_CONFIG_KEYS = new Set([
-  'writing_price_per_1000',
-  'humanize_price_per_1000',
   'result_file_retention_days',
   'material_retention_days',
   'stuck_task_timeout_minutes',
   'max_outline_edits',
   'outline_edit_cost',
-  'revision_price_per_1000',
 ]);
 
-// 正小数（> 0）配置项。评审功能走 0.1 积分/word，是项目里第一个小数配置。
-// 以后如果还有类似小数配置（例如某些功能要按秒计费），也加到这里。
+// 正小数（> 0）配置项。所有按字精确计费的单价都放这里。
 const POSITIVE_NUMBER_CONFIG_KEYS = new Set([
+  'writing_price_per_word',
+  'humanize_price_per_word',
+  'revision_price_per_word',
   'scoring_price_per_word',
 ]);
 
@@ -97,7 +96,7 @@ export function validateConfigValue(key: string, value: unknown) {
     if (!Number.isFinite(num) || num <= 0) {
       throw new AppError(400, '配置值格式不对。这里必须填写大于 0 的正数（可带小数）。');
     }
-    // 统一以字符串保存，避免 JSON 里浮点数精度抖动（与 revision_price_per_1000 的现有风格一致）
+    // 统一以字符串保存，避免 JSON 里浮点数精度抖动（与 scoring_price_per_word 现有风格一致）
     return num.toString();
   }
 

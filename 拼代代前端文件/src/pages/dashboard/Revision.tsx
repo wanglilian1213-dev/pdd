@@ -490,7 +490,7 @@ export default function Revision() {
           {/* Cost hint */}
           <p className="text-xs text-gray-400">
             <FileText className="inline h-3.5 w-3.5 mr-1 -mt-0.5" />
-            每 1000 字收费 250 积分，按文章字数计费，不足 1000 字按 1000 字计
+            按修改后的实际字数精确计费，详细计费规则见首页常见问题
           </p>
 
           {/* Submit button */}

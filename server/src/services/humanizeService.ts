@@ -304,9 +304,10 @@ export async function startHumanize(taskId: string, userId: string) {
   if (!inputVersion) throw new AppError(500, '找不到可用的正文版本。');
 
   const inputWordCount = inputVersion.word_count;
-  const pricePerThousand = (await getConfig('humanize_price_per_1000')) || 250;
-  const units = Math.ceil(inputWordCount / 1000);
-  const cost = units * pricePerThousand;
+  // 按字精确计费：cost = ceil(字数 × 单价)
+  const rawPrice = await getConfig('humanize_price_per_word');
+  const pricePerWord = (typeof rawPrice === 'number' ? rawPrice : Number(rawPrice)) || 0.4;
+  const cost = Math.ceil(inputWordCount * pricePerWord);
 
   const result = await startHumanizeJobAtomic(taskId, userId, inputVersion.id, inputWordCount, cost);
 

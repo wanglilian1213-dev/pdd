@@ -87,7 +87,7 @@ export async function buildUserContext(userId: string, userEmail: string): Promi
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .limit(3),
-      getConfig('writing_price_per_1000'),
+      getConfig('writing_price_per_word'),
     ]);
 
   const lines: string[] = [];
@@ -123,7 +123,7 @@ export async function buildUserContext(userId: string, userEmail: string): Promi
     }
   }
 
-  lines.push(`当前写作单价：每 1000 字 ${writingPrice ?? '未知'} 积分`);
+  lines.push(`当前正文写作单价：每字 ${writingPrice ?? '未知'} 积分（汉字按字、英文按词；其它功能详细计费规则可引导用户查首页常见问题）`);
 
   return lines.join('\n');
 }

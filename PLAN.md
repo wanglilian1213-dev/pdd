@@ -122,12 +122,12 @@
 
 ### 文章修改（独立功能，2026-04-06 上线）
 
-- [x] 数据库迁移：`revisions` + `revision_files` 表 + `revision_price_per_1000` 配置
+- [x] 数据库迁移：`revisions` + `revision_files` 表 + `revision_price_per_word` 配置（2026-04-17 起改名，原字段为 `revision_price_per_1000`）
 - [x] 后端：Anthropic SDK 接入，`claude-opus-4-6-20250414` 开启 extended thinking
 - [x] 成本优化：客服聊天/降AI压缩/格式修复/润色 改走 GPT-5.4；图表后压缩 改走 claude-sonnet-4-6
 - [x] 后端：`revisionService` + `revisionMaterialService` + `routes/revision.ts`
 - [x] 前端：侧边栏 `/dashboard/revision` 入口 + `Revision.tsx` 三状态页面（输入 / 处理中 / 完成）
-- [x] 计费：250 积分 / 1000 字，复用现有 wallet RPC（freeze → settle → 差额 refund）
+- [x] 计费：0.2 积分/字（精确按字、向上取整），复用现有 wallet RPC（freeze → settle → 差额 refund）。注：2026-04-17 全项目计费切换到「按字精确计费」，旧值是 250 积分/1000 字。
 - [x] 同一时间一个用户只能一个 processing（唯一部分索引兜底）
 - [x] 失败自动退款：上传失败、API 失败、Word 生成失败都走 refund + 标记 failed
 - [x] settle 顺序：所有副作用（storage、DB 写）稳定落库后才结算，避免"失败单已收费"
@@ -253,6 +253,7 @@
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-04-17 | 全项目计费规则改版：4 个收费链路（正文/降AI/修改/评审）统一改为「按字精确计费 cost = ceil(字数 × 单价)」，字段从 `*_per_1000`（整数）重构为 `*_per_word`（小数）；新单价 — 正文 0.1、降 AI 0.4、文章修改 0.2、评审 0.1（评审本来就是这个算法）；migration `20260417000000_pricing_per_word.sql` 删旧 3 个 per_1000 配置 + 写入新 3 个 per_word 配置；`opsService` 把 3 个新 key 加进 `POSITIVE_NUMBER_CONFIG_KEYS`，原 `POSITIVE_INTEGER_CONFIG_KEYS` 同步移除；`outlineService` / `humanizeService` / `revisionService`（含 createRevision 冻结 + finalizeRevision 结算 2 处）/ `chatService`（客服 AI 上下文 2 处）全改算法和字段名；冻结/结算/失败退款流程不变；前端 Revision.tsx 和 Scoring.tsx 删除静态价格文案，改成「详细计费规则见首页常见问题」；Landing FAQ 替换 Q5「自动降AI如何计费」为综合 Q「各项功能是怎么收费的？」覆盖 4 个功能的精确单价 + 字数口径 + 失败退款，FAQ 渲染容器加 `whitespace-pre-line` 让换行符生效，作为对外唯一价格展示位 |
 | 2026-04-16 | 评审（Scoring）异步化 + 中文化一步到位：(1) `createScoring` 拆分——POST 接口只做 multer 收 + 上传 raw 到 Storage + INSERT `status='initializing'` 立即返回（秒回，消除 "Failed to fetch"），pdf-parse + 冻结积分 + 启动 GPT 全部移到后台 `prepareScoring` 阶段；DB 扩 `scorings.status` 加入 `'initializing'`，唯一部分索引扩到覆盖 `initializing + processing`；(2) `extractFileText` PDF 分支加 30 秒硬 timeout + 错误兜底（pdf-parse 抛错按扫描件处理）；(3) Prompt `SCORING_SYSTEM_PROMPT_EN` Language 段改硬规则：overall_comment / strengths / weaknesses / suggestions / top_suggestions 全部简体中文，维度名保留 rubric 原文（或默认英文五维度名）；(4) `scoringPdfService` 全面中文化（标题"学术评审报告"、"总体评价"、"分维度评分"、"优点/不足/建议"、"优先改进建议"、"识别到的材料"等），嵌入 `server/fonts/SourceHanSansCN-Regular.otf` 字体（8MB，OFL 开源）解决 pdfkit CJK 方块问题；(5) `cleanupRuntime` 扩展：`cleanupStuckScorings` 覆盖 initializing（不 refund，清 Storage + 标 failed）；新增 `cleanupExpiredScoringMaterials`（3 天过期材料清理）和 `cleanupExpiredScoringReports`（过期 PDF 报告清理），补此前 `cleanupExpiredMaterials` 只扫 `task_files` 不扫 `scoring_files` 的漏洞；(6) 前端 `api.ts createScoring` 加 60 秒 AbortController + 中文化"Failed to fetch"为"上传超时/网络不稳定/文件过大"；`Scoring.tsx` 类型 + 轮询 + UI 支持 initializing 状态，显示"正在验证材料（通常 30-90 秒）" |
 | 2026-04-16 | 主流程 4-Bug 修复：(1) Draft prompt "approximately ${words}" 改成 "MUST between ${min} and ${max}, do NOT exceed" 硬约束，解决 1000 字任务初稿出 1580 字（+58%）的问题；(2) Calibration prompt 加结构保留规则，接受 `draftHeadings` 参数作为 ground truth，每次重写都基于原始 draft 的 heading 列表恢复，避免多轮压字时 heading 累积丢失；(3) `runWordCalibrationAttempts` 5 次全失败时两段式挑最优候选（先过滤 heading 数达标，再按字数距离排序），不再返回最后一次；(4) `outlinePromptService` 删掉传给 GPT 的公式，改成"系统会算、你返回 null"；`deriveUnifiedTaskRequirements` 新增 `structureEvidence` 白名单 + `trustSectionCount` 显式旁路：只有 GPT 能从材料里 quote ≥25 字含 "section/chapter" 关键词的原文时才采纳 GPT 返回的 section count，否则强制回退公式；老的 DB 恢复和用户手动 override 路径显式 `trustSectionCount: true` 不受影响；(5) `documentFormattingService.isHeadingBlock` 扩展正则识别 "Section N: ..." / "Chapter N. ..." 格式，新增 `extractBodyHeadingLines` / `countBodyHeadingLines` 共享 util；(6) Chart enhancement 新增 heading 数量回退检查：返回的文本 heading 数掉到 `原始 - 1` 以下直接丢弃 chart 增强版本回退原文；`postChartCondense` prompt 加 heading 保留约束；(7) Draft prompt 新增 DOI/URL 完整性规则：web_search 没验证过的 URL/DOI 一律不写，优先 `https://doi.org/<DOI>` 规范形式，无法验证时整条 URL 字段直接省略，杜绝"GPT 幻觉 DOI + 系统从不验"导致的 404 reference。新增 5 条单元测试覆盖公式强制、evidence 白名单、trust 旁路、最优候选、heading 优先排序。全量测试 262/263 pass（1 个失败是之前就存在的 citation report test，跟本次无关） |
 | 2026-04-15 | 文章评审（Scoring）功能上线：新增 `/dashboard/scoring` 独立主路由，用户上传文章 + 可选 rubric/brief，GPT-5.4 按学术导师标准模拟评审并生成 PDF 报告；计费 0.1 积分/word（汉字按字、英文按词）；新增 `scorings` + `scoring_files` 表和 `scoring_price_per_word` 配置，部分唯一索引保证并发安全；SYSTEM prompt 明确 75-84 分锚点防止 AI 吹毛求疵；前置拒绝扫描件和纯图片上传；新增 `pdf-parse` 依赖；Tasks 页新增"评审记录" tab；所有文档里的 `agent.md` 引用清理为 `CLAUDE.md` |

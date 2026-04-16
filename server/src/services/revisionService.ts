@@ -136,8 +136,18 @@ async function estimateWordCount(files: Express.Multer.File[]): Promise<number> 
   return total;
 }
 
-function computeCost(wordCount: number, pricePerK: number): number {
-  return Math.ceil(wordCount / 1000) * pricePerK;
+// 按字精确计费：cost = ceil(字数 × 单价)。
+// 调用方负责把 system_config.revision_price_per_word 解析成 number 后传入。
+function computeCost(wordCount: number, pricePerWord: number): number {
+  return Math.ceil(wordCount * pricePerWord);
+}
+
+// 读取并解析 revision_price_per_word，兜底 0.2。
+// configService 里小数是以 JSON 字符串落库的，用 Number() 转一下。
+async function getRevisionPricePerWord(): Promise<number> {
+  const raw = await getConfig('revision_price_per_word');
+  const parsed = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.2;
 }
 
 function countWords(text: string): number {
@@ -229,10 +239,10 @@ export async function createRevision(
     throw new AppError(400, '您当前有一个正在处理的修改请求，请等待完成后再提交新的修改。');
   }
 
-  // 2. 估算字数并计算冻结金额
-  const pricePerK = parseInt(await getConfig('revision_price_per_1000') || '250', 10);
+  // 2. 估算字数并计算冻结金额（按字精确计费）
+  const pricePerWord = await getRevisionPricePerWord();
   const estimatedWords = await estimateWordCount(files);
-  const frozenAmount = computeCost(estimatedWords, pricePerK);
+  const frozenAmount = computeCost(estimatedWords, pricePerWord);
 
   // 3. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
   const { data: revision, error: insertError } = await supabaseAdmin
@@ -403,8 +413,9 @@ ${revision.instructions}
     // 字数统计：去掉占位 token 再算，避免占位字符把字数虚高
     const cleanForCount = textWithPlaceholders.replace(/\[\[CHART_PLACEHOLDER_\d+\]\]/g, '');
     const wordCount = countWords(cleanForCount);
-    const pricePerK = parseInt(await getConfig('revision_price_per_1000') || '250', 10);
-    const actualCost = computeCost(wordCount, pricePerK);
+    // 按字精确计费：cost = ceil(字数 × 单价)，结算口径必须和 createRevision 冻结时一致
+    const pricePerWord = await getRevisionPricePerWord();
+    const actualCost = computeCost(wordCount, pricePerWord);
     const costToSettle = Math.min(actualCost, frozenCreditsAmount);
 
     // 5. Generate Word document with embedded charts + native tables

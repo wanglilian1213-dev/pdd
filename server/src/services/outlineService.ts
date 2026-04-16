@@ -1145,9 +1145,11 @@ export async function confirmOutline(taskId: string, userId: string) {
   const finalWords = Number(latestOutline.target_words || task.target_words || 1000);
   const finalStyle = normalizeCitationStyle(String(latestOutline.citation_style || task.citation_style || 'APA 7'));
 
-  const pricePerThousand = (await getConfig('writing_price_per_1000')) || 250;
-  const units = Math.ceil(finalWords / 1000);
-  const cost = units * pricePerThousand;
+  // 按字精确计费：cost = ceil(字数 × 单价)
+  // configService 把字符串型小数原样返回，这里统一 Number()。
+  const rawPrice = await getConfig('writing_price_per_word');
+  const pricePerWord = (typeof rawPrice === 'number' ? rawPrice : Number(rawPrice)) || 0.1;
+  const cost = Math.ceil(finalWords * pricePerWord);
 
   const result = await confirmOutlineTaskAtomic(taskId, userId, finalWords, finalStyle, cost);
 

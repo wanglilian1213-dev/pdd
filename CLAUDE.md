@@ -153,7 +153,13 @@ npx -y @aisuite/chub annotate --list
 - 工作台状态规则：第 6 步只是"交付阶段"，只有真正 `completed + completed` 才算交付完成；`delivering + processing` 仍然要继续轮询并显示"正在整理交付文件"
 - 下载规则：任务列表里的单个"下载"按钮固定代表"下载主文稿"，优先顺序是 `humanized_doc` → `final_doc` → `citation_report`
 - 文章修改规则：文章修改功能与主写作流程完全独立，走 Anthropic Claude API（`claude-opus-4-6-20250414`，开启 extended thinking），同一时间一个用户只能有一个进行中的修改请求
-- 文章修改计费规则：每 1000 字收费 250 积分（由 `system_config.revision_price_per_1000` 控制），按修改后的文章字数计费，不足 1000 字按 1000 字计；失败必须自动退款
+- 全项目计费规则（2026-04-17 改版）：所有功能统一按字精确计费，`cost = ceil(字数 × 单价)`；冻结/结算/失败退款逻辑保持不变；具体单价由 `system_config` 控制可动态调整：
+  - 正文生成：`writing_price_per_word = 0.1`（确认大纲时按 `target_words` 冻结，生成完成后按冻结额结算）
+  - 降 AI：`humanize_price_per_word = 0.4`（按文章字数冻结结算）
+  - 文章修改：`revision_price_per_word = 0.2`（上传时按预估字数冻结，完成后按修改后实际字数结算，差额退款）
+  - 文章评审：`scoring_price_per_word = 0.1`（详见下文文章评审计费规则）
+  - 对外唯一展示位是 Landing 页 FAQ「各项功能是怎么收费的？」；前端 UI 不再硬编码具体单价，只显示动态预估金额
+- 文章修改计费规则：每字 0.2 积分（由 `system_config.revision_price_per_word` 控制），按修改后的文章字数精确计费；失败必须自动退款
 - 文章修改结算顺序规则：`settleCredits` 必须在所有副作用（Word 生成、storage 上传、`revision_files` 写入、`revisions` 状态更新）都稳定落库之后才能调用；任何在结算之后抛出的异常都会导致"失败单已收费"，因为 catch 块没法再正确退款。同理 `createRevision` 里冻结成功后的任何前置失败必须先 `refundCredits` 再处理记录，绝不允许直接删除带冻结的记录
 - 文章修改卡死回收规则：`revisions` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckRevisions` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标记 failed，避免服务重启 / 进程崩溃后冻结积分永久卡住
 - 文章评审规则：文章评审功能与主写作流程和文章修改流程完全独立，走 OpenAI Responses API（`gpt-5.4`，reasoning effort `high`，不联网搜索），同一时间一个用户只能有一个进行中的评审请求

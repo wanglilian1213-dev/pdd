@@ -10,7 +10,6 @@ import {
   X,
   File,
   RefreshCw,
-  Gauge,
 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { triggerDownload } from '../../lib/downloadFile';
@@ -674,12 +673,8 @@ export default function Scoring() {
           {/* Cost hint */}
           <div className="text-xs text-gray-500 space-y-1">
             <p>
-              <Gauge className="inline h-3.5 w-3.5 mr-1 -mt-0.5" />
-              单价 0.1 积分/word，汉字按字、英文按词各计 1 个 word，按实际评审的正文字数结算。
-            </p>
-            <p>
               <FileText className="inline h-3.5 w-3.5 mr-1 -mt-0.5" />
-              提交时会按所有上传文件精确提取的字数冻结积分；AI 识别完成后按正文字数结算，多余部分自动退回。
+              提交时按所有上传文件字数冻结积分，AI 识别完成后只按正文字数结算，多余部分自动退回。详细计费规则见首页常见问题。
             </p>
           </div>
 
