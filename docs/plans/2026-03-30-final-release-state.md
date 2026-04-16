@@ -164,6 +164,83 @@ create → initializing（秒回，不冻结）
 - `npx tsx --test src/**/*.test.ts` 262/263 ✓
 - 线上回归：重跑一个 1000 字任务，查 `document_versions` 5 段字数 + heading 数，确认 draft 字数 ≤ 1100 / calibrated heading 数 = draft heading 数 / final 字数在 900-1100 / reference DOI 能 HTTP HEAD 200
 
+## 2026-04-16 晚 2 降 AI 切走切回工作台状态恢复（主 bug + 6 连锁 bug + cleanup 漏洞）
+
+用户反馈：完成正文 → 点"自动降 AI"进入 step 7 → 切到 `/dashboard/recharge` → 切回 `/dashboard/workspace` 时**降 AI 进度页消失，变成新建任务页**。深度审视后又挖出 6 个会"修一个坏一个"的连锁 bug（B1–B6），一次修完。
+
+### 根因
+
+降 AI 启动时 `start_humanize_job` RPC 只把 `task.stage` 改成 `'humanizing'`，**不动 `task.status`（保持 `'completed'`）**；降 AI 结束时也只把 stage 改回 `'completed'`，task.status 始终是 `'completed'`。但 `getCurrentTask` 之前只查 `status='processing'` 的任务 → 降 AI 进行中 / 已完成 / 失败 三种状态切回都被漏掉，全部被当成"无活跃任务"清空 UI。
+
+### 状态表
+
+| 阶段 | task.status | task.stage | humanize_jobs.status |
+|------|------|------|------|
+| 写作中 | processing | writing/... | (无) |
+| 写作完成 | completed | completed | (无) |
+| 降 AI 启动后 | completed | **humanizing** | **processing** |
+| 降 AI 已完成 | completed | completed | **completed** |
+| 降 AI 失败 | completed | completed | **failed** |
+| 降 AI 卡死 | completed | humanizing（不改回）| processing（不改）|
+
+### 7 个 bug 一起修
+
+| # | bug | 修复 |
+|---|-----|------|
+| **B0** | `getCurrentTask` 只查 `status='processing'` | 改三查询：写作中 → humanizing 双重校验 → 未确认 humanize 兜底；查询 2 双重校验失败时 fallthrough 到查询 3 处理陈年 stage 残留 |
+| **B1** | `getWorkspaceStep` 没把 `'failed'` 映射到 step 7 | 加 `'failed'` 到条件，让失败 humanize 切回不掉到 step 6 |
+| **B2** | step 7 UI 是 2 分支没失败分支 | 重构 3 分支（失败 / 处理中 / 完成），失败分支显示红色 AlertCircle 卡 + failure_reason + 仍可下载 final_doc/citation_report |
+| **B3** | `HumanizeJob` interface + `reshapeTaskResponse` 丢字段 | 加 `failure_reason?: string \| null`，reshape 显式保留 |
+| **B4** | `startHumanizePolling` 收到 `task.status='failed'` 没 reset spinner | 加 `setIsStartingHumanize(false)` |
+| **B5** | `startHumanizePolling` 没监听 `humanizeJob.status='failed'` | 新增独立分支，必须在 `completed` 之前判断，不 setError（让 step 7 FailedUI 通过 derived state 展示）|
+| **B6** | `cleanupStuckTasks` 内 humanizing 分支是死代码（外层只查 status='processing'）| 新增独立 `cleanupStuckHumanizeJobs` 函数，扫 status=processing AND created_at<cutoff 的 humanize_jobs，refund + 标 failed + 重置 task.stage |
+
+### 变更清单
+
+- **DB 迁移** `20260417000001_humanize_acknowledged.sql`：
+  - `ALTER TABLE humanize_jobs ADD COLUMN acknowledged BOOLEAN NOT NULL DEFAULT true`（先 true 让 16 条老数据自动 backfill）
+  - `ALTER COLUMN acknowledged SET DEFAULT false`（之后新数据未确认）
+  - `CREATE INDEX idx_humanize_jobs_unacknowledged ON humanize_jobs (task_id, created_at DESC) WHERE acknowledged = false`（部分索引）
+- **后端 `taskService.ts`**：重写 `getCurrentTask` 三查询；新增 `acknowledgeHumanize(taskId, userId)`
+- **后端 `routes/task.ts`**：新增 `POST /:id/acknowledge-humanize`
+- **后端 `cleanupRuntime.ts`**：新增 `cleanupStuckHumanizeJobs`，注册到 `CleanupDeps` + `runCleanupCycle`（紧跟 `cleanupStuckScorings`）
+- **前端 `api.ts`**：新增 `acknowledgeHumanize(taskId)` 方法
+- **前端 `workspaceStage.ts`**：`getWorkspaceStep` 把 `'failed'` 映射到 step 7
+- **前端 `Workspace.tsx`**：
+  - `HumanizeJob` interface 加 `failure_reason`
+  - `reshapeTaskResponse` 显式保留 `failure_reason`
+  - 新增 `isHumanizeFailed` derived state
+  - `isHumanizeProcessing` 加 `!isHumanizeFailed` 条件
+  - step 7 UI 重构 3 分支（失败 / 处理中 / 完成）
+  - `startHumanizePolling` 修 B4 + B5
+  - `handleNewTask` 改 async + dismiss 时调 ack API（taskData.humanizeJob 存在才调，try/catch 吞掉失败）
+
+### 测试
+
+- 后端 `taskService.test.ts` 加 9 个 case：getCurrentTask 7 个分支（写作中 / humanizing 双重校验通过 / 双重校验失败 fallthrough / 未确认 completed / 未确认 failed / 全已确认 / 无任何任务）+ acknowledgeHumanize 2 个（成功 / 404）
+- 前端 `workspaceStage.test.ts` 加 1 个 `failed → step 7` case
+- `cleanupRuntime.test.ts` mock 新增 `cleanupStuckHumanizeJobs` stub 验证错误隔离行为
+
+### 验证
+
+- `cd server && npm run lint && npm run build` 全绿 ✓
+- `cd 拼代代前端文件 && npm run lint && npm run build` 全绿 ✓
+- `npx tsx --test src/services/taskService.test.ts` 11/11 ✓（2 老 + 9 新）
+- `npx tsx --test src/cleanupRuntime.test.ts` 5/5 ✓
+- `npx tsx --test src/lib/workspaceStage.test.ts` 6/6 ✓
+- DB 迁移已通过 Supabase Management API 跑过（HTTP 201），schema 4 项确认：
+  - `acknowledged` 字段存在，`column_default='false'`，`is_nullable=NO`
+  - 16 条老数据全部 `acknowledged=true`
+  - 部分索引 `idx_humanize_jobs_unacknowledged` 存在 `WHERE (acknowledged = false)`
+
+### 线上 E2E 待回归
+
+- 场景 A：降 AI 进行中切走切回 → 应继续显示 step 7 spinner
+- 场景 B：降 AI 完成后切走切回 → 应继续显示"降重完成 + 下载"
+- 场景 C：用户点"完成并创建新任务" → 网络面板确认 `POST /api/task/:id/acknowledge-humanize` → 切走切回应回到新建任务页
+- 场景 D：降 AI 失败切走切回 → 应继续显示红色失败卡 + failure_reason + 下载 final_doc/citation_report
+- 场景 E：手动 INSERT stuck job + 重启 cleanup 服务 → 自动 refund + 标 failed + 重置 task.stage + 用户切回看到失败页
+
 ## 2026-04-15 发布状态核对（Scoring 功能）
 
 ### 已经完成
