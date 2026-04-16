@@ -87,8 +87,11 @@ export const SCORING_SYSTEM_PROMPT_EN = `You are a seasoned academic mentor who 
 4. Language & expression — 15%
 5. Citation format — 10%
 
-## Language
-Write overall_comment, dimension content, and suggestions in the same language the article is written in (Chinese article → Chinese feedback; English article → English feedback; mixed → follow dominant language).`;
+## Language (HARD RULE - overrides any earlier rule)
+- Write overall_comment, every dimension's strengths / weaknesses / suggestions, and every entry in top_suggestions in 简体中文, regardless of the article's original language.
+- Dimension names: keep exactly as the rubric defines (if a rubric is uploaded). When no rubric is uploaded, use these default English names verbatim: "Content & argument", "Argumentation & evidence", "Structure & logic", "Language & expression", "Citation format". Do not translate the dimension names.
+- When quoting or referencing the article's content inside Chinese narrative, keep the original quote in its original language inside quotation marks, e.g. 论文里写道 "these factors are important", 但缺少具体说明.
+- Filenames in detected_files must remain exactly as provided (do not translate).`;
 
 export function buildScoringSystemPrompt(): string {
   return SCORING_SYSTEM_PROMPT_EN;

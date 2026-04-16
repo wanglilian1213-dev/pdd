@@ -12,6 +12,8 @@ export interface CleanupDeps {
   cleanupStuckScorings: () => Promise<void>;
   cleanupExpiredFiles: () => Promise<void>;
   cleanupExpiredMaterials: () => Promise<void>;
+  cleanupExpiredScoringMaterials: () => Promise<void>;
+  cleanupExpiredScoringReports: () => Promise<void>;
 }
 
 export interface CleanupLogger {
@@ -199,10 +201,13 @@ async function cleanupStuckScorings() {
     (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
   const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
 
+  // 覆盖 initializing + processing 两个状态
+  // initializing：还没冻结过积分 → 不需要 refund，只清文件 + 标失败
+  // processing：可能已经冻结 → 按原逻辑 refund + 标失败
   const { data: stuckScorings } = await supabaseAdmin
     .from('scorings')
-    .select('id, user_id, frozen_credits, refunded')
-    .eq('status', 'processing')
+    .select('id, user_id, status, frozen_credits, refunded')
+    .in('status', ['initializing', 'processing'])
     .lt('updated_at', cutoff);
 
   if (!stuckScorings || stuckScorings.length === 0) {
@@ -211,8 +216,23 @@ async function cleanupStuckScorings() {
   }
 
   for (const scoring of stuckScorings) {
-    console.log(`[cleanup] Processing stuck scoring ${scoring.id}`);
+    console.log(`[cleanup] Processing stuck scoring ${scoring.id} (status=${scoring.status})`);
 
+    // initializing 阶段卡住：没冻结过积分，只需清理 Storage + 标失败
+    if (scoring.status === 'initializing' || scoring.frozen_credits === 0) {
+      await cleanupScoringMaterialsForId(scoring.id);
+      await supabaseAdmin
+        .from('scorings')
+        .update({
+          status: 'failed',
+          failure_reason: '评审准备超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', scoring.id);
+      continue;
+    }
+
+    // processing 阶段卡住：已冻结过积分，退款后标失败
     if (!scoring.refunded && scoring.frozen_credits > 0) {
       try {
         await refundCredits(
@@ -243,7 +263,7 @@ async function cleanupStuckScorings() {
           .eq('id', scoring.id);
       }
     } else {
-      // 没冻结积分或已退过款，直接标记失败
+      // 已退过款，直接标记失败
       await supabaseAdmin
         .from('scorings')
         .update({
@@ -254,6 +274,129 @@ async function cleanupStuckScorings() {
         .eq('id', scoring.id);
     }
   }
+}
+
+/**
+ * 把某个 scoring 的所有 material 文件从 Storage + DB 清掉。
+ * 用于 initializing 阶段卡死的清理，或者 2026-04-16 新增的过期 material 清理。
+ */
+async function cleanupScoringMaterialsForId(scoringId: string) {
+  const { data: files } = await supabaseAdmin
+    .from('scoring_files')
+    .select('id, storage_path')
+    .eq('scoring_id', scoringId)
+    .eq('category', 'material');
+
+  if (!files || files.length === 0) return;
+
+  const paths = files.map((f) => f.storage_path).filter(Boolean) as string[];
+  if (paths.length > 0) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove(paths);
+    } catch (err) {
+      captureError(err, 'cleanup.scoring_storage_remove_failed', { scoringId });
+    }
+  }
+
+  try {
+    await supabaseAdmin
+      .from('scoring_files')
+      .delete()
+      .eq('scoring_id', scoringId)
+      .eq('category', 'material');
+  } catch (err) {
+    captureError(err, 'cleanup.scoring_files_delete_failed', { scoringId });
+  }
+}
+
+/**
+ * 过期 scoring 材料清理（2026-04-16 新增，补之前 cleanupExpiredMaterials 只扫 task_files 的漏洞）。
+ * 规则：scoring_files.category='material' 且 created_at > retention_days 天前，
+ * 对应 scoring 是 'completed' | 'failed' 终态时才删（processing / initializing 的保留）。
+ */
+async function cleanupExpiredScoringMaterials() {
+  const retentionDays = (await getConfig('material_retention_days')) || 3;
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: oldFiles } = await supabaseAdmin
+    .from('scoring_files')
+    .select('id, scoring_id, storage_path')
+    .eq('category', 'material')
+    .lt('created_at', cutoff);
+
+  if (!oldFiles || oldFiles.length === 0) {
+    console.log('[cleanup] No expired scoring materials found.');
+    return;
+  }
+
+  const scoringIds = [...new Set(oldFiles.map((f) => f.scoring_id).filter(Boolean))] as string[];
+  const { data: scorings } = await supabaseAdmin
+    .from('scorings')
+    .select('id, status')
+    .in('id', scoringIds);
+
+  const finishedIds = new Set(
+    (scorings || [])
+      .filter((s) => s.status === 'completed' || s.status === 'failed')
+      .map((s) => s.id),
+  );
+
+  const eligible = oldFiles.filter((f) => finishedIds.has(f.scoring_id));
+  const skipped = oldFiles.length - eligible.length;
+
+  if (skipped > 0) {
+    console.log(`[cleanup] Skipped ${skipped} scoring materials (scoring not finished yet).`);
+  }
+
+  if (eligible.length === 0) return;
+
+  for (const f of eligible) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove([f.storage_path]);
+    } catch (err) {
+      captureError(err, 'cleanup.scoring_material_storage_remove_failed', { scoringId: f.scoring_id, fileId: f.id });
+    }
+    try {
+      await supabaseAdmin.from('scoring_files').delete().eq('id', f.id);
+    } catch (err) {
+      captureError(err, 'cleanup.scoring_material_db_delete_failed', { scoringId: f.scoring_id, fileId: f.id });
+    }
+  }
+
+  console.log(`[cleanup] Cleaned up ${eligible.length} expired scoring materials.`);
+}
+
+/**
+ * 过期 scoring PDF 报告清理（2026-04-16 新增）。
+ * 规则：scoring_files.category='report' 且 expires_at < now。
+ */
+async function cleanupExpiredScoringReports() {
+  const { data: expired } = await supabaseAdmin
+    .from('scoring_files')
+    .select('id, scoring_id, storage_path, expires_at')
+    .eq('category', 'report')
+    .not('expires_at', 'is', null)
+    .lt('expires_at', new Date().toISOString());
+
+  if (!expired || expired.length === 0) {
+    console.log('[cleanup] No expired scoring reports found.');
+    return;
+  }
+
+  for (const f of expired) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove([f.storage_path]);
+    } catch (err) {
+      captureError(err, 'cleanup.scoring_report_storage_remove_failed', { scoringId: f.scoring_id, fileId: f.id });
+    }
+    try {
+      await supabaseAdmin.from('scoring_files').delete().eq('id', f.id);
+    } catch (err) {
+      captureError(err, 'cleanup.scoring_report_db_delete_failed', { scoringId: f.scoring_id, fileId: f.id });
+    }
+  }
+
+  console.log(`[cleanup] Cleaned up ${expired.length} expired scoring reports.`);
 }
 
 async function cleanupExpiredFiles() {
@@ -359,6 +502,8 @@ export function createDefaultCleanupDeps(): CleanupDeps {
     cleanupStuckScorings,
     cleanupExpiredFiles,
     cleanupExpiredMaterials,
+    cleanupExpiredScoringMaterials,
+    cleanupExpiredScoringReports,
   };
 }
 
@@ -370,6 +515,8 @@ export async function runCleanupCycle(
   await deps.cleanupStuckScorings();
   await deps.cleanupExpiredFiles();
   await deps.cleanupExpiredMaterials();
+  await deps.cleanupExpiredScoringMaterials();
+  await deps.cleanupExpiredScoringReports();
 }
 
 export async function runInitialCleanup(

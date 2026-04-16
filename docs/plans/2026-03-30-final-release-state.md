@@ -59,6 +59,64 @@
   4. 大小写匹配验证：上传 `Report_FINAL.docx`，如果 GPT 回写成 `report_final.docx` 仍能命中（已在 `computeSettledWords` 单测覆盖）
   5. 懒加载验证：`/dashboard/tasks` 默认 tab 不触发 `/api/scoring/list`；切到"评审记录"才触发；切回不重复请求
 
+## 2026-04-16 晚 评审（Scoring）异步化 + 中文化
+
+用户反馈：上传 5 个文件（含 6.5MB PDF）点"开始评审" → 浏览器 "Failed to fetch"；评审报告是英文而非中文。审计后又挖出两个隐藏问题（PDF CJK 字体方块 / scoring_files 永不清理）。四个问题一步到位修完。
+
+### 根因确认
+
+- **Failed to fetch 真根因**：`createScoring` 在 HTTP 同步响应里跑 pdf-parse 解析 6.5MB PDF，可能卡 30-120 秒；超过浏览器 fetch 默认超时就显示 "Failed to fetch"。其他 `createTask` / `createRevision` 不做文件内容解析所以不卡。
+- **反馈英文**：`SCORING_SYSTEM_PROMPT_EN` Language 段写的是"文章什么语言就用什么语言反馈"，英文论文自然用英文反馈。
+- **隐藏陷阱：PDF 中文方块**：pdfkit 内置 Times-Roman / Helvetica 不含 CJK 字形；一旦 prompt 改中文反馈，PDF 里中文全部渲染成 □□□。
+- **隐藏漏洞：scoring_files 永不清理**：`cleanupExpiredMaterials` 只扫 `task_files`，`scoring_files` 的材料 + report 都没过期清理任务。
+
+### 变更清单
+
+- **DB 迁移** `20260416000000_scoring_initializing.sql`：`scorings.status` check 加 `'initializing'`；唯一部分索引扩到 `status IN ('initializing', 'processing')`
+- **`scoringService.ts`**：
+  - `createScoring` 重构：只做 validateFiles + 上传 raw 到 Storage + INSERT `status='initializing'` + 返回（秒回）；不跑 extract / 不冻结积分
+  - 新增 `prepareScoring`：后台从 Storage 下载 → 跑 extract → freeze → UPDATE `status='processing'` + 启动 `executeScoring`；失败路径不 refund（没冻结）
+  - 新增 `uploadScoringMaterialsRaw`、`cleanupScoringMaterials`、`markInitializingFailed`
+  - `getScoringCurrent` 和活跃锁查询 `.eq('status', 'processing')` → `.in('status', ['initializing', 'processing'])`
+- **`scoringMaterialService.ts`**：PDF 分支加 30 秒 `Promise.race` timeout + 错误兜底（pdf-parse 抛错统一按扫描件处理）
+- **`scoringPromptService.ts`**：SYSTEM prompt Language 段改硬规则，全中文反馈 + 维度名保留原文
+- **`scoringPdfService.ts`**：注册 CJK 字体 + 全面中文化所有固定标签
+- **`server/fonts/SourceHanSansCN-Regular.otf`**（新）：8MB OFL-1.1 开源字体，git 追踪
+- **`cleanupRuntime.ts`**：`cleanupStuckScorings` 覆盖 initializing；新增 `cleanupExpiredScoringMaterials` + `cleanupExpiredScoringReports`；`CleanupDeps` 接口扩展
+- **前端 `api.ts`**：`createScoring` 加 60 秒 `AbortController` + 中文化网络错误
+- **前端 `Scoring.tsx`**：status 类型加 `'initializing'`；轮询 + 活跃判断覆盖 initializing；UI 分别显示"正在验证材料"和"正在评审您的文章"
+
+### 状态机
+
+```
+create → initializing（秒回，不冻结）
+  ↓ prepareScoring 后台
+  ↓ extract / freeze / UPDATE
+  → processing（已冻结，GPT 评审中）
+  ↓ executeScoring
+  → completed / failed
+```
+
+### 清理闭环
+
+- initializing 阶段失败 → `markInitializingFailed`（清 Storage + 标 failed，不 refund）
+- processing 阶段失败 → `refundCredits` + 标 failed
+- 卡住 initializing 45 分钟 → cleanup 自动按 initializing 失败处理
+- 卡住 processing 45 分钟 → cleanup 自动 refund + 标 failed
+- 终态 material 3 天后删除（新 `cleanupExpiredScoringMaterials`）
+- 终态 report 按 `expires_at` 删除（新 `cleanupExpiredScoringReports`）
+
+### 验证
+
+- `npm run lint && npm run build` 全绿
+- `npx tsx --test src/**/*.test.ts` 262/263（1 失败是老的 citation report test，与本次无关）
+- PDF 烟测：构造中文反馈 → 78KB PDF 生成成功，中文正常渲染
+- 线上回归需用户重新跑一次：上传 5 个文件含 6.5MB PDF → 预期 create 秒回、30-90 秒进 processing、3-10 分钟 completed、下载 PDF 报告中文无方块
+
+### 待用户手动操作
+
+- **DB 迁移 SQL**（Supabase Management API token 失效，无法自动跑）：需要用户打开 Supabase SQL Editor 跑 `server/supabase/migrations/20260416000000_scoring_initializing.sql`
+
 ## 2026-04-16 主流程 4-Bug 修复
 
 2026-04-15 用户反馈主写作流程出了 4 个同时出现的问题（1000 字任务）：

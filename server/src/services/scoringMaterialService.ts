@@ -239,7 +239,40 @@ export async function extractFileText(
 
   // PDF
   if (ext === PDF_EXTENSION) {
-    const { text } = await deps.parsePdf(file.buffer);
+    // pdf-parse 偶尔会卡很久（特别是扫描件 / 嵌图 / 老格式 PDF）。
+    // 加 30 秒硬 timeout：超时按"扫描件 / 加密"处理，前置拒绝该文件。
+    const PDF_PARSE_TIMEOUT_MS = 30_000;
+    let parseResult: { text: string };
+    try {
+      parseResult = await Promise.race([
+        deps.parsePdf(file.buffer),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new AppError(
+                  400,
+                  `PDF ${file.originalname} 解析超时（可能是扫描件或加密文件），请换一份文字版 PDF 或 DOCX。`,
+                ),
+              ),
+            PDF_PARSE_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      // pdf-parse 自己也可能抛错（比如 PDF 头损坏）→ 一律按扫描件 / 不可解析处理
+      return {
+        filename: file.originalname,
+        wordCount: 0,
+        hintedRole,
+        isImage: false,
+        isScannedPdf: true,
+        rawText: null,
+        mimeType,
+      };
+    }
+    const { text } = parseResult;
     const trimmed = (text || '').trim();
     if (trimmed.length === 0 || isMostlyGarbage(trimmed)) {
       return {

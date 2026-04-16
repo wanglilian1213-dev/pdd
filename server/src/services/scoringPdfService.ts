@@ -1,3 +1,4 @@
+import path from 'path';
 import PDFDocument from 'pdfkit';
 import type {
   ScoringResult,
@@ -13,12 +14,16 @@ import type {
 // 输出：Buffer（application/pdf），由上层上传到 Supabase Storage
 //
 // 设计原则：
-// 1) 复用现有引用核验报告 pdfkit 封装的模式：Times-Roman 12pt，按真实内容自动分页，
-//    不写死卡片高度避免文字溢出 / 压线。
-// 2) 所有动态高度都用 heightOfString 提前量好，再调 ensureSpace 确认当页够用，不够就 addPage。
-// 3) 中文会 fallback 到 Helvetica（pdfkit 不内置 CJK 字体，再叠 Times-Roman 仍会渲染成方块）；
-//    评分报告的文本大部分是英文 + 用户论文中的引用短语，暂不接字体嵌入，后续要中文时再加。
+// 1) 固定文案（标题 / 章节名 / 标签）统一用中文，配合 GPT 输出的中文反馈。
+// 2) pdfkit 内置 Times-Roman / Helvetica 不含中文字形，必须注册 CJK 字体
+//    （Source Han Sans CN Regular）用于所有渲染，英文数字也兼容。
+// 3) 字体文件位于 server/fonts/ 目录，git 追踪，Railway 部署会带过去。
+// 4) 按真实内容自动分页，用 heightOfString + ensureSpace 提前量好空间。
 // ---------------------------------------------------------------------------
+
+// 字体文件路径：__dirname 在编译后是 dist/services/，向上两级到 server/ 根，再进 fonts/
+const CJK_FONT_PATH = path.join(__dirname, '..', '..', 'fonts', 'SourceHanSansCN-Regular.otf');
+const CJK_FONT = 'CJK';
 
 export interface ScoringReportData {
   result: ScoringResult;
@@ -38,9 +43,9 @@ const CARD_PADDING = 12;
 const SECTION_GAP = 18;
 
 const SCENARIO_LABEL: Record<ScoringScenario, string> = {
-  rubric: 'Graded strictly against the uploaded rubric',
-  brief_only: 'Graded against the five default dimensions, weighted by the brief',
-  article_only: 'Graded against the five default dimensions (30/25/20/15/10)',
+  rubric: '按上传的评分标准 (Rubric) 严格评审',
+  brief_only: '按默认五维度评审，权重参照任务要求 (Brief) 微调',
+  article_only: '仅文章，按默认五维度评审（30/25/20/15/10）',
 };
 
 export function buildScoringReportData(
@@ -68,11 +73,14 @@ export function renderScoringReportPdf(data: ScoringReportData): Promise<Buffer>
         margin: PAGE_MARGIN,
         info: {
           Title: data.articleTitle
-            ? `Scoring Report — ${data.articleTitle}`
-            : 'Scoring Report',
+            ? `评审报告 — ${data.articleTitle}`
+            : '评审报告',
           Author: '拼代代 Academic Scoring',
         },
       });
+
+      // 注册 CJK 字体（所有 .font(CJK_FONT) 调用统一走这一个字体）
+      doc.registerFont(CJK_FONT, CJK_FONT_PATH);
 
       const chunks: Buffer[] = [];
       doc.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -102,19 +110,21 @@ function renderReport(doc: any, data: ScoringReportData) {
 
 function renderHeader(doc: any, data: ScoringReportData) {
   doc
-    .font('Times-Bold')
+    .font(CJK_FONT)
     .fontSize(HEADING_FONT_SIZE)
-    .text('Academic Scoring Report', { align: 'left' });
+    .text('学术评审报告', { align: 'left' });
 
   if (data.articleTitle) {
     doc
-      .font('Times-Italic')
+      .font(CJK_FONT)
       .fontSize(BODY_FONT_SIZE)
-      .text(data.articleTitle, { align: 'left' });
+      .fillColor('#333')
+      .text(data.articleTitle, { align: 'left' })
+      .fillColor('#000');
   }
 
   doc
-    .font('Times-Roman')
+    .font(CJK_FONT)
     .fontSize(BODY_FONT_SIZE - 1)
     .fillColor('#555')
     .text(SCENARIO_LABEL[data.scenario], { align: 'left' })
@@ -126,18 +136,18 @@ function renderHeader(doc: any, data: ScoringReportData) {
 }
 
 function renderOverallSection(doc: any, data: ScoringReportData) {
-  drawSectionTitle(doc, 'Overall');
+  drawSectionTitle(doc, '总体评价');
 
-  // Big score badge (just bold text, keep layout simple — no card background yet)
+  // 大字总分
   doc
-    .font('Times-Bold')
+    .font(CJK_FONT)
     .fontSize(36)
     .text(`${data.result.overall_score} / 100`, { align: 'left' });
 
   doc.moveDown(0.3);
 
   doc
-    .font('Times-Roman')
+    .font(CJK_FONT)
     .fontSize(BODY_FONT_SIZE)
     .text(data.result.overall_comment, {
       align: 'left',
@@ -148,7 +158,7 @@ function renderOverallSection(doc: any, data: ScoringReportData) {
 }
 
 function renderDimensionsSection(doc: any, dimensions: ScoringDimension[]) {
-  drawSectionTitle(doc, 'Dimension Breakdown');
+  drawSectionTitle(doc, '分维度评分');
 
   dimensions.forEach((dim, idx) => {
     renderDimensionCard(doc, dim, idx + 1);
@@ -159,30 +169,31 @@ function renderDimensionsSection(doc: any, dimensions: ScoringDimension[]) {
 }
 
 function renderDimensionCard(doc: any, dim: ScoringDimension, index: number) {
-  const headerText = `${index}. ${dim.name} — ${dim.weight}% weight, score ${dim.score}/100`;
+  // 维度名保留 rubric 原文（通常英文），括号里附中文权重/分数说明
+  const headerText = `${index}. ${dim.name}  （权重 ${dim.weight}% · 得分 ${dim.score}/100）`;
 
   ensureSpace(doc, estimateDimensionHeight(doc, dim));
 
   doc
-    .font('Times-Bold')
+    .font(CJK_FONT)
     .fontSize(SUBHEADING_FONT_SIZE)
     .text(headerText, { align: 'left' });
 
   doc.moveDown(0.2);
 
-  renderBulletGroup(doc, 'Strengths', dim.strengths);
-  renderBulletGroup(doc, 'Weaknesses', dim.weaknesses);
-  renderBulletGroup(doc, 'Suggestions', dim.suggestions);
+  renderBulletGroup(doc, '优点', dim.strengths);
+  renderBulletGroup(doc, '不足', dim.weaknesses);
+  renderBulletGroup(doc, '建议', dim.suggestions);
 }
 
 function renderTopSuggestionsSection(doc: any, suggestions: string[]) {
-  drawSectionTitle(doc, 'Top Suggestions');
+  drawSectionTitle(doc, '优先改进建议');
 
   suggestions.forEach((s, idx) => {
     const line = `${idx + 1}. ${s}`;
     ensureSpace(doc, doc.heightOfString(line, { width: contentWidth(doc) }) + LINE_GAP);
     doc
-      .font('Times-Roman')
+      .font(CJK_FONT)
       .fontSize(BODY_FONT_SIZE)
       .text(line, { align: 'left', lineGap: LINE_GAP });
   });
@@ -190,18 +201,26 @@ function renderTopSuggestionsSection(doc: any, suggestions: string[]) {
   doc.moveDown(SECTION_GAP / BODY_FONT_SIZE);
 }
 
+const ROLE_LABEL: Record<string, string> = {
+  article: '待评审文章',
+  rubric: '评分标准',
+  brief: '任务要求',
+  other: '其它材料',
+};
+
 function renderDetectedFilesSection(
   doc: any,
   detected: ScoringResult['detected_files'],
 ) {
-  drawSectionTitle(doc, 'Detected Files');
+  drawSectionTitle(doc, '识别到的材料');
 
   detected.forEach((f) => {
-    const base = `• ${f.filename} — ${f.role}`;
+    const roleZh = ROLE_LABEL[f.role] || f.role;
+    const base = `• ${f.filename} — ${roleZh}`;
     const line = f.note && f.note.trim() ? `${base}（${f.note}）` : base;
     ensureSpace(doc, doc.heightOfString(line, { width: contentWidth(doc) }) + LINE_GAP);
     doc
-      .font('Times-Roman')
+      .font(CJK_FONT)
       .fontSize(BODY_FONT_SIZE)
       .text(line, { align: 'left', lineGap: LINE_GAP });
   });
@@ -215,11 +234,11 @@ function renderFooter(doc: any, data: ScoringReportData) {
 
   const dateStr = data.generatedAt.toISOString().slice(0, 10);
   doc
-    .font('Times-Italic')
+    .font(CJK_FONT)
     .fontSize(BODY_FONT_SIZE - 2)
     .fillColor('#555')
     .text(
-      `Generated ${dateStr} by 拼代代 Academic Scoring. This report simulates how a qualified mentor would grade the submission and is intended for self-assessment before formal submission.`,
+      `${dateStr} 由拼代代学术评审生成。本报告模拟合格导师的评审视角，仅供正式提交前的自查参考，不代表最终评分。`,
       { align: 'left' },
     )
     .fillColor('#000');
@@ -248,9 +267,11 @@ function drawHorizontalRule(doc: any) {
 function drawSectionTitle(doc: any, title: string) {
   ensureSpace(doc, SUBHEADING_FONT_SIZE + SECTION_GAP);
   doc
-    .font('Times-Bold')
+    .font(CJK_FONT)
     .fontSize(SUBHEADING_FONT_SIZE)
-    .text(title, { align: 'left' });
+    .fillColor('#111')
+    .text(title, { align: 'left' })
+    .fillColor('#000');
   doc.moveDown(0.3);
 }
 
@@ -258,15 +279,17 @@ function renderBulletGroup(doc: any, label: string, items: string[]) {
   if (!items || items.length === 0) return;
 
   doc
-    .font('Times-Bold')
+    .font(CJK_FONT)
     .fontSize(BODY_FONT_SIZE)
-    .text(`${label}:`, { align: 'left' });
+    .fillColor('#333')
+    .text(`${label}：`, { align: 'left' })
+    .fillColor('#000');
 
   items.forEach((item) => {
     const bullet = `• ${item}`;
     ensureSpace(doc, doc.heightOfString(bullet, { width: contentWidth(doc) - CARD_PADDING }) + LINE_GAP);
     doc
-      .font('Times-Roman')
+      .font(CJK_FONT)
       .fontSize(BODY_FONT_SIZE)
       .text(bullet, {
         align: 'left',
@@ -286,8 +309,7 @@ function ensureSpace(doc: any, needed: number) {
 }
 
 function estimateDimensionHeight(doc: any, dim: ScoringDimension): number {
-  // Rough estimate: header + 3 labels + all bullets. pdfkit auto-wraps anyway;
-  // we only use this to decide "should we page break before starting the card".
+  // Rough estimate: header + 3 labels + all bullets. pdfkit 自动换行，这里只是"下一页要不要新开"的预判。
   const width = contentWidth(doc);
   let total = SUBHEADING_FONT_SIZE + 6;
   const countBullets = (items: string[]) =>

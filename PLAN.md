@@ -1,6 +1,6 @@
 # 拼代代 — 开发进度表
 
-> 最后更新：2026-04-16
+> 最后更新：2026-04-16 (评审异步化 + 中文化)
 >
 > 这个文件记录当前真实进度、下一步和已知问题。不要再把“已经做完”的内容写成待办。
 
@@ -253,6 +253,7 @@
 
 | 日期 | 更新内容 |
 |------|----------|
+| 2026-04-16 | 评审（Scoring）异步化 + 中文化一步到位：(1) `createScoring` 拆分——POST 接口只做 multer 收 + 上传 raw 到 Storage + INSERT `status='initializing'` 立即返回（秒回，消除 "Failed to fetch"），pdf-parse + 冻结积分 + 启动 GPT 全部移到后台 `prepareScoring` 阶段；DB 扩 `scorings.status` 加入 `'initializing'`，唯一部分索引扩到覆盖 `initializing + processing`；(2) `extractFileText` PDF 分支加 30 秒硬 timeout + 错误兜底（pdf-parse 抛错按扫描件处理）；(3) Prompt `SCORING_SYSTEM_PROMPT_EN` Language 段改硬规则：overall_comment / strengths / weaknesses / suggestions / top_suggestions 全部简体中文，维度名保留 rubric 原文（或默认英文五维度名）；(4) `scoringPdfService` 全面中文化（标题"学术评审报告"、"总体评价"、"分维度评分"、"优点/不足/建议"、"优先改进建议"、"识别到的材料"等），嵌入 `server/fonts/SourceHanSansCN-Regular.otf` 字体（8MB，OFL 开源）解决 pdfkit CJK 方块问题；(5) `cleanupRuntime` 扩展：`cleanupStuckScorings` 覆盖 initializing（不 refund，清 Storage + 标 failed）；新增 `cleanupExpiredScoringMaterials`（3 天过期材料清理）和 `cleanupExpiredScoringReports`（过期 PDF 报告清理），补此前 `cleanupExpiredMaterials` 只扫 `task_files` 不扫 `scoring_files` 的漏洞；(6) 前端 `api.ts createScoring` 加 60 秒 AbortController + 中文化"Failed to fetch"为"上传超时/网络不稳定/文件过大"；`Scoring.tsx` 类型 + 轮询 + UI 支持 initializing 状态，显示"正在验证材料（通常 30-90 秒）" |
 | 2026-04-16 | 主流程 4-Bug 修复：(1) Draft prompt "approximately ${words}" 改成 "MUST between ${min} and ${max}, do NOT exceed" 硬约束，解决 1000 字任务初稿出 1580 字（+58%）的问题；(2) Calibration prompt 加结构保留规则，接受 `draftHeadings` 参数作为 ground truth，每次重写都基于原始 draft 的 heading 列表恢复，避免多轮压字时 heading 累积丢失；(3) `runWordCalibrationAttempts` 5 次全失败时两段式挑最优候选（先过滤 heading 数达标，再按字数距离排序），不再返回最后一次；(4) `outlinePromptService` 删掉传给 GPT 的公式，改成"系统会算、你返回 null"；`deriveUnifiedTaskRequirements` 新增 `structureEvidence` 白名单 + `trustSectionCount` 显式旁路：只有 GPT 能从材料里 quote ≥25 字含 "section/chapter" 关键词的原文时才采纳 GPT 返回的 section count，否则强制回退公式；老的 DB 恢复和用户手动 override 路径显式 `trustSectionCount: true` 不受影响；(5) `documentFormattingService.isHeadingBlock` 扩展正则识别 "Section N: ..." / "Chapter N. ..." 格式，新增 `extractBodyHeadingLines` / `countBodyHeadingLines` 共享 util；(6) Chart enhancement 新增 heading 数量回退检查：返回的文本 heading 数掉到 `原始 - 1` 以下直接丢弃 chart 增强版本回退原文；`postChartCondense` prompt 加 heading 保留约束；(7) Draft prompt 新增 DOI/URL 完整性规则：web_search 没验证过的 URL/DOI 一律不写，优先 `https://doi.org/<DOI>` 规范形式，无法验证时整条 URL 字段直接省略，杜绝"GPT 幻觉 DOI + 系统从不验"导致的 404 reference。新增 5 条单元测试覆盖公式强制、evidence 白名单、trust 旁路、最优候选、heading 优先排序。全量测试 262/263 pass（1 个失败是之前就存在的 citation report test，跟本次无关） |
 | 2026-04-15 | 文章评审（Scoring）功能上线：新增 `/dashboard/scoring` 独立主路由，用户上传文章 + 可选 rubric/brief，GPT-5.4 按学术导师标准模拟评审并生成 PDF 报告；计费 0.1 积分/word（汉字按字、英文按词）；新增 `scorings` + `scoring_files` 表和 `scoring_price_per_word` 配置，部分唯一索引保证并发安全；SYSTEM prompt 明确 75-84 分锚点防止 AI 吹毛求疵；前置拒绝扫描件和纯图片上传；新增 `pdf-parse` 依赖；Tasks 页新增"评审记录" tab；所有文档里的 `agent.md` 引用清理为 `CLAUDE.md` |
 | 2026-04-13 | 降 AI 增加参考文献保护：在 Undetectable 处理前分离 References 部分，只发正文降 AI，处理完拼回原始参考文献，避免第三方服务破坏学术引用格式 |

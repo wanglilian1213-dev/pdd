@@ -56,7 +56,7 @@ interface ScoringFile {
 interface ScoringData {
   scoring: {
     id: string;
-    status: 'processing' | 'completed' | 'failed';
+    status: 'initializing' | 'processing' | 'completed' | 'failed';
     scenario: 'rubric' | 'brief_only' | 'article_only' | null;
     overall_score: number | null;
     scoring_word_count: number | null;
@@ -195,7 +195,7 @@ export default function Scoring() {
         if (cancelled) return;
         if (data) {
           setScoringData(data);
-          if (data.scoring.status === 'processing') {
+          if (data.scoring.status === 'initializing' || data.scoring.status === 'processing') {
             startPolling(data.scoring.id);
           }
         }
@@ -274,8 +274,29 @@ export default function Scoring() {
     setIsSubmitting(true);
 
     try {
-      const result = await api.createScoring(files) as any;
-      setScoringData({ scoring: result, files: [] });
+      // 后端返回的是完整 scoring row (initializing 状态)，但前端只需要知道 id + status 就能进轮询
+      const result = await api.createScoring(files) as {
+        id: string;
+        status: 'initializing' | 'processing';
+        [key: string]: unknown;
+      };
+      // 用返回值构造一个占位 ScoringData，轮询会很快用真实数据替换掉
+      setScoringData({
+        scoring: {
+          id: result.id,
+          status: result.status,
+          scenario: (result.scenario as any) ?? null,
+          overall_score: null,
+          scoring_word_count: null,
+          input_word_count: Number(result.input_word_count) || 0,
+          frozen_credits: Number(result.frozen_credits) || 0,
+          settled_credits: null,
+          result_json: null,
+          failure_reason: null,
+          created_at: typeof result.created_at === 'string' ? result.created_at : new Date().toISOString(),
+        },
+        files: [],
+      });
       setFiles([]);
       refreshBalance();
       startPolling(result.id);
@@ -328,7 +349,7 @@ export default function Scoring() {
   }
 
   const status = scoringData?.scoring?.status;
-  const isActive = status === 'processing';
+  const isActive = status === 'initializing' || status === 'processing';
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';
   const showInput = !scoringData || isFailed;
@@ -369,14 +390,18 @@ export default function Scoring() {
       )}
 
       {/* ================================================================= */}
-      {/* STATE: Processing */}
+      {/* STATE: Initializing / Processing */}
       {/* ================================================================= */}
       {isActive && (
         <div className="bg-white rounded-lg border border-gray-200 p-8 text-center space-y-4">
           <Loader2 className="h-12 w-12 animate-spin text-red-700 mx-auto" />
-          <h2 className="text-lg font-semibold text-gray-900">正在评审您的文章</h2>
+          <h2 className="text-lg font-semibold text-gray-900">
+            {status === 'initializing' ? '正在验证材料' : '正在评审您的文章'}
+          </h2>
           <p className="text-sm text-gray-500">
-            AI 正在模拟学术评审（通常 3-10 分钟），请耐心等待...
+            {status === 'initializing'
+              ? 'AI 正在提取文件内容并计算字数，通常 30-90 秒...'
+              : 'AI 正在模拟学术评审（通常 3-10 分钟），请耐心等待...'}
           </p>
           <p className="text-xs text-gray-400">
             页面会自动刷新状态，请勿关闭此页面

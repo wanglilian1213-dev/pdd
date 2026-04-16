@@ -162,7 +162,12 @@ npx -y @aisuite/chub annotate --list
 - 文章评审结算顺序规则：`settleCredits` 必须在所有副作用（PDF 生成、storage 上传、`scoring_files` 写入、`scorings` 状态更新）都稳定落库之后才能调用；任何结算之前抛出的异常必须先 `refundCredits` 再标 `failed`
 - 文章评审分数锚点规则：百分制 0-100，75-84 区间代表"良好（符合要求即应落此区间）"；任何达到作业基本要求的文章不允许给出 <75 的分数；prompt 里必须明确写死五段式分数锚点（95-100/85-94/75-84/60-74/<60）和容忍度清单（少于 3 个拼写错误、语法正确的长句等不扣分）
 - 文章评审 JSON 校验规则：GPT 返回的 JSON 必须通过 `parseScoringJson + validateScoringJson` 双层校验；维度权重和落在 [95, 105] 容差区间；格式错一次最多重试 1 次，两次都错则全额退款 + 标 `failed`
-- 文章评审卡死回收规则：`scorings` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckScorings` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标 failed
+- 文章评审卡死回收规则：`scorings` 表的 `initializing` / `processing` 记录由 `cleanupRuntime.cleanupStuckScorings` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动处理。`initializing` 阶段卡死不需要 refund（未冻结），只清 Storage + 标 failed；`processing` 阶段卡死 refund + 标 failed
+- 文章评审异步化规则（2026-04-16）：`POST /api/scoring/create` 只做 multer 收文件 + 快速上传 raw buffer 到 Storage + INSERT `status='initializing'` 并立即返回，**不跑 pdf-parse、不冻结积分**；后台 `prepareScoring` 做字数提取 + `freezeCredits` + UPDATE `status='processing'` + 启动 `executeScoring`；前端轮询看到 `initializing` 显示"正在验证材料"，看到 `processing` 显示"AI 评审中"。这个拆分是为了避免 HTTP 同步响应里 pdf-parse 卡死导致浏览器 "Failed to fetch"。并发锁（唯一部分索引）现在覆盖 `initializing + processing` 两个状态
+- 文章评审 PDF 解析超时规则：`scoringMaterialService.extractFileText` 对 PDF 分支硬性 30 秒 timeout（pdf-parse 超时按扫描件处理，前置拒绝该文件）；pdf-parse 自己抛错（PDF 头损坏等）也按扫描件兜底处理
+- 文章评审反馈语言规则（2026-04-16）：SYSTEM prompt 强制 GPT 用简体中文写 overall_comment / strengths / weaknesses / suggestions / top_suggestions，无论文章原文是什么语言；维度名字保留 rubric 原文（未上传 rubric 时用默认英文 "Content & argument" 等五维度名）；引用论文原文时放引号里保留原始语言
+- 文章评审 PDF 字体规则：`scoringPdfService` 必须用 `server/fonts/SourceHanSansCN-Regular.otf`（Source Han Sans CN Regular，OFL 开源许可）渲染所有中文内容，pdfkit 内置 Times-Roman / Helvetica 不含 CJK 字形会渲染成方块；字体文件 git 追踪必须随代码一起部署
+- 文章评审材料清理规则（2026-04-16 补漏）：`cleanupRuntime` 新增 `cleanupExpiredScoringMaterials`（3 天后删终态 scoring 的材料）和 `cleanupExpiredScoringReports`（按 `expires_at` 删过期 PDF 报告）；此前 `cleanupExpiredMaterials` 只扫 `task_files` 不扫 `scoring_files` 是个漏洞
 - 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败
 - 安全规则：前端 Supabase 地址和公开 key 只能从环境变量读取，不能再在源码里写真实兜底值
 - 安全规则：后端跨域白名单必须走 `ALLOWED_ORIGINS`，不能再全开放

@@ -102,6 +102,10 @@ export const api = {
     request<any>(`/api/revision/${revisionId}/file/${fileId}/download`),
 
   // Scoring (文章评审)
+  // 注意：2026-04-16 后端改成了异步化
+  //   - 本接口只做 multer 收文件 + 上传 Storage + INSERT initializing 记录 + 返回，秒级响应
+  //   - pdf-parse 解析 + 冻结积分由后端 prepareScoring 在后台跑
+  //   - 前端拿到 { id, status: 'initializing' } 后立即进轮询
   createScoring: async (files: File[]) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) throw new Error('未登录');
@@ -109,12 +113,32 @@ export const api = {
     const formData = new FormData();
     files.forEach(f => formData.append('files', f));
 
-    const res = await fetch(`${API_BASE}/api/scoring/create`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${session.access_token}` },
-      body: formData,
-    });
-    return parseApiResponse<any>(res, '创建评审请求失败');
+    // 60 秒硬超时。超了主动 abort，给用户明确中文错误，不让浏览器透传 "Failed to fetch"。
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/scoring/create`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${session.access_token}` },
+        body: formData,
+        signal: controller.signal,
+      });
+      return await parseApiResponse<{ id: string; status: string } & Record<string, unknown>>(
+        res,
+        '创建评审请求失败',
+      );
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error('上传超时（60 秒），请检查网络或文件大小后重试。');
+      }
+      if (err instanceof TypeError && /fetch/i.test(err.message)) {
+        throw new Error('上传失败：网络不稳定或文件过大，请重试。');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   },
   getScoringCurrent: () => request<any>('/api/scoring/current'),
   getScoring: (id: string) => request<any>(`/api/scoring/${id}`),

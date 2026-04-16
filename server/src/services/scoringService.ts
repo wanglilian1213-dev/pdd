@@ -11,6 +11,7 @@ import {
   normalizeFilename,
   defaultScoringMaterialDeps,
   getFileExtension,
+  hintFileRole,
   type ExtractedFileInfo,
   type ScoringMaterialDeps,
   type HintedRole,
@@ -183,22 +184,19 @@ export function computeSettledWords(
 }
 
 // ---------------------------------------------------------------------------
-// 上传原始材料到 Storage（和 revisionService 的 uploadRevisionFiles 结构一致）
+// 上传原始材料到 Storage（不解析字数，只把 raw buffer 写到 Storage + 插 scoring_files 记录）
+// 字数提取移到后台 prepareScoring 阶段，避免 HTTP 同步响应里跑 pdf-parse 卡死。
 // ---------------------------------------------------------------------------
 
-async function uploadScoringMaterials(
+async function uploadScoringMaterialsRaw(
   scoringId: string,
   files: Express.Multer.File[],
-  extracted: ExtractedFileInfo[],
   now: () => number,
-): Promise<void> {
-  if (files.length !== extracted.length) {
-    throw new AppError(500, '文件数量不匹配，请稍后重试。');
-  }
+): Promise<string[]> {
+  const uploadedPaths: string[] = [];
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    const info = extracted[i];
 
     const ext = (file.originalname.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '');
     const safeExt = ext.length > 0 && ext.length <= 8 ? ext : 'bin';
@@ -212,6 +210,10 @@ async function uploadScoringMaterials(
       throw new AppError(500, `文件 ${file.originalname} 上传失败，请稍后重试。`);
     }
 
+    uploadedPaths.push(storagePath);
+
+    // 预判角色（hintFileRole 是同步的、按文件名关键词判断，零延迟）
+    // extracted_word_count 暂留 NULL，后台 prepareScoring 阶段再回填。
     const { error: dbError } = await supabaseAdmin.from('scoring_files').insert({
       scoring_id: scoringId,
       category: 'material',
@@ -219,8 +221,8 @@ async function uploadScoringMaterials(
       storage_path: storagePath,
       file_size: file.size,
       mime_type: file.mimetype,
-      hinted_role: info.hintedRole,
-      extracted_word_count: info.wordCount,
+      hinted_role: hintFileRole(file.originalname),
+      extracted_word_count: null,
     });
 
     if (dbError) {
@@ -228,10 +230,54 @@ async function uploadScoringMaterials(
       throw new AppError(500, '文件记录保存失败。');
     }
   }
+
+  return uploadedPaths;
+}
+
+// 把已经上传的 Storage 文件 + DB 记录全删掉。用于 initializing 阶段失败的清理。
+async function cleanupScoringMaterials(scoringId: string): Promise<void> {
+  const { data: files } = await supabaseAdmin
+    .from('scoring_files')
+    .select('id, storage_path')
+    .eq('scoring_id', scoringId)
+    .eq('category', 'material');
+
+  if (!files || files.length === 0) return;
+
+  const paths = files.map((f) => f.storage_path).filter(Boolean) as string[];
+  if (paths.length > 0) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove(paths);
+    } catch (err) {
+      captureError(err, 'scoring.cleanup_storage_failed', { scoringId });
+    }
+  }
+
+  try {
+    await supabaseAdmin.from('scoring_files').delete().eq('scoring_id', scoringId).eq('category', 'material');
+  } catch (err) {
+    captureError(err, 'scoring.cleanup_db_failed', { scoringId });
+  }
+}
+
+// initializing 阶段失败：清理 Storage + DB 记录，标记 failed。不退款（initializing 期间从未冻结过）。
+async function markInitializingFailed(
+  scoringId: string,
+  reason: string,
+): Promise<void> {
+  await cleanupScoringMaterials(scoringId);
+  await supabaseAdmin
+    .from('scorings')
+    .update({
+      status: 'failed',
+      failure_reason: reason,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', scoringId);
 }
 
 // ---------------------------------------------------------------------------
-// Core: createScoring
+// Core: createScoring（快速创建，不做 extract / freeze）
 // ---------------------------------------------------------------------------
 
 export async function createScoring(
@@ -239,15 +285,12 @@ export async function createScoring(
   files: Express.Multer.File[],
   deps: ScoringServiceDeps = defaultScoringServiceDeps,
 ) {
-  // 1. 精确提取所有文件的字数 + 预判角色。扫描件 / 纯图片在这里前置拒绝，没冻结没建单。
-  const extracted = await validateAndExtractScoringInputs(files, deps.material);
-
-  // 2. 主动检查是否有进行中的评审（唯一部分索引兜底）
+  // 1. 检查活跃记录（initializing + processing 都算占位）
   const { data: active } = await supabaseAdmin
     .from('scorings')
-    .select('id')
+    .select('id, status')
     .eq('user_id', userId)
-    .eq('status', 'processing')
+    .in('status', ['initializing', 'processing'])
     .maybeSingle();
 
   if (active) {
@@ -257,19 +300,14 @@ export async function createScoring(
     );
   }
 
-  // 3. 计算冻结金额
-  const pricePerWord = await readPricePerWord();
-  const totalWords = extracted.reduce((acc, info) => acc + info.wordCount, 0);
-  const frozenAmount = computeFrozenAmount(totalWords, pricePerWord);
-
-  // 4. 插入 scoring 记录
+  // 2. 插入 initializing 记录（不冻结积分；字数和金额都还不知道）
   const { data: scoring, error: insertError } = await supabaseAdmin
     .from('scorings')
     .insert({
       user_id: userId,
-      status: 'processing',
-      frozen_credits: frozenAmount,
-      input_word_count: totalWords,
+      status: 'initializing',
+      frozen_credits: 0,
+      input_word_count: 0,
     })
     .select('*')
     .single();
@@ -284,50 +322,152 @@ export async function createScoring(
     throw new AppError(500, '创建评审请求失败。');
   }
 
-  // 5. 冻结积分（独立 try：冻结失败还没动过资金，直接删记录即可）
+  // 3. 上传 raw 文件到 Storage（不解析）
   try {
-    await freezeCredits(userId, frozenAmount, 'scoring', scoring.id, '文章评审冻结积分');
-  } catch (freezeError) {
-    await supabaseAdmin.from('scorings').delete().eq('id', scoring.id);
-    throw freezeError;
+    await uploadScoringMaterialsRaw(scoring.id, files, deps.now);
+  } catch (uploadError) {
+    // 上传中途失败：清理已上传的文件 + 标记 failed（无 refund，没冻结过）
+    await markInitializingFailed(
+      scoring.id,
+      '材料上传失败，请稍后重试。',
+    );
+    throw uploadError;
   }
 
-  // 6. 上传材料 + 启动异步执行（失败时必须先 refund 再标记 failed）
+  // 4. 异步触发后台 prepareScoring（pdf-parse + freeze + UPDATE → executeScoring）
+  prepareScoring(scoring.id, userId, deps).catch((err) => {
+    captureError(err, 'scoring.prepare', { scoringId: scoring.id });
+  });
+
+  return scoring;
+}
+
+// ---------------------------------------------------------------------------
+// Core: prepareScoring（后台阶段：extract → freeze → 状态变 processing → 启动 executeScoring）
+// ---------------------------------------------------------------------------
+
+export async function prepareScoring(
+  scoringId: string,
+  userId: string,
+  deps: ScoringServiceDeps = defaultScoringServiceDeps,
+): Promise<void> {
+  // 1. 加载已上传的 scoring_files 记录
+  const { data: storedFiles, error: loadError } = await supabaseAdmin
+    .from('scoring_files')
+    .select('id, original_name, storage_path, file_size, mime_type')
+    .eq('scoring_id', scoringId)
+    .eq('category', 'material')
+    .order('created_at', { ascending: true });
+
+  if (loadError || !storedFiles || storedFiles.length === 0) {
+    await markInitializingFailed(scoringId, '加载评审材料失败，请稍后重试。');
+    return;
+  }
+
+  // 2. 从 Storage 下载每个文件 → 转成 Multer.File-like 结构传给 extractFileText
+  let extracted: ExtractedFileInfo[];
   try {
-    await uploadScoringMaterials(scoring.id, files, extracted, deps.now);
+    const fileLikes = await Promise.all(
+      storedFiles.map(async (sf) => {
+        const blob = await deps.material.downloadFile(sf.storage_path);
+        const buffer = Buffer.from(await blob.arrayBuffer());
+        return {
+          originalname: sf.original_name,
+          buffer,
+          mimetype: sf.mime_type || '',
+          size: sf.file_size || buffer.length,
+        };
+      }),
+    );
 
-    executeScoring(scoring.id, userId, deps).catch((err) => {
-      captureError(err, 'scoring.execute', { scoringId: scoring.id });
-    });
+    // 3. 跑 extract（pdf-parse 在 scoringMaterialService 里有 30 秒 timeout 保护）
+    //    扫描件 / 纯图片 / 不支持类型在这里抛 AppError(400)
+    extracted = await validateAndExtractScoringInputs(fileLikes, deps.material);
+  } catch (extractError) {
+    const reason =
+      extractError instanceof AppError && extractError.statusCode < 500
+        ? extractError.userMessage || '材料解析失败。'
+        : '材料解析失败，请检查文件内容。';
+    await markInitializingFailed(scoringId, reason);
+    return;
+  }
 
-    return scoring;
-  } catch (uploadError) {
+  // 4. 计算冻结金额
+  const pricePerWord = await readPricePerWord();
+  const totalWords = extracted.reduce((acc, info) => acc + info.wordCount, 0);
+  const frozenAmount = computeFrozenAmount(totalWords, pricePerWord);
+
+  // 5. 冻结积分
+  try {
+    await freezeCredits(userId, frozenAmount, 'scoring', scoringId, '文章评审冻结积分');
+  } catch (freezeError) {
+    const reason =
+      freezeError instanceof AppError && freezeError.statusCode < 500
+        ? freezeError.userMessage || '积分不足。'
+        : '冻结积分失败，请稍后重试。';
+    await markInitializingFailed(scoringId, reason);
+    return;
+  }
+
+  // 6. 原子更新 scorings + scoring_files（如果失败，已冻结的积分必须 refund）
+  try {
+    const { error: updateScoringError } = await supabaseAdmin
+      .from('scorings')
+      .update({
+        status: 'processing',
+        frozen_credits: frozenAmount,
+        input_word_count: totalWords,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', scoringId);
+
+    if (updateScoringError) {
+      throw new Error('update scorings failed: ' + updateScoringError.message);
+    }
+
+    // 回填每条 scoring_files 的字数（按 storage_path 一一对应）
+    for (let i = 0; i < storedFiles.length; i++) {
+      const sf = storedFiles[i];
+      const info = extracted[i];
+      if (!info) continue;
+      await supabaseAdmin
+        .from('scoring_files')
+        .update({
+          extracted_word_count: info.wordCount,
+          hinted_role: info.hintedRole,
+        })
+        .eq('id', sf.id);
+    }
+  } catch (postFreezeError) {
+    // freeze 已经成功了但 UPDATE 失败 → 必须 refund
     try {
       await refundCredits(
         userId,
         frozenAmount,
         'scoring',
-        scoring.id,
-        '评审材料上传失败自动退款',
+        scoringId,
+        '评审准备阶段更新失败自动退款',
       );
     } catch (refundError) {
-      captureError(refundError, 'scoring.create_refund_failed', {
-        scoringId: scoring.id,
-      });
+      captureError(refundError, 'scoring.prepare_refund_failed', { scoringId });
     }
-
     await supabaseAdmin
       .from('scorings')
       .update({
         status: 'failed',
-        failure_reason: '材料上传失败，积分已自动退回。',
+        failure_reason: '评审准备失败，积分已自动退回。',
         refunded: true,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', scoring.id);
-
-    throw uploadError;
+      .eq('id', scoringId);
+    captureError(postFreezeError, 'scoring.prepare_post_freeze', { scoringId });
+    return;
   }
+
+  // 7. 启动 GPT 评审主流程
+  executeScoring(scoringId, userId, deps).catch((err) => {
+    captureError(err, 'scoring.execute', { scoringId });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -621,7 +761,7 @@ export async function getScoringCurrent(userId: string) {
     .from('scorings')
     .select('*')
     .eq('user_id', userId)
-    .eq('status', 'processing')
+    .in('status', ['initializing', 'processing'])
     .maybeSingle();
 
   if (!data) return null;

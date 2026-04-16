@@ -28,6 +28,12 @@ test('runInitialCleanup catches startup failures so cleanup service does not cra
         cleanupExpiredMaterials: async () => {
           throw new Error('should not run after first failure');
         },
+        cleanupExpiredScoringMaterials: async () => {
+          throw new Error('should not run after first failure');
+        },
+        cleanupExpiredScoringReports: async () => {
+          throw new Error('should not run after first failure');
+        },
       },
       {
         log: (message: string) => {
