@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { AuthRequest } from '../middleware/auth';
 import { statusGuard } from '../middleware/statusGuard';
-import { createTask, getTask, getCurrentTask, getTaskList, deleteTask, discardPendingTask } from '../services/taskService';
+import { createTask, getTask, getCurrentTask, getTaskList, deleteTask, discardPendingTask, acknowledgeHumanize } from '../services/taskService';
 import { validateFiles, uploadFiles, getDownloadUrl } from '../services/fileService';
 import { generateOutline, regenerateOutline, confirmOutline } from '../services/outlineService';
 import { startHumanize } from '../services/humanizeService';
@@ -142,6 +142,20 @@ router.post('/:id/humanize', async (req: AuthRequest, res: Response) => {
     const appErr = err as { statusCode?: number; userMessage?: string };
     const status = appErr.statusCode || 500;
     res.status(status).json({ success: false, error: appErr.userMessage || '降 AI 启动失败。' });
+  }
+});
+
+// POST /api/task/:id/acknowledge-humanize
+// 用户主动 dismiss 一个降 AI 任务（点"完成并创建新任务"），把所有 humanize_jobs 标记为已确认
+// 之后切回工作台不再恢复这个 humanize 任务的 step 7 UI
+router.post('/:id/acknowledge-humanize', async (req: AuthRequest, res: Response) => {
+  try {
+    await acknowledgeHumanize(req.params.id as string, req.userId!);
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const appErr = err as { statusCode?: number; userMessage?: string };
+    const status = appErr.statusCode || 500;
+    res.status(status).json({ success: false, error: appErr.userMessage || '确认失败。' });
   }
 });
 

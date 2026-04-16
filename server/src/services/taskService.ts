@@ -82,18 +82,100 @@ export async function getTask(taskId: string, userId: string) {
 }
 
 export async function getCurrentTask(userId: string) {
-  const { data: task } = await supabaseAdmin
+  // 查询 1：写作链路中的任务（status='processing'，唯一索引保证最多一个）
+  const { data: activeTask } = await supabaseAdmin
     .from('tasks')
     .select('id')
     .eq('user_id', userId)
     .eq('status', 'processing')
-    .single();
+    .maybeSingle();
 
-  if (!task) {
+  if (activeTask) {
+    return getTask(activeTask.id, userId);
+  }
+
+  // 查询 2：降 AI 进行中（stage='humanizing' + 双重校验 humanize_jobs.status='processing'）
+  // 双重校验防陈年残留：万一 stage 因异常没改回，避免把死任务当当前任务
+  const { data: humanizingTask } = await supabaseAdmin
+    .from('tasks')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'completed')
+    .eq('stage', 'humanizing')
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (humanizingTask) {
+    const { data: activeJob } = await supabaseAdmin
+      .from('humanize_jobs')
+      .select('id')
+      .eq('task_id', humanizingTask.id)
+      .eq('status', 'processing')
+      .maybeSingle();
+
+    if (activeJob) {
+      return getTask(humanizingTask.id, userId);
+    }
+    // stage='humanizing' 但 job 已死（陈年残留）→ fallthrough 到查询 3
+  }
+
+  // 查询 3：用户最近未确认的已结束 humanize（completed/failed + acknowledged=false）
+  // 2 步查询保持项目惯例：先拿用户的 task_ids，再在 humanize_jobs 中找最新未确认的
+  const { data: userTasks } = await supabaseAdmin
+    .from('tasks')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('status', 'completed');
+
+  if (!userTasks || userTasks.length === 0) {
     return null;
   }
 
-  return getTask(task.id, userId);
+  const userTaskIds = userTasks.map((t) => t.id);
+
+  const { data: pendingAck } = await supabaseAdmin
+    .from('humanize_jobs')
+    .select('task_id')
+    .in('task_id', userTaskIds)
+    .in('status', ['completed', 'failed'])
+    .eq('acknowledged', false)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (pendingAck) {
+    return getTask(pendingAck.task_id, userId);
+  }
+
+  return null;
+}
+
+/**
+ * 用户主动 dismiss 一个降 AI 任务（点"完成并创建新任务"）
+ * 把该 task 下所有 humanize_jobs 的 acknowledged 置为 true
+ * 用户多次重试时会留多条记录，一次性 ack 所有避免漏掉旧的
+ */
+export async function acknowledgeHumanize(taskId: string, userId: string) {
+  const { data: task } = await supabaseAdmin
+    .from('tasks')
+    .select('id')
+    .eq('id', taskId)
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (!task) {
+    throw new AppError(404, '任务不存在。');
+  }
+
+  const { error } = await supabaseAdmin
+    .from('humanize_jobs')
+    .update({ acknowledged: true })
+    .eq('task_id', taskId);
+
+  if (error) {
+    throw new AppError(500, '确认失败，请稍后重试。');
+  }
 }
 
 export async function discardPendingTaskWithDeps(

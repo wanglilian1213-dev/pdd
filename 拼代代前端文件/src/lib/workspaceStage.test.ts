@@ -20,6 +20,11 @@ test('getWorkspaceStep keeps step 7 after humanize has started or completed', ()
   assert.equal(getWorkspaceStep('completed', 'completed'), 6);
 });
 
+test('getWorkspaceStep keeps step 7 when humanize has failed', () => {
+  // 失败的 humanize 也属于 step 7：让用户看到失败提示，而不是退回到 step 6（交付完成）
+  assert.equal(getWorkspaceStep('completed', 'completed', 'failed'), 7);
+});
+
 test('delivery state helpers separate in-progress delivery from true completion', () => {
   assert.equal(isDeliveryInProgressState('delivering', 'processing'), true);
   assert.equal(isDeliveryInProgressState('completed', 'completed'), false);

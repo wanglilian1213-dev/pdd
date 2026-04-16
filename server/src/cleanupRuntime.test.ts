@@ -22,6 +22,9 @@ test('runInitialCleanup catches startup failures so cleanup service does not cra
         cleanupStuckScorings: async () => {
           throw new Error('should not run after first failure');
         },
+        cleanupStuckHumanizeJobs: async () => {
+          throw new Error('should not run after first failure');
+        },
         cleanupExpiredFiles: async () => {
           throw new Error('should not run after first failure');
         },

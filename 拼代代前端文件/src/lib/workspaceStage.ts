@@ -54,7 +54,13 @@ export function getWorkspaceStep(
   status: string,
   humanizeJobStatus?: string,
 ): number {
-  if (humanizeJobStatus === 'processing' || humanizeJobStatus === 'completed') {
+  // 'failed' 也属于 step 7：失败时也要让用户在 step 7 看到失败提示和退款说明
+  // 否则用户会被退回到 step 6（看到绿色的"交付完成"），跟事实矛盾
+  if (
+    humanizeJobStatus === 'processing' ||
+    humanizeJobStatus === 'completed' ||
+    humanizeJobStatus === 'failed'
+  ) {
     return 7;
   }
 

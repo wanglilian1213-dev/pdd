@@ -75,6 +75,12 @@ export const api = {
     request<any>(`/api/task/${taskId}/discard`, { method: 'POST' }),
   startHumanize: (taskId: string) =>
     request<any>(`/api/task/${taskId}/humanize`, { method: 'POST' }),
+  // 用户主动 dismiss 一个降 AI 任务（点"完成并创建新任务"）
+  // 把所有 humanize_jobs 标记为 acknowledged=true，下次切回工作台不再恢复 step 7
+  acknowledgeHumanize: (taskId: string) =>
+    request<{ success: boolean }>(`/api/task/${taskId}/acknowledge-humanize`, {
+      method: 'POST',
+    }),
   getDownloadUrl: (taskId: string, fileId: string) =>
     request<any>(`/api/task/${taskId}/file/${fileId}/download`),
 

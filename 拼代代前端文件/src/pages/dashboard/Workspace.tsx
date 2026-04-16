@@ -33,6 +33,7 @@ interface Outline {
 interface HumanizeJob {
   id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
+  failure_reason?: string | null;
 }
 
 interface Task {
@@ -85,8 +86,14 @@ function reshapeTaskResponse(raw: Record<string, unknown>): TaskData {
       ? (latestDocument as unknown as { id: string; word_count?: number })
       : undefined,
     files: normalizeTaskFiles(files),
+    // 后端 humanize_jobs 按 created_at DESC 排序，[0] 就是最新一条
+    // 必须显式提取 failure_reason，否则 reshape 会丢字段，导致失败 UI 永远显示默认 fallback 文案
     humanizeJob: humanizeJobs && humanizeJobs.length > 0
-      ? (humanizeJobs[0] as unknown as HumanizeJob)
+      ? {
+          id: humanizeJobs[0].id as string,
+          status: humanizeJobs[0].status as HumanizeJob['status'],
+          failure_reason: (humanizeJobs[0].failure_reason as string | null | undefined) ?? null,
+        }
       : undefined,
   };
 }
@@ -307,10 +314,22 @@ export default function Workspace() {
         const data: TaskData = reshapeTaskResponse(raw);
         setTaskData(data);
 
+        // task.status='failed' 是写作链路失败的兜底分支（理论上 humanize 阶段不会触发）
+        // 必须 setIsStartingHumanize(false)，否则 spinner 永远转
         if (data.task.status === 'failed') {
           clearHumanizePoll();
           await refreshBalance();
+          setIsStartingHumanize(false);
           setError(data.task.failure_reason || '降AI处理失败');
+          return;
+        }
+
+        // humanize 真实失败：humanize_jobs.status='failed'，task.status 仍是 'completed'
+        // 不 setError —— 失败信息由 step 7 的 FailedUI 通过 taskData.humanizeJob.failure_reason 展示
+        if (data.humanizeJob?.status === 'failed') {
+          clearHumanizePoll();
+          await refreshBalance();
+          setIsStartingHumanize(false);
           return;
         }
 
@@ -560,7 +579,17 @@ export default function Workspace() {
     }
   }, [taskData]);
 
-  const handleNewTask = useCallback(() => {
+  const handleNewTask = useCallback(async () => {
+    // 用户主动开新任务时，把当前任务的 humanize_jobs 标记为已确认
+    // 只在确实有 humanize 状态需要 dismiss 的情况下调，避免无谓的 API 请求
+    // 失败也不阻塞新任务创建（next time 切回还会再显示，用户可再次 dismiss）
+    if (taskData?.humanizeJob && taskData?.task?.id) {
+      try {
+        await api.acknowledgeHumanize(taskData.task.id);
+      } catch {
+        // 静默失败，不影响重置流程
+      }
+    }
     clearAllPolls();
     setStep(1);
     setFiles([]);
@@ -575,7 +604,7 @@ export default function Workspace() {
     setIsConfirmingOutline(false);
     setIsStartingHumanize(false);
     refreshBalance();
-  }, [clearAllPolls, refreshBalance]);
+  }, [clearAllPolls, refreshBalance, taskData]);
 
   const handleDiscardPendingTask = useCallback(async () => {
     if (!taskData) return;
@@ -597,7 +626,8 @@ export default function Workspace() {
   // Derived state
   // ---------------------
   const isHumanizeComplete = taskData?.humanizeJob?.status === 'completed';
-  const isHumanizeProcessing = step === 7 && isStartingHumanize && !isHumanizeComplete;
+  const isHumanizeFailed = taskData?.humanizeJob?.status === 'failed';
+  const isHumanizeProcessing = step === 7 && isStartingHumanize && !isHumanizeComplete && !isHumanizeFailed;
   const isDeliveryInProgress = taskData ? isDeliveryInProgressState(taskData.task.stage, taskData.task.status) : false;
   const isDeliveryComplete = taskData ? isDeliveryCompletedState(taskData.task.stage, taskData.task.status) : false;
   const deliveryDownloadCards = buildDownloadCards(taskData?.files ?? [], {
@@ -1006,7 +1036,59 @@ export default function Workspace() {
               <CardDescription>系统正在使用对抗网络降低文本的 AI 生成特征。</CardDescription>
             </CardHeader>
             <CardContent>
-              {isHumanizeProcessing ? (
+              {isHumanizeFailed ? (
+                <div className="space-y-6 animate-in fade-in zoom-in duration-500">
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-6 flex flex-col items-center text-center gap-3">
+                    <AlertCircle className="w-12 h-12 text-red-500" />
+                    <h3 className="text-xl font-bold text-red-900">降 AI 处理失败</h3>
+                    <p className="text-sm text-red-800">
+                      {taskData?.humanizeJob?.failure_reason || '降 AI 处理失败，积分已自动退回。'}
+                    </p>
+                    <p className="text-xs text-red-600">如需协助，请联系客服。</p>
+                  </div>
+
+                  {/* 失败时仍显示原始正文和引用核验下载（humanized_doc 不存在，自动不显示） */}
+                  {humanizeDownloadCards.length > 0 && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      {humanizeDownloadCards.map((card) => {
+                        const meta = getDownloadCardMeta(card.category);
+                        const Icon = meta.icon;
+
+                        return (
+                          <div key={card.file.id} className={`border border-gray-200 rounded-xl p-6 flex flex-col items-center text-center transition-colors bg-white shadow-sm ${meta.borderClass}`}>
+                            <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${meta.iconWrapClass}`}>
+                              <Icon className="w-8 h-8" />
+                            </div>
+                            <h3 className="font-semibold text-gray-900 mb-1">{meta.title}</h3>
+                            <p className="text-xs text-gray-500 mb-6">
+                              {card.file.filename || meta.emptyLabel}
+                            </p>
+                            <Button
+                              className={`w-full gap-2 ${meta.buttonClass}`.trim()}
+                              variant={meta.buttonVariant}
+                              disabled={downloadingFileId === card.file.id}
+                              onClick={() => handleDownload(card.file.id)}
+                            >
+                              {downloadingFileId === card.file.id ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Download className="w-4 h-4" />
+                              )}
+                              {meta.buttonLabel}
+                            </Button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="flex justify-center pt-4 border-t border-gray-100">
+                    <Button variant="link" onClick={handleNewTask} className="text-gray-500 hover:text-gray-900">
+                      完成并创建新任务
+                    </Button>
+                  </div>
+                </div>
+              ) : isHumanizeProcessing ? (
                 <div className="p-12 flex flex-col items-center justify-center space-y-6">
                   <Loader2 className="w-16 h-16 text-blue-600 animate-spin" />
                   <div className="text-center space-y-2">

@@ -10,6 +10,7 @@ export interface CleanupDeps {
   cleanupStuckTasks: () => Promise<void>;
   cleanupStuckRevisions: () => Promise<void>;
   cleanupStuckScorings: () => Promise<void>;
+  cleanupStuckHumanizeJobs: () => Promise<void>;
   cleanupExpiredFiles: () => Promise<void>;
   cleanupExpiredMaterials: () => Promise<void>;
   cleanupExpiredScoringMaterials: () => Promise<void>;
@@ -277,6 +278,92 @@ async function cleanupStuckScorings() {
 }
 
 /**
+ * 卡死的 humanize_jobs 兜底清理（2026-04-17 新增）。
+ *
+ * 背景：
+ *   - cleanupStuckTasks 第 107-130 行的 humanizing 分支是死代码，
+ *     因为外层只查 status='processing'，但降 AI 启动时 task.status 始终保持 'completed'，
+ *     所以那条分支永远不会被触发；卡死的 humanize_jobs 会永久冻结积分。
+ *   - 本函数走独立扫描：直接查 humanize_jobs.status='processing' AND created_at < cutoff。
+ *
+ * 数据细节：
+ *   - humanize_jobs 表没有 updated_at / user_id 字段，所以用 created_at 算超时，user_id 必须 JOIN tasks 拿。
+ *   - 退款必须先校验 refunded=false 且 frozen_credits>0，避免重复退款。
+ *   - acknowledged 默认 false → 用户切回工作台能在 step 7 看到失败提示和退款说明。
+ */
+async function cleanupStuckHumanizeJobs() {
+  const timeoutMinutes =
+    (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
+  // humanize_jobs 没有 updated_at，用 created_at 作为参考；降 AI 实际耗时约 10 分钟，45 分钟 cutoff 留足缓冲
+  const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
+
+  const { data: stuckJobs } = await supabaseAdmin
+    .from('humanize_jobs')
+    .select('id, task_id, frozen_credits, refunded')
+    .eq('status', 'processing')
+    .lt('created_at', cutoff);
+
+  if (!stuckJobs || stuckJobs.length === 0) {
+    console.log('[cleanup] No stuck humanize jobs found.');
+    return;
+  }
+
+  for (const job of stuckJobs) {
+    console.log(`[cleanup] Processing stuck humanize job ${job.id}`);
+
+    // humanize_jobs 没有 user_id 字段，必须 JOIN tasks 拿（保持项目 2 步查询惯例，不用 PostgREST !inner）
+    const { data: task } = await supabaseAdmin
+      .from('tasks')
+      .select('user_id, stage')
+      .eq('id', job.task_id)
+      .maybeSingle();
+
+    if (!task) {
+      console.warn(
+        `[cleanup] Stuck humanize job ${job.id} references missing task ${job.task_id}, skipping.`,
+      );
+      continue;
+    }
+
+    try {
+      // 只在没退过款且确实有冻结时退（避免重复退款）
+      if (!job.refunded && job.frozen_credits > 0) {
+        await refundCredits(
+          task.user_id,
+          job.frozen_credits,
+          'humanize_job',
+          job.id,
+          `卡死降 AI 自动退款：${job.frozen_credits} 积分`,
+        );
+      }
+
+      await supabaseAdmin
+        .from('humanize_jobs')
+        .update({
+          status: 'failed',
+          failure_reason: '降 AI 处理超时，积分已自动退回。',
+          refunded: true,
+          // acknowledged 默认 false → 用户下次切回工作台能看到这条失败 + 退款说明
+        })
+        .eq('id', job.id);
+
+      // 把 task.stage 改回 completed（如果还是 humanizing 残留）
+      if (task.stage === 'humanizing') {
+        await supabaseAdmin
+          .from('tasks')
+          .update({
+            stage: 'completed',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', job.task_id);
+      }
+    } catch (err) {
+      console.error(`[cleanup] Stuck humanize refund failed for job ${job.id}:`, err);
+    }
+  }
+}
+
+/**
  * 把某个 scoring 的所有 material 文件从 Storage + DB 清掉。
  * 用于 initializing 阶段卡死的清理，或者 2026-04-16 新增的过期 material 清理。
  */
@@ -500,6 +587,7 @@ export function createDefaultCleanupDeps(): CleanupDeps {
     cleanupStuckTasks,
     cleanupStuckRevisions,
     cleanupStuckScorings,
+    cleanupStuckHumanizeJobs,
     cleanupExpiredFiles,
     cleanupExpiredMaterials,
     cleanupExpiredScoringMaterials,
@@ -513,6 +601,7 @@ export async function runCleanupCycle(
   await deps.cleanupStuckTasks();
   await deps.cleanupStuckRevisions();
   await deps.cleanupStuckScorings();
+  await deps.cleanupStuckHumanizeJobs();
   await deps.cleanupExpiredFiles();
   await deps.cleanupExpiredMaterials();
   await deps.cleanupExpiredScoringMaterials();
