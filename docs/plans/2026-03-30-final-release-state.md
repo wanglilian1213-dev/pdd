@@ -353,6 +353,48 @@ create → initializing（秒回，不冻结）
 - push `main` 后等 GitHub Action 把 `app` + `拼代代前端` 都发完
 - 真实账号在 https://pindaidai.uk/dashboard/revision 复测：(1) 上传 6.5MB 真实 PDF，预估字数应在合理范围（< 5 万字）；(2) 余额不足场景验证带数字的友好提示；(3) 评审 `/dashboard/scoring` 回归验证字数计算和扫描件检测无回归
 
+## 2026-04-18 文章修改精准冻结（GPT-5.4 识别主文章 + 1.2x 缓冲 + 50 字/份参考）
+
+### 根因
+2026-04-17 commit 38ed69f 修了 PDF 真解析后，6 个文件还是冻 1,036 积分（旧 bug 时是 21 万）。还是太多。原因：当前算法把所有上传文件字数全加起来当冻结字数，但用户实际只改主文章那一篇（600 字 → 实扣 120 积分）。冻结的 88% 都是退回的，体验差。
+
+### 变更清单
+- 后端 `server/src/lib/openaiMainConfig.ts`：新增 `article_detection` stage（reasoning effort `medium`，无 web_search，纯本地分类）
+- 后端 `server/src/services/articleDetectionService.ts`（新建）：
+  - `detectMainArticle(input)` 调 GPT-5.4 识别主文章
+  - JSON 软解析 + 硬校验（filename 必须在输入列表里防 hallucination）
+  - 60s 超时 + 1 次重试（共 2 次）
+  - 失败 fallback 启发式：docx 字数最大 → 非图片字数最大；GPT 识别 0 份时取字数最大的非图片当主文章
+  - 边界优化：全是图片或只有一个非图片文件直接走启发式不调 GPT，省成本
+- 后端 `server/src/services/revisionService.ts`：
+  - `RevisionFileEstimate` 多了 `rawTextSample / ext / isImage` 字段
+  - `estimateRevisionForFile` 解析时同时返回前 1500 字 rawTextSample 给 GPT 识别用
+  - `estimateRevisionTotal(files, { detectMainArticle: true })` 调 GPT 算精准冻结字数
+  - `createRevision` 改用精准估算 + INSERT 时多写 `main_article_filenames` 字段
+  - `executeRevision` 读 `main_article_filenames`，非空时新增 `buildFileRoleSection` 写「主文章 / 参考材料」分组进 Claude prompt；空数组（旧任务）走旧 prompt 不变
+- 后端 `server/src/routes/revision.ts`：新增 `POST /api/revision/estimate-precise`（多文件，调 GPT 精准预估）
+- 数据库 `server/supabase/migrations/20260418000000_revision_main_article.sql`：`revisions.main_article_filenames TEXT[] NOT NULL DEFAULT '{}'`，已用 supabase Management API 跑完，验证通过
+- 前端 `拼代代前端文件/src/lib/api.ts`：新增 `estimateRevisionPrecise(files)`
+- 前端 `拼代代前端文件/src/pages/dashboard/Revision.tsx`：新增 `precise` state + 1.5s 防抖 useEffect 触发精准估算；UI 两阶段（粗估算 → 精准）；`isInsufficient` 优先 precise → 退回单文件累加
+- 单元测试：新增 14 条 `articleDetectionService.test.ts`（启发式 / JSON 解析 / hallucination 校验 / 超时重试 / 多份主文章 / 空 GPT 兜底等）；revisionService 现有 37 条测试无回归
+- CLAUDE.md：替换旧「文章修改字数估算规则（2026-04-17）」+ 新增「文章修改主文章识别规则」+ 修订「文章修改预估接口规则」+ 新增「Claude 行为规范 6: 临时文件不许放工作目录根下」
+
+### 验证
+- 后端 `npm run lint` + `npm run build` 通过
+- 后端 `npx tsx --test articleDetectionService.test.ts revisionService.test.ts openaiMainConfig.test.ts` 37/37 通过
+- 评审 `scoringMaterialService.test.ts` 33/33 回归通过
+- 前端 `npm run lint` + `npm run build` 通过
+- Supabase migration 已跑完，`revisions.main_article_filenames` 字段已存在（NOT NULL，DEFAULT '{}'::text[]）
+
+### 待用户手动操作
+- push `main` 后等 GitHub Action 把 `app` + `拼代代前端` 都发完
+- 真实账号在 https://pindaidai.uk/dashboard/revision 复测：(1) 桌面那 6 个文件冻结金额从 1,036 降到约 200~250；(2) UI 显示「主文章: final-paper.docx」；(3) 跑完整流程验证 Claude 真的只改主文章不改 rubric/参考论文；(4) 评审 /dashboard/scoring 回归无破坏
+
+### 附带做的清理
+- 删除 `docs/plans/AI客服.md`（2026-04-12 临时方案，客服已切到 GPT-5.4，文档过期且无引用）
+- 删除 `.claude/worktrees/` 整个目录（5 个孤立 worktree 历史遗留：crazy-lichterman / objective-dhawan / recursing-kirch / relaxed-khayyam / unruffled-fermat）
+- 新增 `server/README.md`（后端开发说明，包含本地命令 + 部署位置 + 环境变量清单）
+
 ## 当前已经锁死的交付规则
 
 - 正文交付为 `Word (.docx)`

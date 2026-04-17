@@ -10,6 +10,7 @@ import {
   getRevisionList,
   getRevisionDownloadUrl,
   estimateRevisionForFile,
+  estimateRevisionTotal,
   getRevisionPricePerWord,
   validateRevisionFileTypes,
 } from '../services/revisionService';
@@ -60,6 +61,57 @@ router.post('/estimate', upload.single('file'), async (req: AuthRequest, res: Re
     res.status(status).json({ success: false, error: appErr.userMessage || '预估失败。' });
   }
 });
+
+// POST /api/revision/estimate-precise
+//
+// 多文件精准预估：调 GPT-5.4 article_detection 识别主文章，按
+// ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100 公式算冻结字数。
+// - 不写库不冻结
+// - 前端在文件列表停止变化 1.5 秒后防抖调用，给用户展示「主文章: xxx · 实际冻结 X 积分」
+// - createRevision 内部独立再调一次（不依赖前端结果，避免文件改了 race）
+router.post(
+  '/estimate-precise',
+  upload.array('files', 10),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const files = req.files as Express.Multer.File[];
+      if (!files || files.length === 0) {
+        res.status(400).json({ success: false, error: '请上传至少一个文件。' });
+        return;
+      }
+
+      validateRevisionFileTypes(files);
+      const result = await estimateRevisionTotal(files, { detectMainArticle: true });
+
+      if (result.scannedFilenames.length > 0) {
+        res.status(400).json({
+          success: false,
+          error: `文件 ${result.scannedFilenames.join('、')} 看起来是扫描件 PDF，无法修改文字内容，请改上传 .docx 或文字版 PDF。`,
+        });
+        return;
+      }
+
+      const pricePerWord = await getRevisionPricePerWord();
+      res.json({
+        success: true,
+        data: {
+          mainArticleFilenames: result.mainArticleFilenames!,
+          rawTotalWords: result.totalWords,
+          preciseFrozenWords: result.preciseFrozenWords!,
+          preciseFrozenAmount: result.preciseFrozenAmount!,
+          pricePerWord,
+          breakdown: result.breakdown!,
+        },
+      });
+    } catch (err: unknown) {
+      const appErr = err as { statusCode?: number; userMessage?: string };
+      const status = appErr.statusCode || 500;
+      res
+        .status(status)
+        .json({ success: false, error: appErr.userMessage || '精准预估失败。' });
+    }
+  },
+);
 
 // POST /api/revision/create
 router.post('/create', upload.array('files', 10), async (req: AuthRequest, res: Response) => {

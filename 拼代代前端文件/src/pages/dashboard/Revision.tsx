@@ -74,11 +74,19 @@ export default function Revision() {
   const [isDownloading, setIsDownloading] = useState(false);
 
   // --- Estimate state (前端实时显示预估字数 + 余额校验) ---
-  // wordsByFile 用 File 对象做 key，文件列表变化时同步增减；
-  // pricePerWord 由 estimate 接口返回，本地默认 0.2 兜底（system_config 默认值）
+  // 第一阶段：每个文件添加时调单文件 estimate（粗估算），累加显示「上传材料 X 字（原始总字数）」
+  // 第二阶段：文件列表停止变化 1.5 秒后调多文件 estimate-precise（GPT-5.4 识别主文章 + 精准冻结）
+  //          展示「主文章: xxx · 实际冻结 X 积分」
   const [wordsByFile, setWordsByFile] = useState<Map<File, number>>(new Map());
   const [pricePerWord, setPricePerWord] = useState<number>(0.2);
   const [estimatingCount, setEstimatingCount] = useState<number>(0);
+  const [precise, setPrecise] = useState<{
+    mainArticleFilenames: string[];
+    preciseFrozenAmount: number;
+    breakdown: { mainArticleWords: number; referenceCount: number; imageCount: number };
+  } | null>(null);
+  const [precisingState, setPrecisingState] = useState<'idle' | 'loading' | 'error'>('idle');
+  const preciseDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pollRef = useRef<PollState>({ timeoutId: null, startedAt: 0, attempt: 0 });
   const { balance, refreshBalance } = useBalance();
@@ -236,6 +244,48 @@ export default function Revision() {
       });
   }, []);
 
+  // --- 多文件精准估算（GPT-5.4 识别主文章 + 1.2x 缓冲公式）---
+  // 文件列表停止变化 1.5 秒后触发；删文件不发请求（前端按 wordsByFile 自动重算）。
+  // 失败时不阻断提交，UI 显示「精准估算失败，提交时按主文章字数计费」。
+  // createRevision 内部独立再调一次 GPT-5.4，所以这里失败也不影响最终金额。
+  useEffect(() => {
+    if (preciseDebounceRef.current) clearTimeout(preciseDebounceRef.current);
+
+    if (files.length === 0 || estimatingCount > 0) {
+      // 文件清空或单文件 estimate 还在跑：清掉 precise（避免 stale 数据）
+      setPrecise(null);
+      setPrecisingState('idle');
+      return;
+    }
+
+    // 防抖 1.5s 触发精准估算
+    preciseDebounceRef.current = setTimeout(async () => {
+      setPrecisingState('loading');
+      try {
+        const r = await api.estimateRevisionPrecise(files);
+        setPrecise({
+          mainArticleFilenames: r.mainArticleFilenames,
+          preciseFrozenAmount: r.preciseFrozenAmount,
+          breakdown: r.breakdown,
+        });
+        setPricePerWord(r.pricePerWord);
+        setPrecisingState('idle');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : '精准估算失败';
+        // 扫描件 PDF：后端 400 + "看起来是扫描件 PDF"
+        if (/扫描件/.test(msg)) {
+          setError(msg);
+        }
+        setPrecise(null);
+        setPrecisingState('error');
+      }
+    }, 1500);
+
+    return () => {
+      if (preciseDebounceRef.current) clearTimeout(preciseDebounceRef.current);
+    };
+  }, [files, estimatingCount]);
+
   // --- File handlers ---
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -292,7 +342,10 @@ export default function Revision() {
   );
   const estimatedAmount = Math.ceil(estimatedWords * pricePerWord);
   const isEstimating = estimatingCount > 0;
-  const isInsufficient = balance != null && estimatedAmount > balance;
+  const isPrecising = precisingState === 'loading';
+  // 余额校验取数策略：优先 precise（GPT 识别后的精准金额），否则用单文件累加（粗保守上限）
+  const effectiveAmount = precise?.preciseFrozenAmount ?? estimatedAmount;
+  const isInsufficient = balance != null && effectiveAmount > balance;
 
   // --- Submit ---
   const handleSubmit = async () => {
@@ -306,8 +359,8 @@ export default function Revision() {
       try {
         const profile = await api.getProfile();
         const latestBalance = profile?.balance ?? 0;
-        if (estimatedAmount > latestBalance) {
-          setError(`需要 ${estimatedAmount} 积分，您当前余额 ${latestBalance} 积分，请先充值后再操作。`);
+        if (effectiveAmount > latestBalance) {
+          setError(`需要 ${effectiveAmount} 积分，您当前余额 ${latestBalance} 积分，请先充值后再操作。`);
           setIsSubmitting(false);
           refreshBalance();
           return;
@@ -321,6 +374,8 @@ export default function Revision() {
       setFiles([]);
       setInstructions('');
       setWordsByFile(new Map());
+      setPrecise(null);
+      setPrecisingState('idle');
       refreshBalance();
       startPolling(result.id);
     } catch (err: unknown) {
@@ -353,6 +408,8 @@ export default function Revision() {
     setFiles([]);
     setInstructions('');
     setWordsByFile(new Map());
+    setPrecise(null);
+    setPrecisingState('idle');
   };
 
   // --- Loading ---
@@ -578,6 +635,8 @@ export default function Revision() {
           </div>
 
           {/* 预估卡片 + 计费提示 */}
+          {/* 两阶段：先单文件累加显示「上传材料 X 字（原始总字数）」，
+              然后等 1.5 秒后台 GPT 识别主文章 + 显示「主文章: xxx · 实际冻结 Y 积分」 */}
           <div className="space-y-2">
             {files.length > 0 && (
               <div className={`rounded-md border p-3 text-sm ${
@@ -589,32 +648,63 @@ export default function Revision() {
                   <Sparkles className={`h-4 w-4 mt-0.5 flex-shrink-0 ${
                     isInsufficient ? 'text-red-600' : 'text-gray-500'
                   }`} />
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 space-y-1">
+                    {/* 第一阶段：原始总字数（粗参考） */}
                     {isEstimating ? (
-                      <p className="text-gray-600">正在估算字数...</p>
+                      <p className="text-gray-600">正在解析上传文件...</p>
                     ) : (
+                      <p className="text-xs text-gray-500">
+                        上传材料 {estimatedWords.toLocaleString()} 字（原始总字数）
+                      </p>
+                    )}
+
+                    {/* 第二阶段：精准估算 */}
+                    {!isEstimating && isPrecising && (
+                      <p className="text-gray-700 flex items-center gap-1.5">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        正在让 GPT 识别主文章并精准估算...
+                      </p>
+                    )}
+                    {!isEstimating && precise && (
                       <>
-                        <p className={isInsufficient ? 'text-red-700' : 'text-gray-700'}>
-                          预估字数 <span className="font-semibold">{estimatedWords.toLocaleString()}</span> · 预估冻结 <span className="font-semibold">{estimatedAmount.toLocaleString()}</span> 积分
+                        <p className={isInsufficient ? 'text-red-700' : 'text-gray-800'}>
+                          主文章：<strong>{precise.mainArticleFilenames.length > 0 ? precise.mainArticleFilenames.join('、') : '（仅参考材料/图片）'}</strong>
+                          {precise.breakdown.mainArticleWords > 0 && (
+                            <>（{precise.breakdown.mainArticleWords.toLocaleString()} 字）</>
+                          )}
+                          · 实际冻结 <strong>{precise.preciseFrozenAmount.toLocaleString()}</strong> 积分
                         </p>
-                        {isInsufficient ? (
-                          <p className="text-xs text-red-600 mt-1">
-                            您当前余额 {(balance ?? 0).toLocaleString()} 积分不足，请先{' '}
-                            <button
-                              type="button"
-                              onClick={() => navigate('/dashboard/recharge')}
-                              className="underline hover:text-red-800"
-                            >
-                              去充值
-                            </button>
-                            。
-                          </p>
-                        ) : (
-                          <p className="text-xs text-gray-500 mt-1">
-                            按修改后实际字数精确计费，多余冻结将自动退回
-                          </p>
-                        )}
+                        <p className="text-xs text-gray-500">
+                          公式：主文章字数 × 1.2
+                          {precise.breakdown.referenceCount > 0 && (
+                            <> + 参考材料 {precise.breakdown.referenceCount} 份 × 50 字</>
+                          )}
+                          {precise.breakdown.imageCount > 0 && (
+                            <> + 图片 {precise.breakdown.imageCount} 张 × 100 字</>
+                          )}
+                          。按修改后实际字数结算，多余冻结自动退回。
+                        </p>
                       </>
+                    )}
+                    {!isEstimating && precisingState === 'error' && (
+                      <p className="text-xs text-amber-600">
+                        精准估算失败，提交时按主文章字数计费（最终冻结金额以提交时为准）。
+                      </p>
+                    )}
+
+                    {/* 余额不足提示（基于 effectiveAmount = precise 优先 / 否则单文件累加） */}
+                    {isInsufficient && (
+                      <p className="text-xs text-red-600 pt-1">
+                        您当前余额 {(balance ?? 0).toLocaleString()} 积分不足，请先{' '}
+                        <button
+                          type="button"
+                          onClick={() => navigate('/dashboard/recharge')}
+                          className="underline hover:text-red-800"
+                        >
+                          去充值
+                        </button>
+                        。
+                      </p>
                     )}
                   </div>
                 </div>
@@ -629,7 +719,7 @@ export default function Revision() {
           {/* Submit button */}
           <button
             onClick={handleSubmit}
-            disabled={isSubmitting || files.length === 0 || !instructions.trim() || isEstimating || isInsufficient}
+            disabled={isSubmitting || files.length === 0 || !instructions.trim() || isEstimating || isPrecising || isInsufficient}
             className="w-full py-2.5 bg-red-700 text-white text-sm font-medium rounded-md hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
             {isSubmitting ? (
@@ -641,6 +731,11 @@ export default function Revision() {
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
                 正在估算字数...
+              </>
+            ) : isPrecising ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在精准估算...
               </>
             ) : (
               '开始修改'

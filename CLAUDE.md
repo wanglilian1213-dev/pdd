@@ -164,9 +164,18 @@ npx -y @aisuite/chub annotate --list
   - 文章评审：`scoring_price_per_word = 0.1`（详见下文文章评审计费规则）
   - 对外唯一展示位是 Landing 页 FAQ「各项功能是怎么收费的？」；前端 UI 不再硬编码具体单价，只显示动态预估金额
 - 文章修改计费规则：每字 0.2 积分（由 `system_config.revision_price_per_word` 控制），按修改后的文章字数精确计费；失败必须自动退款
-- 文章修改字数估算规则（2026-04-17）：估算字数全部走真解析—— PDF 用 pdf-parse（30 秒超时）、DOCX 用 mammoth（不再加 1.2 缓冲）、TXT/MD 直接 utf8 解析、图片每张固定 100 字（约 20 积分）作为 Claude Vision 处理成本的象征性补偿；冻结金额 = `Math.ceil(总字数 × revision_price_per_word)`；旧公式（PDF 按 `file.size/6`、图片硬编码 2000 字）已彻底弃用——它会把 6.5MB PDF 估成 100 万字，让用户两万多积分被错报"余额不足"
-- 文章修改前置拒绝规则（2026-04-17）：扫描件 PDF（pdf-parse 抽不出文字 / ≥90% 私用区字符 / 30 秒超时 / pdf-parse 抛错）必须在 `estimateRevisionForFile` 里返回 `isScannedPdf=true`；`POST /api/revision/estimate` 和 `createRevision` 都要在余额校验之前先 400 拒绝该文件，不写库不冻结，提示用户改上传 .docx 或文字版 PDF
-- 文章修改预估接口规则（2026-04-17）：新增 `POST /api/revision/estimate`（multer.single('file')），只接受单文件做增量预估，返回 `{ filename, words, pricePerWord }`；前端 `Revision.tsx` 维护 `Map<File, words>` 累加，添加文件时异步调一次 estimate，删除文件时直接从 Map 移除不发请求；预估失败（除扫描件外）按 0 字兜底，不阻断提交
+- 文章修改字数估算规则（2026-04-18）：估算分两层——
+  1. **单文件原始字数**（用于前端实时累加显示参考上限）：PDF 用 pdf-parse（30 秒超时）、DOCX 用 mammoth、TXT/MD utf8、图片不计入
+  2. **精准冻结字数**（真实冻结金额）：`ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100`
+  - 主文章由 GPT-5.4 `article_detection` stage 识别；冻结积分 = `ceil(精准冻结字数 × revision_price_per_word)`
+  - 旧公式（所有上传文件字数总和、PDF `file.size/6`、图片硬编码 2000 字）已彻底弃用
+- 文章修改主文章识别规则（2026-04-18）：GPT-5.4 `article_detection` stage（reasoning effort `medium`，无 web_search，60s 超时，1 次重试共 2 次）。输入是每个文件的 `{filename, ext, words, rawTextSample(前 1500 字)}`，图片只传 filename。输出 JSON `{main_article_filenames, reasoning}`，硬校验 filename 必须在输入列表里防 hallucination。失败 fallback 启发式：docx 中字数最大 → 非图片中字数最大；GPT 识别 0 份时取字数最大的非图片当主文章；GPT 识别多份时全部按主文章累加。`revisions.main_article_filenames TEXT[] NOT NULL DEFAULT '{}'` 字段存识别结果。`executeRevision` 见非空数组时把「主文章 / 参考材料」分组写进 Claude prompt；见空数组（旧任务兼容）时走旧 prompt 不变。边界优化：全是图片或只有一个非图片文件时直接走启发式不调 GPT，省成本
+- 文章修改前置拒绝规则（2026-04-17）：扫描件 PDF（pdf-parse 抽不出文字 / ≥90% 私用区字符 / 30 秒超时 / pdf-parse 抛错）必须在 `estimateRevisionForFile` 里返回 `isScannedPdf=true`；`POST /api/revision/estimate`、`POST /api/revision/estimate-precise`、`createRevision` 都要在余额校验之前先 400 拒绝该文件，不写库不冻结，提示用户改上传 .docx 或文字版 PDF
+- 文章修改预估接口规则（2026-04-18）：
+  - `POST /api/revision/estimate`（单文件，旧接口保留）：前端添加文件时累加显示原始总字数作为粗略上限
+  - `POST /api/revision/estimate-precise`（多文件，新接口）：调 GPT-5.4 识别主文章 + 返回精准冻结金额 `{ mainArticleFilenames, rawTotalWords, preciseFrozenWords, preciseFrozenAmount, pricePerWord, breakdown }`，前端文件列表停止变化 1.5 秒后防抖调用
+  - `createRevision` 内部独立调一次 GPT-5.4（不依赖前端 estimate-precise，避免 race / 用户改文件后未触发新预估）
+  - 前端 `isInsufficient` 判定：优先 `precise.preciseFrozenAmount` → 退回单文件累加 `estimatedAmount`
 - 文章修改余额前置校验规则（2026-04-17）：`createRevision` 在 INSERT revision 之前必须 `getBalance(userId)` 拿余额，不够时抛 `new InsufficientBalanceError({ required, current })` 走带数字的友好文案「需要 X 积分，您当前余额 X 积分」；竞态情况下 `freezeCredits` 抛的兜底 `InsufficientBalanceError` 仍走旧无参文案；前端 `handleSubmit` 必须先 `api.getProfile()` 拿最新余额比对再请求 createRevision
 - 文章修改结算顺序规则：`settleCredits` 必须在所有副作用（Word 生成、storage 上传、`revision_files` 写入、`revisions` 状态更新）都稳定落库之后才能调用；任何在结算之后抛出的异常都会导致"失败单已收费"，因为 catch 块没法再正确退款。同理 `createRevision` 里冻结成功后的任何前置失败必须先 `refundCredits` 再处理记录，绝不允许直接删除带冻结的记录
 - 文章修改卡死回收规则：`revisions` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckRevisions` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标记 failed，避免服务重启 / 进程崩溃后冻结积分永久卡住
@@ -239,6 +248,7 @@ npx -y @aisuite/chub annotate --list
 3. **不许删自己正在用的目录** — 清理 git worktree 或临时文件时，先 `cd` 到安全目录再删。永远不要删除自己当前所在的工作目录
 4. **先读完文档再提问** — 如果答案已经写在 `CLAUDE.md`、`DESIGN.md`、`PLAN.md` 里，不要再问用户。先读完再说
 5. **用大白话沟通** — 所有跟用户的对话都用中文大白话，不要用专业术语堆砌。技术细节要翻译成用户能听懂的话
+6. **临时文件不许放工作目录根下** — 用 Playwright MCP 或其他 sandbox 跑测试时，临时上传文件必须放在 `.playwright-mcp/`、`/tmp/` 或 `server/.test-fixtures/` 这类已知子目录里，**禁止**在工作目录根下 `mkdir + rm` 同名子目录（如 `/Users/jeffo/Desktop/拼代代/.test-files/`）。这会触发 Claude Code sandbox 的 working directory state 失效，所有后续 Bash/Read/Glob 都会报 `Working directory ... no longer exists`，需要 `cd ~ && cd /Users/jeffo/Desktop/拼代代` 刷新 cwd 或重启会话才能恢复
 
 ## 测试
 

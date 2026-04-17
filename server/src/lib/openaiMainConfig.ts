@@ -7,7 +7,8 @@ export type MainOpenAIStage =
   | 'draft_generation'
   | 'word_calibration'
   | 'citation_verification'
-  | 'scoring';
+  | 'scoring'
+  | 'article_detection';
 
 export type ReasoningEffort = 'medium' | 'high' | 'xhigh';
 
@@ -22,6 +23,10 @@ const reasoningEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
   // 文章打分评审：reasoning 拉满到 high，保证评分严谨（但不到 xhigh，节约成本）。
   // 注意：绝不能进 stagesWithWebSearch —— 评审不联网，避免用户文章数据外流。
   scoring: 'high',
+  // 文章修改主文章识别：从用户上传的多个文件里挑出"哪份是要改的主文章"。
+  // 任务简单（文件名 + 内容样本分类），medium reasoning 足够；不联网（纯本地分类，
+  // 避免用户文档外流）。失败由调用方启发式 fallback 兜底。
+  article_detection: 'medium',
 };
 
 // Stages that need to verify citations against the live web. The model is given

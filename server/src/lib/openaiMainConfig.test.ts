@@ -11,6 +11,7 @@ const expectedEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
   word_calibration: 'medium',
   citation_verification: 'medium',
   scoring: 'high',
+  article_detection: 'medium',
 };
 
 for (const [stage, expectedEffort] of Object.entries(expectedEffortByStage) as Array<[

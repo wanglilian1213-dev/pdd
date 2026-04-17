@@ -12,6 +12,11 @@ import { buildFormattedPaperDocBufferWithMedia } from './documentFormattingServi
 import { parseRevisionOutput } from './revisionContentParser';
 import { renderCharts, type RenderedChart } from './chartRenderService';
 import { isMostlyGarbage } from './scoringMaterialService';
+import {
+  detectMainArticle,
+  type ArticleDetectionFile,
+  type ArticleDetectionResult,
+} from './articleDetectionService';
 import mammoth from 'mammoth';
 import { captureError } from '../lib/errorMonitor';
 
@@ -141,12 +146,30 @@ const REVISION_IMAGE_EXTS = new Set([
   'heif',
 ]);
 const REVISION_IMAGE_WORDS_PER_FILE = 100;
+const REVISION_REFERENCE_WORDS_PER_FILE = 50;
+const REVISION_MAIN_ARTICLE_BUFFER = 1.2;
 const REVISION_PDF_PARSE_TIMEOUT_MS = 30_000;
+const REVISION_RAW_TEXT_SAMPLE_CHARS = 1500;
 
 export interface RevisionFileEstimate {
   filename: string;
   words: number;
   isScannedPdf: boolean;
+  /** 前 1500 字纯文本样本，用于 GPT-5.4 主文章识别。图片为 undefined。*/
+  rawTextSample?: string;
+  /** 文件扩展名（小写，不含点）。供主文章识别 / 计费分类使用。*/
+  ext: string;
+  /** 是否图片。*/
+  isImage: boolean;
+}
+
+/**
+ * 取前 1500 字作为 GPT 识别样本（保留段落结构）。
+ */
+function sampleText(text: string): string {
+  const trimmed = (text || '').trim();
+  if (trimmed.length <= REVISION_RAW_TEXT_SAMPLE_CHARS) return trimmed;
+  return trimmed.slice(0, REVISION_RAW_TEXT_SAMPLE_CHARS);
 }
 
 /**
@@ -160,7 +183,14 @@ export async function estimateRevisionForFile(
   const ext = (file.originalname.toLowerCase().split('.').pop() || '');
 
   if (REVISION_IMAGE_EXTS.has(ext)) {
-    return { filename: file.originalname, words: REVISION_IMAGE_WORDS_PER_FILE, isScannedPdf: false };
+    return {
+      filename: file.originalname,
+      words: REVISION_IMAGE_WORDS_PER_FILE,
+      isScannedPdf: false,
+      ext,
+      isImage: true,
+      // 图片不传 rawTextSample
+    };
   }
 
   if (ext === 'docx') {
@@ -174,12 +204,26 @@ export async function estimateRevisionForFile(
     if (!text.trim()) {
       throw new AppError(400, `Word 文档 ${file.originalname} 内容为空或无法解析。`);
     }
-    return { filename: file.originalname, words: countWords(text), isScannedPdf: false };
+    return {
+      filename: file.originalname,
+      words: countWords(text),
+      isScannedPdf: false,
+      rawTextSample: sampleText(text),
+      ext,
+      isImage: false,
+    };
   }
 
   if (['txt', 'md', 'markdown'].includes(ext)) {
     const text = file.buffer.toString('utf8');
-    return { filename: file.originalname, words: countWords(text), isScannedPdf: false };
+    return {
+      filename: file.originalname,
+      words: countWords(text),
+      isScannedPdf: false,
+      rawTextSample: sampleText(text),
+      ext,
+      isImage: false,
+    };
   }
 
   if (ext === 'pdf') {
@@ -196,13 +240,32 @@ export async function estimateRevisionForFile(
       ]);
     } catch {
       // 超时 / pdf-parse 抛错 → 一律按扫描件兜底，不抛错
-      return { filename: file.originalname, words: 0, isScannedPdf: true };
+      return {
+        filename: file.originalname,
+        words: 0,
+        isScannedPdf: true,
+        ext,
+        isImage: false,
+      };
     }
     const text = (parseResult.text || '').trim();
     if (text.length === 0 || isMostlyGarbage(text)) {
-      return { filename: file.originalname, words: 0, isScannedPdf: true };
+      return {
+        filename: file.originalname,
+        words: 0,
+        isScannedPdf: true,
+        ext,
+        isImage: false,
+      };
     }
-    return { filename: file.originalname, words: countWords(text), isScannedPdf: false };
+    return {
+      filename: file.originalname,
+      words: countWords(text),
+      isScannedPdf: false,
+      rawTextSample: sampleText(text),
+      ext,
+      isImage: false,
+    };
   }
 
   // 兜底：理论上 validateRevisionFileTypes 已经拦截，走到这里说明白名单和分支不一致
@@ -210,19 +273,104 @@ export async function estimateRevisionForFile(
 }
 
 /**
- * 多文件并行估算。供 createRevision 内部用。
+ * 多文件并行估算。供 createRevision 内部用，也供 POST /api/revision/estimate-precise 用。
+ *
+ * 模式 1（默认 detectMainArticle=false）：
+ *   - 仅返回 totalWords / perFile / scannedFilenames（粗估算，不调 GPT）
+ *   - 用于"上传材料原始总字数"展示
+ *
+ * 模式 2（detectMainArticle=true）：
+ *   - 额外调用 GPT-5.4 article_detection 识别主文章
+ *   - 计算精准冻结字数：ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100
+ *   - 返回 mainArticleFilenames / preciseFrozenWords / preciseFrozenAmount / breakdown
+ *   - GPT 失败自动 fallback 启发式（不抛错）
  */
 export async function estimateRevisionTotal(
   files: Express.Multer.File[],
+  opts?: { detectMainArticle?: boolean },
 ): Promise<{
   totalWords: number;
   perFile: RevisionFileEstimate[];
   scannedFilenames: string[];
+  mainArticleFilenames?: string[];
+  preciseFrozenWords?: number;
+  preciseFrozenAmount?: number;
+  detectionReasoning?: string;
+  breakdown?: {
+    mainArticleWords: number;
+    referenceCount: number;
+    imageCount: number;
+  };
 }> {
   const perFile = await Promise.all(files.map((f) => estimateRevisionForFile(f)));
   const totalWords = perFile.reduce((sum, f) => sum + f.words, 0);
   const scannedFilenames = perFile.filter((f) => f.isScannedPdf).map((f) => f.filename);
-  return { totalWords, perFile, scannedFilenames };
+
+  if (!opts?.detectMainArticle) {
+    return { totalWords, perFile, scannedFilenames };
+  }
+
+  // 扫描件 PDF 在精准估算时跳过（让上层先拒绝）
+  if (scannedFilenames.length > 0) {
+    return { totalWords, perFile, scannedFilenames };
+  }
+
+  // 调用 GPT-5.4 识别主文章
+  const detectionInput: ArticleDetectionFile[] = perFile.map((f) => ({
+    filename: f.filename,
+    ext: f.ext,
+    words: f.words,
+    isImage: f.isImage,
+    rawTextSample: f.rawTextSample,
+  }));
+  const detection: ArticleDetectionResult = await detectMainArticle({
+    files: detectionInput,
+  });
+
+  // 后置兜底：如果 GPT 和启发式都没挑出主文章（极端：全是图片），并且有非图片文件，
+  // 取字数最大的非图片当主文章（不让用户全免费白嫖修改）
+  let mainArticleFilenames = detection.mainArticleFilenames;
+  let detectionReasoning = detection.reasoning;
+  if (mainArticleFilenames.length === 0) {
+    const nonImages = perFile.filter((f) => !f.isImage);
+    if (nonImages.length > 0) {
+      const winner = nonImages.reduce((best, cur) => (cur.words > best.words ? cur : best));
+      mainArticleFilenames = [winner.filename];
+      detectionReasoning =
+        `${detection.reasoning}; 后置兜底：识别 0 份主文章但有非图片文件，取字数最大的 ${winner.filename}`;
+    }
+    // 全是图片：mainArticleFilenames 保持空数组，公式里主文章字数 = 0
+  }
+
+  const mainArticleWords = perFile
+    .filter((f) => mainArticleFilenames.includes(f.filename))
+    .reduce((sum, f) => sum + f.words, 0);
+  const referenceCount = perFile.filter(
+    (f) => !mainArticleFilenames.includes(f.filename) && !f.isImage,
+  ).length;
+  const imageCount = perFile.filter((f) => f.isImage).length;
+
+  const preciseFrozenWords =
+    Math.ceil(mainArticleWords * REVISION_MAIN_ARTICLE_BUFFER) +
+    referenceCount * REVISION_REFERENCE_WORDS_PER_FILE +
+    imageCount * REVISION_IMAGE_WORDS_PER_FILE;
+  const pricePerWord = await getRevisionPricePerWord();
+  const preciseFrozenAmount = Math.ceil(preciseFrozenWords * pricePerWord);
+
+  return {
+    totalWords,
+    perFile,
+    scannedFilenames,
+    mainArticleFilenames,
+    preciseFrozenWords,
+    preciseFrozenAmount,
+    detectionReasoning,
+    breakdown: {
+      mainArticleWords,
+      referenceCount,
+      imageCount,
+    },
+  };
 }
 
 // 按字精确计费：cost = ceil(字数 × 单价)。
@@ -261,6 +409,48 @@ function extractTextFromResponse(response: any): string {
 
 function getNow(): number {
   return Date.now();
+}
+
+/**
+ * 构造给 Claude 的"主文章 / 参考材料"分组说明，让 Claude 知道改哪份不改哪份。
+ *
+ * 兼容性：mainArticleFilenames 为空数组（旧任务 / cleanup 重试）时返回空字符串，
+ * userMessage 完全保持旧行为不变。
+ */
+function buildFileRoleSection(
+  materialBlocks: ReadonlyArray<unknown>,
+  mainArticleFilenames: string[],
+): string {
+  if (!mainArticleFilenames || mainArticleFilenames.length === 0) {
+    return '';
+  }
+
+  const allTitles = materialBlocks
+    .map((b) => {
+      const title = (b as { title?: unknown }).title;
+      return typeof title === 'string' ? title : '';
+    })
+    .filter(Boolean);
+  if (allTitles.length === 0) return '';
+
+  const mainSet = new Set(mainArticleFilenames);
+  const mainList = allTitles.filter((t) => mainSet.has(t));
+  const refList = allTitles.filter((t) => !mainSet.has(t));
+
+  if (mainList.length === 0) return '';
+
+  const lines: string[] = ['', '【文件角色说明】'];
+  lines.push('');
+  lines.push('主文章（这是用户要修改的目标文档。你的输出必须是这份文档的修改后完整版）：');
+  for (const name of mainList) lines.push(`- ${name}`);
+
+  if (refList.length > 0) {
+    lines.push('');
+    lines.push('参考材料（仅用于参考、引用、检索；绝对不要修改它们的内容，也绝对不要把它们的内容原样输出到结果里）：');
+    for (const name of refList) lines.push(`- ${name}`);
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -328,8 +518,11 @@ export async function createRevision(
     throw new AppError(400, '您当前有一个正在处理的修改请求，请等待完成后再提交新的修改。');
   }
 
-  // 2. 估算字数（PDF/DOCX 真解析、扫描件 PDF 检测）
-  const { totalWords, perFile, scannedFilenames } = await estimateRevisionTotal(files);
+  // 2. 估算字数（带 GPT-5.4 主文章识别）
+  //    精准冻结公式：ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100
+  //    GPT 失败自动 fallback 启发式（docx 字数最大 → 非图片字数最大），不会抛错
+  const estimateResult = await estimateRevisionTotal(files, { detectMainArticle: true });
+  const { perFile, scannedFilenames } = estimateResult;
 
   if (scannedFilenames.length > 0) {
     throw new AppError(
@@ -338,21 +531,26 @@ export async function createRevision(
     );
   }
 
-  const pricePerWord = await getRevisionPricePerWord();
-  const frozenAmount = computeCost(totalWords, pricePerWord);
+  const frozenAmount = estimateResult.preciseFrozenAmount!;
+  const mainArticleFilenames = estimateResult.mainArticleFilenames!;
+  const breakdown = estimateResult.breakdown!;
 
   // 3. 余额前置校验：余额不足直接抛带数字的 InsufficientBalanceError，
   //    不创建任何 DB 记录、不冻结、不触发 revisions 部分唯一索引。
   const wallet = await getBalance(userId);
   console.log(
-    `[revision:estimate] userId=${userId} totalWords=${totalWords} amount=${frozenAmount} ` +
-      `balance=${wallet.balance} perFile=${JSON.stringify(perFile.map((f) => ({ filename: f.filename, words: f.words })))}`,
+    `[revision:estimate] userId=${userId} mainArticles=${JSON.stringify(mainArticleFilenames)} ` +
+      `mainWords=${breakdown.mainArticleWords} refCount=${breakdown.referenceCount} imgCount=${breakdown.imageCount} ` +
+      `preciseWords=${estimateResult.preciseFrozenWords} amount=${frozenAmount} balance=${wallet.balance} ` +
+      `perFile=${JSON.stringify(perFile.map((f) => ({ filename: f.filename, words: f.words })))} ` +
+      `reasoning="${estimateResult.detectionReasoning}"`,
   );
   if (frozenAmount > wallet.balance) {
     throw new InsufficientBalanceError({ required: frozenAmount, current: wallet.balance });
   }
 
   // 4. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
+  //    main_article_filenames 写进 DB 让 executeRevision 在调 Claude 时用得上
   const { data: revision, error: insertError } = await supabaseAdmin
     .from('revisions')
     .insert({
@@ -360,6 +558,7 @@ export async function createRevision(
       instructions,
       status: 'processing',
       frozen_credits: frozenAmount,
+      main_article_filenames: mainArticleFilenames,
     })
     .select('*')
     .single();
@@ -444,6 +643,12 @@ export async function executeRevision(revisionId: string, userId: string) {
     // 2. Prepare material content for Claude
     const materialBlocks = await getRevisionMaterialContent(revisionId);
 
+    // 2.5 主文章识别结果：由 createRevision 里 GPT-5.4 article_detection 写入。
+    //     旧任务（cleanup 重试 / 历史数据）main_article_filenames 是空数组 → 走旧 prompt 行为。
+    const mainArticleFilenames: string[] = Array.isArray(revision.main_article_filenames)
+      ? revision.main_article_filenames
+      : [];
+
     // 3. Call Anthropic API with adaptive extended thinking + max effort
     //    Opus 4.6 推荐写法：thinking.adaptive + output_config.effort=max
     //    （旧写法 thinking.enabled+budget_tokens 已 deprecated）
@@ -452,8 +657,9 @@ export async function executeRevision(revisionId: string, userId: string) {
     //    系统提示见顶部 REVISION_SYSTEM_PROMPT 常量。
     //    用户消息用结构化模板，把任务/指令/输出要求三段分开，让 Claude 更难跑偏。
     //    max_tokens 提到 80000：旧值 16000 对长论文会被截断；如果上游拒绝再降到 32000。
+    const fileRoleSection = buildFileRoleSection(materialBlocks, mainArticleFilenames);
     const userMessage = `【任务】基于上方提供的原始文档，按以下指令输出修改后的完整论文。
-
+${fileRoleSection}
 【用户指令】
 ${revision.instructions}
 

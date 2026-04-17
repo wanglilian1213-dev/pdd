@@ -120,6 +120,31 @@ export const api = {
       '预估失败',
     );
   },
+  // 多文件精准预估：调 GPT-5.4 article_detection 识别主文章 +
+  // 按 ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100 公式算冻结金额。
+  // 前端在文件列表停止变化 1.5 秒后防抖调用，给用户展示「主文章: xxx · 实际冻结 X 积分」。
+  // GPT 失败时后端会自动 fallback 到启发式（docx 字数最大 → 非图片字数最大），不会抛错。
+  estimateRevisionPrecise: async (files: File[]) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const fd = new FormData();
+    files.forEach((f) => fd.append('files', f));
+
+    const res = await fetch(`${API_BASE}/api/revision/estimate-precise`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${session.access_token}` },
+      body: fd,
+    });
+    return parseApiResponse<{
+      mainArticleFilenames: string[];
+      rawTotalWords: number;
+      preciseFrozenWords: number;
+      preciseFrozenAmount: number;
+      pricePerWord: number;
+      breakdown: { mainArticleWords: number; referenceCount: number; imageCount: number };
+    }>(res, '精准预估失败');
+  },
   getRevisionCurrent: () => request<any>('/api/revision/current'),
   getRevision: (id: string) => request<any>(`/api/revision/${id}`),
   getRevisionList: (limit = 20, offset = 0) =>

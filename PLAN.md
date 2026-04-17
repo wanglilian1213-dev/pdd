@@ -147,6 +147,17 @@
   - 前端：提交前 `api.getProfile()` 拉一次最新余额再校验
   - 友好的余额不足提示：`InsufficientBalanceError` 改造支持可选 `{ required, current }` 参数，向后兼容
   - 单元测试：新增 9 条 `revisionService.test.ts`（图片 100 字、txt/md 真字数、扫描件 PDF 兜底、汇总并行、关键回归）
+- [x] 2026-04-18：精准冻结（GPT-5.4 识别主文章 + 1.2x 缓冲 + 参考材料 50 字/份）
+  - 旧问题：上一轮按"所有上传文件字数总和 × 单价"冻结，6 个文件 = 1,036 积分，但实际只改主文章（600 字 = 120 积分）→ 多冻 88% 体验差
+  - 新公式：`ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100`
+  - 后端：`openaiMainConfig.ts` 新增 `article_detection` stage（reasoning effort medium，无 web_search）
+  - 后端：新建 `articleDetectionService.ts`（GPT-5.4 调用 + JSON 解析 + filename hallucination 校验 + 启发式 fallback）；60s 超时 + 1 次重试，失败兜底 docx 字数最大 → 非图片字数最大；边界优化全是图片或只有一个非图片文件直接走启发式不调 GPT
+  - 后端：`estimateRevisionTotal(files, { detectMainArticle: true })` 调 GPT 识别 + 算精准字数；`estimateRevisionForFile` 多返回 `rawTextSample` 字段（前 1500 字）供 GPT 识别用
+  - 后端：新增 `POST /api/revision/estimate-precise`（多文件精准预估）；`createRevision` 改成调精准估算 + INSERT 多写 `main_article_filenames` 字段
+  - 后端：`executeRevision` 读 `main_article_filenames`，非空时把「主文章 / 参考材料」分组写进 Claude prompt（顺手解决 Claude 不知道改哪份的问题）；空数组（旧任务）走旧 prompt 兼容
+  - 数据库：迁移 `20260418000000_revision_main_article.sql` 加 `revisions.main_article_filenames TEXT[] NOT NULL DEFAULT '{}'`，已用 supabase Management API 跑完
+  - 前端 `Revision.tsx`：新增 `precise` state + 1.5s 防抖 useEffect 触发 `estimateRevisionPrecise`；UI 两阶段（先单文件累加显示「上传材料 X 字（原始总字数）」，等 1.5s 后显示「主文章: xxx · 实际冻结 X 积分」+ 公式分解 + 余额不足友好提示）；`isInsufficient` 优先 precise.preciseFrozenAmount → 退回单文件累加
+  - 单元测试：新增 14 条 `articleDetectionService.test.ts`（启发式优先级、JSON 解析、hallucination 校验、超时重试、多份主文章、空 GPT 兜底等）
 
 ### 文章评审（独立功能，2026-04-15 上线）
 
