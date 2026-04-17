@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { UploadCloud, FileText, Loader2, CheckCircle2, AlertCircle, Download, X, File, RefreshCw } from 'lucide-react';
+import { UploadCloud, FileText, Loader2, CheckCircle2, AlertCircle, Download, X, File, RefreshCw, Sparkles } from 'lucide-react';
 import { api } from '../../lib/api';
 import { triggerDownload } from '../../lib/downloadFile';
 import { useBalance } from '../../contexts/BalanceContext';
@@ -73,8 +73,20 @@ export default function Revision() {
   const [isLoading, setIsLoading] = useState(true);
   const [isDownloading, setIsDownloading] = useState(false);
 
+  // --- Estimate state (前端实时显示预估字数 + 余额校验) ---
+  // wordsByFile 用 File 对象做 key，文件列表变化时同步增减；
+  // pricePerWord 由 estimate 接口返回，本地默认 0.2 兜底（system_config 默认值）
+  const [wordsByFile, setWordsByFile] = useState<Map<File, number>>(new Map());
+  const [pricePerWord, setPricePerWord] = useState<number>(0.2);
+  const [estimatingCount, setEstimatingCount] = useState<number>(0);
+
   const pollRef = useRef<PollState>({ timeoutId: null, startedAt: 0, attempt: 0 });
-  const { refreshBalance } = useBalance();
+  const { balance, refreshBalance } = useBalance();
+
+  // 进入页面就拿一次最新余额（避免 BalanceProvider 刚初始化时 balance=null）
+  useEffect(() => {
+    refreshBalance();
+  }, [refreshBalance]);
 
   // --- Helpers ---
   const stopPolling = useCallback(() => {
@@ -184,6 +196,46 @@ export default function Revision() {
     return accepted;
   }, []);
 
+  // --- 单文件估算（增量预估）---
+  // 后端 POST /api/revision/estimate 只接受单文件，返回 {filename, words, pricePerWord}。
+  // 异步触发，不 await：每个文件独立成败，不阻断其他文件。
+  // 失败兜底：除"扫描件 PDF"外，其余失败按 words=0 算（让 createRevision 真解析做最后兜底）。
+  const estimateFile = useCallback((file: File) => {
+    setEstimatingCount(c => c + 1);
+    api.estimateRevisionFile(file)
+      .then(({ words, pricePerWord: pw }) => {
+        setWordsByFile(prev => {
+          const next = new Map(prev);
+          next.set(file, words);
+          return next;
+        });
+        setPricePerWord(pw);
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : '预估失败';
+        // 扫描件 PDF：后端返回 400 + "看起来是扫描件 PDF"。前端直接把该文件移出列表 + 提示用户。
+        if (/扫描件/.test(msg)) {
+          setError(msg);
+          setFiles(prev => prev.filter(f => f !== file));
+          setWordsByFile(prev => {
+            const next = new Map(prev);
+            next.delete(file);
+            return next;
+          });
+        } else {
+          // 其他失败（网络 / 服务异常）→ 按 0 字兜底，不阻断提交
+          setWordsByFile(prev => {
+            const next = new Map(prev);
+            next.set(file, 0);
+            return next;
+          });
+        }
+      })
+      .finally(() => {
+        setEstimatingCount(c => c - 1);
+      });
+  }, []);
+
   // --- File handlers ---
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -191,10 +243,11 @@ export default function Revision() {
       if (valid.length > 0) {
         setError(null);
         setFiles(prev => [...prev, ...valid]);
+        valid.forEach(estimateFile);
       }
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [filterAndValidateFiles]);
+  }, [filterAndValidateFiles, estimateFile]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -214,12 +267,32 @@ export default function Revision() {
     if (valid.length > 0) {
       setError(null);
       setFiles(prev => [...prev, ...valid]);
+      valid.forEach(estimateFile);
     }
-  }, [filterAndValidateFiles]);
+  }, [filterAndValidateFiles, estimateFile]);
 
   const removeFile = useCallback((index: number) => {
-    setFiles(prev => prev.filter((_, i) => i !== index));
+    setFiles(prev => {
+      const removed = prev[index];
+      if (removed) {
+        setWordsByFile(map => {
+          const next = new Map(map);
+          next.delete(removed);
+          return next;
+        });
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
+
+  // --- 派生：估算总字数 / 估算冻结金额 / 余额是否够 ---
+  const estimatedWords: number = Array.from(wordsByFile.values()).reduce<number>(
+    (sum, w) => sum + (typeof w === 'number' ? w : 0),
+    0,
+  );
+  const estimatedAmount = Math.ceil(estimatedWords * pricePerWord);
+  const isEstimating = estimatingCount > 0;
+  const isInsufficient = balance != null && estimatedAmount > balance;
 
   // --- Submit ---
   const handleSubmit = async () => {
@@ -228,10 +301,26 @@ export default function Revision() {
     setIsSubmitting(true);
 
     try {
+      // 提交前再拉一次最新余额，避免本地 balance 已过期（充值 / 其他端扣费）
+      // 直接调 api.getProfile 拿到当下值，避免等 state 更新闭包拿不到
+      try {
+        const profile = await api.getProfile();
+        const latestBalance = profile?.balance ?? 0;
+        if (estimatedAmount > latestBalance) {
+          setError(`需要 ${estimatedAmount} 积分，您当前余额 ${latestBalance} 积分，请先充值后再操作。`);
+          setIsSubmitting(false);
+          refreshBalance();
+          return;
+        }
+      } catch {
+        // 拿余额失败不阻断提交，让后端真校验
+      }
+
       const result = await api.createRevision(files, instructions.trim()) as any;
       setRevisionData({ revision: result, files: [] });
       setFiles([]);
       setInstructions('');
+      setWordsByFile(new Map());
       refreshBalance();
       startPolling(result.id);
     } catch (err: unknown) {
@@ -263,6 +352,7 @@ export default function Revision() {
     setError(null);
     setFiles([]);
     setInstructions('');
+    setWordsByFile(new Map());
   };
 
   // --- Loading ---
@@ -487,22 +577,70 @@ export default function Revision() {
             />
           </div>
 
-          {/* Cost hint */}
-          <p className="text-xs text-gray-400">
-            <FileText className="inline h-3.5 w-3.5 mr-1 -mt-0.5" />
-            按修改后的实际字数精确计费，详细计费规则见首页常见问题
-          </p>
+          {/* 预估卡片 + 计费提示 */}
+          <div className="space-y-2">
+            {files.length > 0 && (
+              <div className={`rounded-md border p-3 text-sm ${
+                isInsufficient
+                  ? 'border-red-200 bg-red-50'
+                  : 'border-gray-200 bg-gray-50'
+              }`}>
+                <div className="flex items-start gap-2">
+                  <Sparkles className={`h-4 w-4 mt-0.5 flex-shrink-0 ${
+                    isInsufficient ? 'text-red-600' : 'text-gray-500'
+                  }`} />
+                  <div className="flex-1 min-w-0">
+                    {isEstimating ? (
+                      <p className="text-gray-600">正在估算字数...</p>
+                    ) : (
+                      <>
+                        <p className={isInsufficient ? 'text-red-700' : 'text-gray-700'}>
+                          预估字数 <span className="font-semibold">{estimatedWords.toLocaleString()}</span> · 预估冻结 <span className="font-semibold">{estimatedAmount.toLocaleString()}</span> 积分
+                        </p>
+                        {isInsufficient ? (
+                          <p className="text-xs text-red-600 mt-1">
+                            您当前余额 {(balance ?? 0).toLocaleString()} 积分不足，请先{' '}
+                            <button
+                              type="button"
+                              onClick={() => navigate('/dashboard/recharge')}
+                              className="underline hover:text-red-800"
+                            >
+                              去充值
+                            </button>
+                            。
+                          </p>
+                        ) : (
+                          <p className="text-xs text-gray-500 mt-1">
+                            按修改后实际字数精确计费，多余冻结将自动退回
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-gray-400">
+              <FileText className="inline h-3.5 w-3.5 mr-1 -mt-0.5" />
+              详细计费规则见首页常见问题
+            </p>
+          </div>
 
           {/* Submit button */}
           <button
             onClick={handleSubmit}
-            disabled={isSubmitting || files.length === 0 || !instructions.trim()}
+            disabled={isSubmitting || files.length === 0 || !instructions.trim() || isEstimating || isInsufficient}
             className="w-full py-2.5 bg-red-700 text-white text-sm font-medium rounded-md hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
             {isSubmitting ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
                 正在提交...
+              </>
+            ) : isEstimating ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在估算字数...
               </>
             ) : (
               '开始修改'

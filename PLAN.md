@@ -137,6 +137,16 @@
 - [x] settle 顺序：所有副作用（storage、DB 写）稳定落库后才结算，避免"失败单已收费"
 - [x] 卡死兜底：cleanup 服务新增 `cleanupStuckRevisions`，超时自动 refund + failed
 - [x] Railway `app` + `cleanup` 已配置 `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`
+- [x] 2026-04-17：字数估算修复 + 增量预估 + 友好余额提示
+  - 旧 bug：6.5MB PDF 按 `file.size/6` = 108 万字 → 21 万积分，用户 2 万多积分被错报"余额不足"
+  - 后端：PDF 真用 pdf-parse 解析（30s 超时 + isMostlyGarbage 扫描件检测）；DOCX/TXT/MD 真解析不再加 1.2 缓冲；图片每张固定 100 字（约 20 积分）
+  - 后端：新增 `POST /api/revision/estimate`（multer.single('file')）单文件增量预估
+  - 后端：`createRevision` 在 INSERT revision 之前用 `getBalance` 做余额前置校验，不够直接抛带数字的 `InsufficientBalanceError({ required, current })`，不写库不冻结
+  - 后端：扫描件 PDF 在 estimate / create 两个入口都拒绝，不写库不冻结
+  - 前端 `Revision.tsx`：维护 `Map<File, words>` 增量累加，文件变化时实时显示「预估字数 X / 预估冻结 X 积分」；余额不足时禁用提交按钮 + 红字「需要 X 积分，您当前余额 X 积分，请先去充值」
+  - 前端：提交前 `api.getProfile()` 拉一次最新余额再校验
+  - 友好的余额不足提示：`InsufficientBalanceError` 改造支持可选 `{ required, current }` 参数，向后兼容
+  - 单元测试：新增 9 条 `revisionService.test.ts`（图片 100 字、txt/md 真字数、扫描件 PDF 兜底、汇总并行、关键回归）
 
 ### 文章评审（独立功能，2026-04-15 上线）
 

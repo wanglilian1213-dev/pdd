@@ -164,6 +164,10 @@ npx -y @aisuite/chub annotate --list
   - 文章评审：`scoring_price_per_word = 0.1`（详见下文文章评审计费规则）
   - 对外唯一展示位是 Landing 页 FAQ「各项功能是怎么收费的？」；前端 UI 不再硬编码具体单价，只显示动态预估金额
 - 文章修改计费规则：每字 0.2 积分（由 `system_config.revision_price_per_word` 控制），按修改后的文章字数精确计费；失败必须自动退款
+- 文章修改字数估算规则（2026-04-17）：估算字数全部走真解析—— PDF 用 pdf-parse（30 秒超时）、DOCX 用 mammoth（不再加 1.2 缓冲）、TXT/MD 直接 utf8 解析、图片每张固定 100 字（约 20 积分）作为 Claude Vision 处理成本的象征性补偿；冻结金额 = `Math.ceil(总字数 × revision_price_per_word)`；旧公式（PDF 按 `file.size/6`、图片硬编码 2000 字）已彻底弃用——它会把 6.5MB PDF 估成 100 万字，让用户两万多积分被错报"余额不足"
+- 文章修改前置拒绝规则（2026-04-17）：扫描件 PDF（pdf-parse 抽不出文字 / ≥90% 私用区字符 / 30 秒超时 / pdf-parse 抛错）必须在 `estimateRevisionForFile` 里返回 `isScannedPdf=true`；`POST /api/revision/estimate` 和 `createRevision` 都要在余额校验之前先 400 拒绝该文件，不写库不冻结，提示用户改上传 .docx 或文字版 PDF
+- 文章修改预估接口规则（2026-04-17）：新增 `POST /api/revision/estimate`（multer.single('file')），只接受单文件做增量预估，返回 `{ filename, words, pricePerWord }`；前端 `Revision.tsx` 维护 `Map<File, words>` 累加，添加文件时异步调一次 estimate，删除文件时直接从 Map 移除不发请求；预估失败（除扫描件外）按 0 字兜底，不阻断提交
+- 文章修改余额前置校验规则（2026-04-17）：`createRevision` 在 INSERT revision 之前必须 `getBalance(userId)` 拿余额，不够时抛 `new InsufficientBalanceError({ required, current })` 走带数字的友好文案「需要 X 积分，您当前余额 X 积分」；竞态情况下 `freezeCredits` 抛的兜底 `InsufficientBalanceError` 仍走旧无参文案；前端 `handleSubmit` 必须先 `api.getProfile()` 拿最新余额比对再请求 createRevision
 - 文章修改结算顺序规则：`settleCredits` 必须在所有副作用（Word 生成、storage 上传、`revision_files` 写入、`revisions` 状态更新）都稳定落库之后才能调用；任何在结算之后抛出的异常都会导致"失败单已收费"，因为 catch 块没法再正确退款。同理 `createRevision` 里冻结成功后的任何前置失败必须先 `refundCredits` 再处理记录，绝不允许直接删除带冻结的记录
 - 文章修改卡死回收规则：`revisions` 表的 `processing` 记录由 `cleanupRuntime.cleanupStuckRevisions` 兜底，超过 `stuck_task_timeout_minutes`（默认 45 分钟）会自动 refund + 标记 failed，避免服务重启 / 进程崩溃后冻结积分永久卡住
 - 文章评审规则：文章评审功能与主写作流程和文章修改流程完全独立，走 OpenAI Responses API（`gpt-5.4`，reasoning effort `high`，不联网搜索），同一时间一个用户只能有一个进行中的评审请求

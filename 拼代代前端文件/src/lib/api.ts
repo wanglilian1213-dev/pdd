@@ -100,6 +100,26 @@ export const api = {
     });
     return parseApiResponse<any>(res, '创建修改请求失败');
   },
+  // 增量预估单文件字数和金额。
+  // 前端选完文件就实时调一次，把 words 累加到本地 Map<File, words>。
+  // 删除文件时前端直接从 Map 移除，不发请求。
+  estimateRevisionFile: async (file: File) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    const res = await fetch(`${API_BASE}/api/revision/estimate`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${session.access_token}` },
+      body: fd,
+    });
+    return parseApiResponse<{ filename: string; words: number; pricePerWord: number }>(
+      res,
+      '预估失败',
+    );
+  },
   getRevisionCurrent: () => request<any>('/api/revision/current'),
   getRevision: (id: string) => request<any>(`/api/revision/${id}`),
   getRevisionList: (limit = 20, offset = 0) =>

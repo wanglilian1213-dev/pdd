@@ -1,7 +1,7 @@
 import { supabaseAdmin } from '../lib/supabase';
 import { anthropic } from '../lib/anthropic';
-import { AppError } from '../lib/errors';
-import { freezeCredits, settleCredits, refundCredits } from './walletService';
+import { AppError, InsufficientBalanceError } from '../lib/errors';
+import { freezeCredits, settleCredits, refundCredits, getBalance } from './walletService';
 import { getConfig } from './configService';
 import {
   getRevisionMaterialContent,
@@ -11,8 +11,19 @@ import {
 import { buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
 import { parseRevisionOutput } from './revisionContentParser';
 import { renderCharts, type RenderedChart } from './chartRenderService';
+import { isMostlyGarbage } from './scoringMaterialService';
 import mammoth from 'mammoth';
 import { captureError } from '../lib/errorMonitor';
+
+// pdf-parse 没有官方 d.ts；延迟 require 避免默认入口在 node 启动时触发 test 资源加载。
+// 走 /lib/pdf-parse.js 绕过顶层入口那段 "if (module === require.main)" 的测试分支。
+let cachedPdfParse: ((buffer: Buffer) => Promise<{ text: string; numpages: number }>) | null = null;
+function loadPdfParse() {
+  if (cachedPdfParse) return cachedPdfParse;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  cachedPdfParse = require('pdf-parse/lib/pdf-parse.js');
+  return cachedPdfParse!;
+}
 
 // ---------------------------------------------------------------------------
 // System prompt：把 Claude 从「乐于助人的聊天助手」拉成「严格的论文修订工」。
@@ -106,34 +117,112 @@ export function validateRevisionFileTypes(files: Express.Multer.File[]): void {
   }
 }
 
-async function estimateWordCount(files: Express.Multer.File[]): Promise<number> {
-  let total = 0;
-  for (const file of files) {
-    const ext = file.originalname.toLowerCase().split('.').pop() || '';
+// ---------------------------------------------------------------------------
+// Word-count estimation（按字精确计费）
+// ---------------------------------------------------------------------------
+//
+// 旧逻辑（file.size / 6 估算 PDF、图片硬编码 2000 字）会把 6.5MB PDF 估成 100 万字，
+// 导致用户两万多积分被报"余额不足"。新逻辑：
+//   - PDF: 真用 pdf-parse 解析 + 30s 超时，扫描件检测靠 isMostlyGarbage（与评审一致）
+//   - DOCX/TXT/MD: 真解析（不再加 1.2 缓冲，结算时按真实字数退差）
+//   - 图片: 每张固定 100 字（约 20 积分），象征性覆盖 Claude Vision 处理成本
+// 估算口径与 executeRevision 第 4 步的结算口径都用同一个 countWords。
 
-    if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif'].includes(ext)) {
-      total += 2000;
-    } else if (ext === 'docx') {
-      try {
-        const { value: text } = await mammoth.extractRawText({ buffer: file.buffer });
-        total += Math.max(500, Math.ceil(countWords(text) * 1.2));
-      } catch {
-        total += Math.max(500, Math.round(file.size / 8));
-      }
-    } else if (['txt', 'md', 'markdown'].includes(ext)) {
-      try {
-        const text = file.buffer.toString('utf8');
-        total += Math.max(500, Math.ceil(countWords(text) * 1.2));
-      } catch {
-        total += Math.max(500, Math.round(file.size / 8));
-      }
-    } else if (ext === 'pdf') {
-      total += Math.max(500, Math.round(file.size / 6));
-    } else {
-      total += Math.max(500, Math.round(file.size / 8));
-    }
+const REVISION_IMAGE_EXTS = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'webp',
+  'gif',
+  'bmp',
+  'tiff',
+  'tif',
+  'heic',
+  'heif',
+]);
+const REVISION_IMAGE_WORDS_PER_FILE = 100;
+const REVISION_PDF_PARSE_TIMEOUT_MS = 30_000;
+
+export interface RevisionFileEstimate {
+  filename: string;
+  words: number;
+  isScannedPdf: boolean;
+}
+
+/**
+ * 单文件字数估算。供 estimate 路由（增量预估）和 createRevision（建单前真解析）共用。
+ * - 扫描件 PDF / 解析超时 / pdf-parse 抛错 → 返回 isScannedPdf=true，由上层决定是否拒绝
+ * - 不抛错（除非 docx 内容空 / 不支持的扩展名）
+ */
+export async function estimateRevisionForFile(
+  file: { originalname: string; buffer: Buffer },
+): Promise<RevisionFileEstimate> {
+  const ext = (file.originalname.toLowerCase().split('.').pop() || '');
+
+  if (REVISION_IMAGE_EXTS.has(ext)) {
+    return { filename: file.originalname, words: REVISION_IMAGE_WORDS_PER_FILE, isScannedPdf: false };
   }
-  return total;
+
+  if (ext === 'docx') {
+    let text: string;
+    try {
+      const result = await mammoth.extractRawText({ buffer: file.buffer });
+      text = result.value || '';
+    } catch {
+      throw new AppError(400, `Word 文档 ${file.originalname} 解析失败，请检查文件是否完好。`);
+    }
+    if (!text.trim()) {
+      throw new AppError(400, `Word 文档 ${file.originalname} 内容为空或无法解析。`);
+    }
+    return { filename: file.originalname, words: countWords(text), isScannedPdf: false };
+  }
+
+  if (['txt', 'md', 'markdown'].includes(ext)) {
+    const text = file.buffer.toString('utf8');
+    return { filename: file.originalname, words: countWords(text), isScannedPdf: false };
+  }
+
+  if (ext === 'pdf') {
+    let parseResult: { text: string };
+    try {
+      parseResult = await Promise.race([
+        loadPdfParse()(file.buffer),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error('PDF_PARSE_TIMEOUT')),
+            REVISION_PDF_PARSE_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+    } catch {
+      // 超时 / pdf-parse 抛错 → 一律按扫描件兜底，不抛错
+      return { filename: file.originalname, words: 0, isScannedPdf: true };
+    }
+    const text = (parseResult.text || '').trim();
+    if (text.length === 0 || isMostlyGarbage(text)) {
+      return { filename: file.originalname, words: 0, isScannedPdf: true };
+    }
+    return { filename: file.originalname, words: countWords(text), isScannedPdf: false };
+  }
+
+  // 兜底：理论上 validateRevisionFileTypes 已经拦截，走到这里说明白名单和分支不一致
+  throw new AppError(400, `不支持的文件类型：${file.originalname}。`);
+}
+
+/**
+ * 多文件并行估算。供 createRevision 内部用。
+ */
+export async function estimateRevisionTotal(
+  files: Express.Multer.File[],
+): Promise<{
+  totalWords: number;
+  perFile: RevisionFileEstimate[];
+  scannedFilenames: string[];
+}> {
+  const perFile = await Promise.all(files.map((f) => estimateRevisionForFile(f)));
+  const totalWords = perFile.reduce((sum, f) => sum + f.words, 0);
+  const scannedFilenames = perFile.filter((f) => f.isScannedPdf).map((f) => f.filename);
+  return { totalWords, perFile, scannedFilenames };
 }
 
 // 按字精确计费：cost = ceil(字数 × 单价)。
@@ -144,7 +233,7 @@ function computeCost(wordCount: number, pricePerWord: number): number {
 
 // 读取并解析 revision_price_per_word，兜底 0.2。
 // configService 里小数是以 JSON 字符串落库的，用 Number() 转一下。
-async function getRevisionPricePerWord(): Promise<number> {
+export async function getRevisionPricePerWord(): Promise<number> {
   const raw = await getConfig('revision_price_per_word');
   const parsed = typeof raw === 'number' ? raw : Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.2;
@@ -239,12 +328,31 @@ export async function createRevision(
     throw new AppError(400, '您当前有一个正在处理的修改请求，请等待完成后再提交新的修改。');
   }
 
-  // 2. 估算字数并计算冻结金额（按字精确计费）
-  const pricePerWord = await getRevisionPricePerWord();
-  const estimatedWords = await estimateWordCount(files);
-  const frozenAmount = computeCost(estimatedWords, pricePerWord);
+  // 2. 估算字数（PDF/DOCX 真解析、扫描件 PDF 检测）
+  const { totalWords, perFile, scannedFilenames } = await estimateRevisionTotal(files);
 
-  // 3. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
+  if (scannedFilenames.length > 0) {
+    throw new AppError(
+      400,
+      `文件 ${scannedFilenames.join('、')} 看起来是扫描件 PDF，无法修改文字内容，请改上传 .docx 或文字版 PDF。`,
+    );
+  }
+
+  const pricePerWord = await getRevisionPricePerWord();
+  const frozenAmount = computeCost(totalWords, pricePerWord);
+
+  // 3. 余额前置校验：余额不足直接抛带数字的 InsufficientBalanceError，
+  //    不创建任何 DB 记录、不冻结、不触发 revisions 部分唯一索引。
+  const wallet = await getBalance(userId);
+  console.log(
+    `[revision:estimate] userId=${userId} totalWords=${totalWords} amount=${frozenAmount} ` +
+      `balance=${wallet.balance} perFile=${JSON.stringify(perFile.map((f) => ({ filename: f.filename, words: f.words })))}`,
+  );
+  if (frozenAmount > wallet.balance) {
+    throw new InsufficientBalanceError({ required: frozenAmount, current: wallet.balance });
+  }
+
+  // 4. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
   const { data: revision, error: insertError } = await supabaseAdmin
     .from('revisions')
     .insert({
@@ -264,7 +372,9 @@ export async function createRevision(
     throw new AppError(500, '创建修改请求失败。');
   }
 
-  // 4. 冻结积分（独立 try：冻结失败时还没有任何资金动作，直接清理记录即可）
+  // 5. 冻结积分（独立 try：冻结失败时还没有任何资金动作，直接清理记录即可）
+  //    注意：第 3 步已经做过余额前置校验，但竞态场景（用户两个浏览器同时提）
+  //    下仍可能被另一笔扣走 → freezeCredits 抛 InsufficientBalanceError（旧文案，可接受）
   try {
     await freezeCredits(userId, frozenAmount, 'revision', revision.id, '文章修改冻结积分');
   } catch (freezeError) {
@@ -272,7 +382,7 @@ export async function createRevision(
     throw freezeError;
   }
 
-  // 5. 上传文件 + 启动异步执行（独立 try：失败时必须先 refund 再标记 failed，不能删除记录）
+  // 6. 上传文件 + 启动异步执行（独立 try：失败时必须先 refund 再标记 failed，不能删除记录）
   try {
     await uploadRevisionFiles(revision.id, files);
 

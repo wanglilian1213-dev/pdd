@@ -10,8 +10,15 @@ export class AppError extends Error {
 }
 
 export class InsufficientBalanceError extends AppError {
-  constructor() {
-    super(400, '余额不足，请先充值后再操作。');
+  required?: number;
+  current?: number;
+  constructor(opts?: { required: number; current: number }) {
+    const msg = opts
+      ? `需要 ${opts.required} 积分，您当前余额 ${opts.current} 积分，请先充值后再操作。`
+      : '余额不足，请先充值后再操作。';
+    super(400, msg);
+    this.required = opts?.required;
+    this.current = opts?.current;
   }
 }
 

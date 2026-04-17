@@ -326,6 +326,33 @@ create → initializing（秒回，不冻结）
   - `/api/user/init` 已改成“档案 / 钱包缺哪补哪”，不会再把半残账号直接判成已存在
   - 已补一次性补钱包脚本：`npm run repair:wallets`
 
+## 2026-04-17 文章修改字数估算修复 + 增量预估展示 + 友好的余额提示
+
+### 根因
+旧 `revisionService.ts:estimateWordCount` 用 `file.size / 6` 估算 PDF 字数 + 图片硬编码 2000 字。一个 6.5MB PDF 被估成 108 万字 → 21 万积分；用户两万多积分 → 报"余额不足"。前端没有预估展示，用户提交后才知道。
+
+### 变更清单
+- 后端 `server/src/services/revisionService.ts`：
+  - 删除旧 `estimateWordCount`
+  - 新增 `estimateRevisionForFile(file)` + `estimateRevisionTotal(files)`：PDF 用 pdf-parse（30s 超时 + isMostlyGarbage 扫描件检测，复用评审已稳定逻辑）；DOCX/TXT/MD 真解析、不再加 1.2 缓冲；图片每张固定 100 字（约 20 积分）
+  - `createRevision` 流程顺序改造：估算字数 → 扫描件 PDF 拒绝 → `getBalance` 余额前置校验 → 不够直接抛 `InsufficientBalanceError({ required, current })`，不写库不冻结、不触发部分唯一索引；够才 INSERT + freezeCredits
+  - 加结构化日志 `[revision:estimate] userId=X totalWords=X amount=X balance=X perFile=...`
+- 后端 `server/src/lib/errors.ts`：`InsufficientBalanceError` 改造支持可选 `{ required, current }` 参数，向后兼容（无参走旧文案）
+- 后端 `server/src/routes/revision.ts`：新增 `POST /api/revision/estimate`（multer.single('file')），返回 `{ filename, words, pricePerWord }`
+- 前端 `拼代代前端文件/src/lib/api.ts`：新增 `estimateRevisionFile(file)`
+- 前端 `拼代代前端文件/src/pages/dashboard/Revision.tsx`：维护 `Map<File, words>` 增量累加（添加文件触发 estimate / 删除文件直接从 Map 移除）；展示「预估字数 X · 预估冻结 X 积分」；余额不足时禁用提交按钮 + 红字「需要 X 积分，您当前余额 X 积分，请先去充值」；提交前 `api.getProfile()` 拉最新余额再校验
+- 单元测试：`revisionService.test.ts` 新增 9 条（图片 100 字 / txt-md 真字数 / 扫描件 PDF 兜底 / 多文件并行汇总 / 关键回归）
+- 文档同步：`CLAUDE.md` 新增 4 条规则（字数估算 / 前置拒绝 / 预估接口 / 余额前置校验）；`PLAN.md` 文章修改章节加进度；`DESIGN.md` 文章修改流程描述更新
+
+### 验证
+- 后端 `npm run lint` + `npm run build` 通过
+- 后端 `npx tsx --test src/services/revisionService.test.ts` 15/15 通过（含原 6 条 + 新 9 条）
+- 前端 `npm run lint` + `npm run build` 通过
+
+### 待用户手动操作
+- push `main` 后等 GitHub Action 把 `app` + `拼代代前端` 都发完
+- 真实账号在 https://pindaidai.uk/dashboard/revision 复测：(1) 上传 6.5MB 真实 PDF，预估字数应在合理范围（< 5 万字）；(2) 余额不足场景验证带数字的友好提示；(3) 评审 `/dashboard/scoring` 回归验证字数计算和扫描件检测无回归
+
 ## 当前已经锁死的交付规则
 
 - 正文交付为 `Word (.docx)`
