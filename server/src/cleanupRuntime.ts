@@ -11,10 +11,14 @@ export interface CleanupDeps {
   cleanupStuckRevisions: () => Promise<void>;
   cleanupStuckScorings: () => Promise<void>;
   cleanupStuckHumanizeJobs: () => Promise<void>;
+  cleanupStuckAiDetections: () => Promise<void>;
+  cleanupStuckStandaloneHumanizations: () => Promise<void>;
   cleanupExpiredFiles: () => Promise<void>;
   cleanupExpiredMaterials: () => Promise<void>;
   cleanupExpiredScoringMaterials: () => Promise<void>;
   cleanupExpiredScoringReports: () => Promise<void>;
+  cleanupExpiredAiDetectionMaterials: () => Promise<void>;
+  cleanupExpiredStandaloneHumanizationFiles: () => Promise<void>;
 }
 
 export interface CleanupLogger {
@@ -491,6 +495,361 @@ async function cleanupExpiredFiles() {
   console.log(`[cleanup] Deleted ${count} expired files.`);
 }
 
+// ---------------------------------------------------------------------------
+// AI 检测 / 独立降 AI 卡死清理 + 文件过期清理（2026-04-18 新增）
+// 模式对齐 scoring：
+//   - initializing 阶段卡死：没冻结过积分，只清文件 + 标失败
+//   - processing 阶段卡死：已冻结积分，先退款再标失败
+// ---------------------------------------------------------------------------
+
+async function cleanupAiDetectionMaterialsForId(detectionId: string) {
+  const { data: files } = await supabaseAdmin
+    .from('ai_detection_files')
+    .select('id, storage_path')
+    .eq('detection_id', detectionId);
+
+  if (!files || files.length === 0) return;
+
+  const paths = files.map((f) => f.storage_path).filter(Boolean) as string[];
+  if (paths.length > 0) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove(paths);
+    } catch (err) {
+      captureError(err, 'cleanup.ai_detection_storage_remove_failed', { detectionId });
+    }
+  }
+
+  try {
+    await supabaseAdmin.from('ai_detection_files').delete().eq('detection_id', detectionId);
+  } catch (err) {
+    captureError(err, 'cleanup.ai_detection_files_delete_failed', { detectionId });
+  }
+}
+
+async function cleanupStuckAiDetections() {
+  const timeoutMinutes =
+    (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
+  const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
+
+  const { data: stuck } = await supabaseAdmin
+    .from('ai_detections')
+    .select('id, user_id, status, frozen_credits, refunded')
+    .in('status', ['initializing', 'processing'])
+    .lt('updated_at', cutoff);
+
+  if (!stuck || stuck.length === 0) {
+    console.log('[cleanup] No stuck ai_detections found.');
+    return;
+  }
+
+  for (const row of stuck) {
+    console.log(`[cleanup] Processing stuck ai_detection ${row.id} (status=${row.status})`);
+
+    if (row.status === 'initializing' || row.frozen_credits === 0) {
+      await cleanupAiDetectionMaterialsForId(row.id);
+      await supabaseAdmin
+        .from('ai_detections')
+        .update({
+          status: 'failed',
+          failure_reason: 'AI 检测准备超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+      continue;
+    }
+
+    if (!row.refunded && row.frozen_credits > 0) {
+      try {
+        await refundCredits(
+          row.user_id,
+          row.frozen_credits,
+          'ai_detection',
+          row.id,
+          `卡住 AI 检测自动退款：${row.frozen_credits} 积分`,
+        );
+        await supabaseAdmin
+          .from('ai_detections')
+          .update({
+            status: 'failed',
+            failure_reason: 'AI 检测处理超时，积分已自动退回。请重新提交。',
+            refunded: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', row.id);
+      } catch (err) {
+        console.error(`[cleanup] Refund failed for ai_detection ${row.id}:`, err);
+        await supabaseAdmin
+          .from('ai_detections')
+          .update({
+            status: 'failed',
+            failure_reason: 'AI 检测超时，退款异常，请联系客服。',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', row.id);
+      }
+    } else {
+      await supabaseAdmin
+        .from('ai_detections')
+        .update({
+          status: 'failed',
+          failure_reason: 'AI 检测处理超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+    }
+  }
+}
+
+async function cleanupStandaloneHumanizationMaterialsForId(humanizationId: string) {
+  const { data: files } = await supabaseAdmin
+    .from('standalone_humanization_files')
+    .select('id, storage_path')
+    .eq('humanization_id', humanizationId)
+    .eq('category', 'material');
+
+  if (!files || files.length === 0) return;
+
+  const paths = files.map((f) => f.storage_path).filter(Boolean) as string[];
+  if (paths.length > 0) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove(paths);
+    } catch (err) {
+      captureError(err, 'cleanup.standalone_humanize_storage_remove_failed', { humanizationId });
+    }
+  }
+
+  try {
+    await supabaseAdmin
+      .from('standalone_humanization_files')
+      .delete()
+      .eq('humanization_id', humanizationId)
+      .eq('category', 'material');
+  } catch (err) {
+    captureError(err, 'cleanup.standalone_humanize_files_delete_failed', { humanizationId });
+  }
+}
+
+async function cleanupStuckStandaloneHumanizations() {
+  const timeoutMinutes =
+    (await getConfig('stuck_task_timeout_minutes')) || DEFAULT_STUCK_TASK_TIMEOUT_MINUTES;
+  const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
+
+  const { data: stuck } = await supabaseAdmin
+    .from('standalone_humanizations')
+    .select('id, user_id, status, frozen_credits, refunded')
+    .in('status', ['initializing', 'processing'])
+    .lt('updated_at', cutoff);
+
+  if (!stuck || stuck.length === 0) {
+    console.log('[cleanup] No stuck standalone_humanizations found.');
+    return;
+  }
+
+  for (const row of stuck) {
+    console.log(
+      `[cleanup] Processing stuck standalone_humanization ${row.id} (status=${row.status})`,
+    );
+
+    if (row.status === 'initializing' || row.frozen_credits === 0) {
+      await cleanupStandaloneHumanizationMaterialsForId(row.id);
+      await supabaseAdmin
+        .from('standalone_humanizations')
+        .update({
+          status: 'failed',
+          failure_reason: '降 AI 准备超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+      continue;
+    }
+
+    if (!row.refunded && row.frozen_credits > 0) {
+      try {
+        await refundCredits(
+          row.user_id,
+          row.frozen_credits,
+          'standalone_humanize',
+          row.id,
+          `卡住独立降 AI 自动退款：${row.frozen_credits} 积分`,
+        );
+        await supabaseAdmin
+          .from('standalone_humanizations')
+          .update({
+            status: 'failed',
+            failure_reason: '降 AI 处理超时，积分已自动退回。请重新提交。',
+            refunded: true,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', row.id);
+      } catch (err) {
+        console.error(`[cleanup] Refund failed for standalone_humanization ${row.id}:`, err);
+        await supabaseAdmin
+          .from('standalone_humanizations')
+          .update({
+            status: 'failed',
+            failure_reason: '降 AI 超时，退款异常，请联系客服。',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', row.id);
+      }
+    } else {
+      await supabaseAdmin
+        .from('standalone_humanizations')
+        .update({
+          status: 'failed',
+          failure_reason: '降 AI 处理超时，请重新提交。',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', row.id);
+    }
+  }
+}
+
+async function cleanupExpiredAiDetectionMaterials() {
+  const retentionDays = (await getConfig('material_retention_days')) || 3;
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: oldFiles } = await supabaseAdmin
+    .from('ai_detection_files')
+    .select('id, detection_id, storage_path')
+    .lt('created_at', cutoff);
+
+  if (!oldFiles || oldFiles.length === 0) {
+    console.log('[cleanup] No expired ai_detection materials found.');
+    return;
+  }
+
+  const detectionIds = [...new Set(oldFiles.map((f) => f.detection_id).filter(Boolean))] as string[];
+  const { data: detections } = await supabaseAdmin
+    .from('ai_detections')
+    .select('id, status')
+    .in('id', detectionIds);
+
+  const finishedIds = new Set(
+    (detections || [])
+      .filter((d) => d.status === 'completed' || d.status === 'failed')
+      .map((d) => d.id),
+  );
+
+  const eligible = oldFiles.filter((f) => finishedIds.has(f.detection_id));
+  const skipped = oldFiles.length - eligible.length;
+
+  if (skipped > 0) {
+    console.log(`[cleanup] Skipped ${skipped} ai_detection materials (detection not finished yet).`);
+  }
+
+  if (eligible.length === 0) return;
+
+  for (const f of eligible) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove([f.storage_path]);
+    } catch (err) {
+      captureError(err, 'cleanup.ai_detection_material_storage_remove_failed', {
+        detectionId: f.detection_id,
+        fileId: f.id,
+      });
+    }
+    try {
+      await supabaseAdmin.from('ai_detection_files').delete().eq('id', f.id);
+    } catch (err) {
+      captureError(err, 'cleanup.ai_detection_material_db_delete_failed', {
+        detectionId: f.detection_id,
+        fileId: f.id,
+      });
+    }
+  }
+
+  console.log(`[cleanup] Cleaned up ${eligible.length} expired ai_detection materials.`);
+}
+
+async function cleanupExpiredStandaloneHumanizationFiles() {
+  // 两类文件一起扫：material（按 material_retention_days）和 humanized_doc（按 expires_at）
+  const retentionDays = (await getConfig('material_retention_days')) || 3;
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+
+  // material 类：按 created_at 扫；只清理已完成/失败任务的 material
+  const { data: oldMaterials } = await supabaseAdmin
+    .from('standalone_humanization_files')
+    .select('id, humanization_id, storage_path')
+    .eq('category', 'material')
+    .lt('created_at', cutoff);
+
+  if (oldMaterials && oldMaterials.length > 0) {
+    const ids = [...new Set(oldMaterials.map((f) => f.humanization_id).filter(Boolean))] as string[];
+    const { data: rows } = await supabaseAdmin
+      .from('standalone_humanizations')
+      .select('id, status')
+      .in('id', ids);
+    const finishedIds = new Set(
+      (rows || [])
+        .filter((r) => r.status === 'completed' || r.status === 'failed')
+        .map((r) => r.id),
+    );
+    const eligible = oldMaterials.filter((f) => finishedIds.has(f.humanization_id));
+    const skipped = oldMaterials.length - eligible.length;
+    if (skipped > 0) {
+      console.log(
+        `[cleanup] Skipped ${skipped} standalone_humanize materials (humanization not finished yet).`,
+      );
+    }
+    for (const f of eligible) {
+      try {
+        await supabaseAdmin.storage.from('task-files').remove([f.storage_path]);
+      } catch (err) {
+        captureError(err, 'cleanup.standalone_humanize_material_storage_remove_failed', {
+          humanizationId: f.humanization_id,
+          fileId: f.id,
+        });
+      }
+      try {
+        await supabaseAdmin.from('standalone_humanization_files').delete().eq('id', f.id);
+      } catch (err) {
+        captureError(err, 'cleanup.standalone_humanize_material_db_delete_failed', {
+          humanizationId: f.humanization_id,
+          fileId: f.id,
+        });
+      }
+    }
+    if (eligible.length > 0) {
+      console.log(`[cleanup] Cleaned up ${eligible.length} expired standalone_humanize materials.`);
+    }
+  }
+
+  // humanized_doc 类：按 expires_at 扫，到期直接删
+  const { data: expiredDocs } = await supabaseAdmin
+    .from('standalone_humanization_files')
+    .select('id, humanization_id, storage_path, expires_at')
+    .eq('category', 'humanized_doc')
+    .not('expires_at', 'is', null)
+    .lt('expires_at', new Date().toISOString());
+
+  if (!expiredDocs || expiredDocs.length === 0) {
+    console.log('[cleanup] No expired standalone_humanize docs found.');
+    return;
+  }
+
+  for (const f of expiredDocs) {
+    try {
+      await supabaseAdmin.storage.from('task-files').remove([f.storage_path]);
+    } catch (err) {
+      captureError(err, 'cleanup.standalone_humanize_doc_storage_remove_failed', {
+        humanizationId: f.humanization_id,
+        fileId: f.id,
+      });
+    }
+    try {
+      await supabaseAdmin.from('standalone_humanization_files').delete().eq('id', f.id);
+    } catch (err) {
+      captureError(err, 'cleanup.standalone_humanize_doc_db_delete_failed', {
+        humanizationId: f.humanization_id,
+        fileId: f.id,
+      });
+    }
+  }
+
+  console.log(`[cleanup] Cleaned up ${expiredDocs.length} expired standalone_humanize docs.`);
+}
+
 function createExpiredMaterialsDeps(
   logger: CleanupLogger = defaultLogger,
 ): CleanupExpiredMaterialsDeps {
@@ -588,10 +947,14 @@ export function createDefaultCleanupDeps(): CleanupDeps {
     cleanupStuckRevisions,
     cleanupStuckScorings,
     cleanupStuckHumanizeJobs,
+    cleanupStuckAiDetections,
+    cleanupStuckStandaloneHumanizations,
     cleanupExpiredFiles,
     cleanupExpiredMaterials,
     cleanupExpiredScoringMaterials,
     cleanupExpiredScoringReports,
+    cleanupExpiredAiDetectionMaterials,
+    cleanupExpiredStandaloneHumanizationFiles,
   };
 }
 
@@ -602,10 +965,14 @@ export async function runCleanupCycle(
   await deps.cleanupStuckRevisions();
   await deps.cleanupStuckScorings();
   await deps.cleanupStuckHumanizeJobs();
+  await deps.cleanupStuckAiDetections();
+  await deps.cleanupStuckStandaloneHumanizations();
   await deps.cleanupExpiredFiles();
   await deps.cleanupExpiredMaterials();
   await deps.cleanupExpiredScoringMaterials();
   await deps.cleanupExpiredScoringReports();
+  await deps.cleanupExpiredAiDetectionMaterials();
+  await deps.cleanupExpiredStandaloneHumanizationFiles();
 }
 
 export async function runInitialCleanup(

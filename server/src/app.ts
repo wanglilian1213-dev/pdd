@@ -45,6 +45,8 @@ export function createApp({ allowedOrigins, mountApiRoutes = true }: CreateAppOp
     const opsRoutes = (require('./routes/ops') as typeof import('./routes/ops')).default;
     const revisionRoutes = (require('./routes/revision') as typeof import('./routes/revision')).default;
     const scoringRoutes = (require('./routes/scoring') as typeof import('./routes/scoring')).default;
+    const aiDetectionRoutes = (require('./routes/aiDetection') as typeof import('./routes/aiDetection')).default;
+    const standaloneHumanizeRoutes = (require('./routes/standaloneHumanize') as typeof import('./routes/standaloneHumanize')).default;
     const chatRoutes = (require('./routes/chat') as typeof import('./routes/chat')).default;
 
     app.use('/api/user', authMiddleware, userRoutes);
@@ -52,6 +54,8 @@ export function createApp({ allowedOrigins, mountApiRoutes = true }: CreateAppOp
     app.use('/api/task', authMiddleware, taskRoutes);
     app.use('/api/revision', authMiddleware, revisionRoutes);
     app.use('/api/scoring', authMiddleware, scoringRoutes);
+    app.use('/api/ai-detection', authMiddleware, aiDetectionRoutes);
+    app.use('/api/standalone-humanize', authMiddleware, standaloneHumanizeRoutes);
     app.use('/api/chat', authMiddleware, chatRoutes);
     app.use('/api/ops', authMiddleware, opsMiddleware, opsRoutes);
   }

@@ -25,6 +25,12 @@ test('runInitialCleanup catches startup failures so cleanup service does not cra
         cleanupStuckHumanizeJobs: async () => {
           throw new Error('should not run after first failure');
         },
+        cleanupStuckAiDetections: async () => {
+          throw new Error('should not run after first failure');
+        },
+        cleanupStuckStandaloneHumanizations: async () => {
+          throw new Error('should not run after first failure');
+        },
         cleanupExpiredFiles: async () => {
           throw new Error('should not run after first failure');
         },
@@ -35,6 +41,12 @@ test('runInitialCleanup catches startup failures so cleanup service does not cra
           throw new Error('should not run after first failure');
         },
         cleanupExpiredScoringReports: async () => {
+          throw new Error('should not run after first failure');
+        },
+        cleanupExpiredAiDetectionMaterials: async () => {
+          throw new Error('should not run after first failure');
+        },
+        cleanupExpiredStandaloneHumanizationFiles: async () => {
           throw new Error('should not run after first failure');
         },
       },

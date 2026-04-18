@@ -15,6 +15,7 @@ const POSITIVE_NUMBER_CONFIG_KEYS = new Set([
   'humanize_price_per_word',
   'revision_price_per_word',
   'scoring_price_per_word',
+  'ai_detection_price_per_word',
 ]);
 
 export const DEFAULT_ACTIVATION_DENOMINATIONS = [1000, 3000, 10000, 20000];
