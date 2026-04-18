@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { FileText, FileEdit, Download, Clock, CheckCircle2, AlertCircle, RefreshCw, Search, Filter, Loader2, Info, Gauge } from 'lucide-react';
+import { FileText, FileEdit, Download, Clock, CheckCircle2, AlertCircle, RefreshCw, Search, Filter, Loader2, Info, Gauge, Bot, Sparkles } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -57,11 +57,35 @@ interface ScoringItem {
   result_json: { detected_files?: ScoringDetectedFile[] } | null;
 }
 
-type ActiveTab = 'tasks' | 'revisions' | 'scorings';
+interface AiDetectionItem {
+  id: string;
+  status: 'initializing' | 'processing' | 'completed' | 'failed';
+  input_word_count: number;
+  frozen_credits: number;
+  settled_credits: number | null;
+  overall_score: number | null;
+  failure_reason: string | null;
+  created_at: string;
+}
+
+interface StandaloneHumanizationItem {
+  id: string;
+  status: 'initializing' | 'processing' | 'completed' | 'failed';
+  input_word_count: number;
+  humanized_word_count: number | null;
+  frozen_credits: number;
+  settled_credits: number | null;
+  failure_reason: string | null;
+  created_at: string;
+}
+
+type ActiveTab = 'tasks' | 'revisions' | 'scorings' | 'ai-detections' | 'standalone-humanizations';
 
 function resolveInitialTab(param: string | null): ActiveTab {
   if (param === 'revisions') return 'revisions';
   if (param === 'scorings') return 'scorings';
+  if (param === 'ai-detections') return 'ai-detections';
+  if (param === 'standalone-humanizations') return 'standalone-humanizations';
   return 'tasks';
 }
 
@@ -101,6 +125,21 @@ export default function Tasks() {
   const [scoringError, setScoringError] = useState<string | null>(null);
   const [scoringDownloadingId, setScoringDownloadingId] = useState<string | null>(null);
   const [scoringsLoaded, setScoringsLoaded] = useState(false);
+
+  // ── AI detection state ──
+  const [allDetections, setAllDetections] = useState<AiDetectionItem[]>([]);
+  const [detectionsTotal, setDetectionsTotal] = useState(0);
+  const [detectionsLoading, setDetectionsLoading] = useState(false);
+  const [detectionsError, setDetectionsError] = useState<string | null>(null);
+  const [detectionsLoaded, setDetectionsLoaded] = useState(false);
+
+  // ── Standalone humanize state ──
+  const [allHumanizations, setAllHumanizations] = useState<StandaloneHumanizationItem[]>([]);
+  const [humanizationsTotal, setHumanizationsTotal] = useState(0);
+  const [humanizationsLoading, setHumanizationsLoading] = useState(false);
+  const [humanizationsError, setHumanizationsError] = useState<string | null>(null);
+  const [humanizationsLoaded, setHumanizationsLoaded] = useState(false);
+  const [humanizationDownloadingId, setHumanizationDownloadingId] = useState<string | null>(null);
 
   // ── Fetch tasks ──
   const fetchTasks = useCallback(async () => {
@@ -158,6 +197,44 @@ export default function Tasks() {
     }
   }, []);
 
+  // ── Fetch AI detections ──
+  const fetchDetections = useCallback(async () => {
+    setDetectionsLoading(true);
+    setDetectionsError(null);
+    try {
+      const data = await api.getAiDetectionList();
+      setAllDetections(data.detections ?? []);
+      setDetectionsTotal(data.total ?? 0);
+      setDetectionsLoaded(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '获取 AI 检测记录失败';
+      setDetectionsError(message);
+      setAllDetections([]);
+      setDetectionsTotal(0);
+    } finally {
+      setDetectionsLoading(false);
+    }
+  }, []);
+
+  // ── Fetch standalone humanizations ──
+  const fetchHumanizations = useCallback(async () => {
+    setHumanizationsLoading(true);
+    setHumanizationsError(null);
+    try {
+      const data = await api.getStandaloneHumanizeList();
+      setAllHumanizations(data.humanizations ?? []);
+      setHumanizationsTotal(data.total ?? 0);
+      setHumanizationsLoaded(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '获取降 AI 记录失败';
+      setHumanizationsError(message);
+      setAllHumanizations([]);
+      setHumanizationsTotal(0);
+    } finally {
+      setHumanizationsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'tasks') {
       fetchTasks();
@@ -166,8 +243,45 @@ export default function Tasks() {
     } else if (activeTab === 'scorings' && !scoringsLoaded) {
       // Lazy-load: only fetch on first visit; keep cached state on tab switches
       fetchScorings();
+    } else if (activeTab === 'ai-detections' && !detectionsLoaded) {
+      fetchDetections();
+    } else if (activeTab === 'standalone-humanizations' && !humanizationsLoaded) {
+      fetchHumanizations();
     }
-  }, [activeTab, fetchTasks, fetchRevisions, fetchScorings, scoringsLoaded]);
+  }, [
+    activeTab,
+    fetchTasks,
+    fetchRevisions,
+    fetchScorings,
+    scoringsLoaded,
+    fetchDetections,
+    detectionsLoaded,
+    fetchHumanizations,
+    humanizationsLoaded,
+  ]);
+
+  // ── Standalone humanize download ──
+  const handleHumanizationDownload = async (humanizationId: string) => {
+    setHumanizationDownloadingId(humanizationId);
+    try {
+      const detail = await api.getStandaloneHumanize(humanizationId);
+      const outputFiles = (detail.files ?? []).filter(
+        (f: { category: string }) => f.category === 'humanized_doc',
+      );
+      if (outputFiles.length === 0) {
+        alert('该记录暂无可下载的文件（可能已过期）');
+        return;
+      }
+      const file = outputFiles[0];
+      const { url } = await api.getStandaloneHumanizeDownloadUrl(humanizationId, file.id);
+      triggerDownload(url, file.original_name);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '获取下载链接失败';
+      alert(message);
+    } finally {
+      setHumanizationDownloadingId(null);
+    }
+  };
 
   // ── Client-side filtering ──
   const tasks = allTasks.filter(task => {
@@ -346,6 +460,26 @@ export default function Tasks() {
           }`}
         >
           评审记录
+        </button>
+        <button
+          onClick={() => setActiveTab('ai-detections')}
+          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'ai-detections'
+              ? 'border-red-700 text-red-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          AI 检测记录
+        </button>
+        <button
+          onClick={() => setActiveTab('standalone-humanizations')}
+          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'standalone-humanizations'
+              ? 'border-red-700 text-red-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          独立降 AI 记录
         </button>
       </div>
 
@@ -839,6 +973,257 @@ export default function Tasks() {
                     <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">上一页</Button>
                     <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">下一页</Button>
                   </div>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ════════════════════ AI 检测记录 Tab ════════════════════ */}
+      {activeTab === 'ai-detections' && (
+        <Card className="border-gray-200 shadow-sm">
+          <CardHeader className="border-b border-gray-100 bg-gray-50/50">
+            <CardTitle className="text-lg">AI 检测记录</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            {detectionsLoading ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-gray-400">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>加载中...</span>
+              </div>
+            ) : detectionsError ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <AlertCircle className="w-8 h-8 text-red-400" />
+                <p className="text-sm text-red-600">{detectionsError}</p>
+                <Button variant="outline" size="sm" onClick={fetchDetections} className="gap-2">
+                  <RefreshCw className="w-3.5 h-3.5" /> 重试
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left text-gray-500 min-w-[720px]">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b border-gray-200">
+                      <tr>
+                        <th scope="col" className="px-6 py-4 w-[30%]">检测 ID</th>
+                        <th scope="col" className="px-6 py-4 w-[15%]">AI 可能性</th>
+                        <th scope="col" className="px-6 py-4 w-[15%]">状态</th>
+                        <th scope="col" className="px-6 py-4 w-[20%]">创建时间</th>
+                        <th scope="col" className="px-6 py-4 w-[10%]">消耗积分</th>
+                        <th scope="col" className="px-6 py-4 w-[10%] text-right">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allDetections.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                            暂无 AI 检测记录
+                          </td>
+                        </tr>
+                      ) : (
+                        allDetections.map((item) => (
+                          <tr key={item.id} className="bg-white border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-3">
+                                <div className="bg-red-50 p-2 rounded-lg">
+                                  <Bot className="w-4 h-4 text-red-700" />
+                                </div>
+                                <div>
+                                  <div className="font-mono text-xs text-gray-700">{item.id.slice(0, 8)}</div>
+                                  <div className="text-xs text-gray-400 mt-0.5">
+                                    {item.input_word_count.toLocaleString()} 词
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              {item.status === 'completed' && item.overall_score !== null ? (
+                                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
+                                  item.overall_score >= 60
+                                    ? 'bg-red-50 text-red-700 border border-red-200'
+                                    : item.overall_score >= 30
+                                    ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                    : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                }`}>
+                                  {Math.round(item.overall_score)}%
+                                </span>
+                              ) : (
+                                <span className="text-gray-400">-</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4">
+                              {item.status === 'completed' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  <CheckCircle2 className="w-3.5 h-3.5" /> 完成
+                                </span>
+                              )}
+                              {(item.status === 'processing' || item.status === 'initializing') && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                                  <Clock className="w-3.5 h-3.5 animate-pulse" /> 处理中
+                                </span>
+                              )}
+                              {item.status === 'failed' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200">
+                                  <AlertCircle className="w-3.5 h-3.5" /> 失败
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-gray-500 font-mono text-xs">
+                              {item.created_at ? formatDate(item.created_at) : '-'}
+                            </td>
+                            <td className="px-6 py-4 font-medium text-gray-900">
+                              {(item.settled_credits ?? item.frozen_credits) > 0
+                                ? `-${item.settled_credits ?? item.frozen_credits}`
+                                : '-'}
+                            </td>
+                            <td className="px-6 py-4 text-right">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="gap-2"
+                                onClick={() => navigate('/dashboard/ai-tools')}
+                              >
+                                打开页面
+                              </Button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-white">
+                  <div className="text-sm text-gray-500">共 {detectionsTotal} 条记录</div>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ════════════════════ 独立降 AI 记录 Tab ════════════════════ */}
+      {activeTab === 'standalone-humanizations' && (
+        <Card className="border-gray-200 shadow-sm">
+          <CardHeader className="border-b border-gray-100 bg-gray-50/50">
+            <CardTitle className="text-lg">独立降 AI 记录</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            {humanizationsLoading ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-gray-400">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                <span>加载中...</span>
+              </div>
+            ) : humanizationsError ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <AlertCircle className="w-8 h-8 text-red-400" />
+                <p className="text-sm text-red-600">{humanizationsError}</p>
+                <Button variant="outline" size="sm" onClick={fetchHumanizations} className="gap-2">
+                  <RefreshCw className="w-3.5 h-3.5" /> 重试
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left text-gray-500 min-w-[720px]">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b border-gray-200">
+                      <tr>
+                        <th scope="col" className="px-6 py-4 w-[30%]">降 AI ID</th>
+                        <th scope="col" className="px-6 py-4 w-[15%]">降 AI 后字数</th>
+                        <th scope="col" className="px-6 py-4 w-[15%]">状态</th>
+                        <th scope="col" className="px-6 py-4 w-[20%]">创建时间</th>
+                        <th scope="col" className="px-6 py-4 w-[10%]">消耗积分</th>
+                        <th scope="col" className="px-6 py-4 w-[10%] text-right">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allHumanizations.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                            暂无独立降 AI 记录
+                          </td>
+                        </tr>
+                      ) : (
+                        allHumanizations.map((item) => (
+                          <tr key={item.id} className="bg-white border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-3">
+                                <div className="bg-red-50 p-2 rounded-lg">
+                                  <Sparkles className="w-4 h-4 text-red-700" />
+                                </div>
+                                <div>
+                                  <div className="font-mono text-xs text-gray-700">{item.id.slice(0, 8)}</div>
+                                  <div className="text-xs text-gray-400 mt-0.5">
+                                    原文 {item.input_word_count.toLocaleString()} 词
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 font-medium text-gray-900">
+                              {item.humanized_word_count !== null
+                                ? `${item.humanized_word_count.toLocaleString()} 词`
+                                : '-'}
+                            </td>
+                            <td className="px-6 py-4">
+                              {item.status === 'completed' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  <CheckCircle2 className="w-3.5 h-3.5" /> 完成
+                                </span>
+                              )}
+                              {(item.status === 'processing' || item.status === 'initializing') && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                                  <Clock className="w-3.5 h-3.5 animate-pulse" /> 处理中
+                                </span>
+                              )}
+                              {item.status === 'failed' && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200">
+                                  <AlertCircle className="w-3.5 h-3.5" /> 失败
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-gray-500 font-mono text-xs">
+                              {item.created_at ? formatDate(item.created_at) : '-'}
+                            </td>
+                            <td className="px-6 py-4 font-medium text-gray-900">
+                              {(item.settled_credits ?? item.frozen_credits) > 0
+                                ? `-${item.settled_credits ?? item.frozen_credits}`
+                                : '-'}
+                            </td>
+                            <td className="px-6 py-4 text-right">
+                              {item.status === 'completed' ? (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="gap-2"
+                                  disabled={humanizationDownloadingId === item.id}
+                                  onClick={() => handleHumanizationDownload(item.id)}
+                                >
+                                  {humanizationDownloadingId === item.id ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Download className="w-3.5 h-3.5" />
+                                  )}
+                                  下载
+                                </Button>
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="gap-2"
+                                  onClick={() => navigate('/dashboard/ai-tools')}
+                                >
+                                  打开页面
+                                </Button>
+                              )}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-white">
+                  <div className="text-sm text-gray-500">共 {humanizationsTotal} 条记录</div>
                 </div>
               </>
             )}

@@ -198,6 +198,135 @@ export const api = {
   getScoringReportDownloadUrl: (scoringId: string, fileId: string) =>
     request<any>(`/api/scoring/${scoringId}/file/${fileId}/download`),
 
+  // AI Detection (检测 AI)
+  // 前端选文件后立即调 estimate 显示「预估 N 积分」；不扣积分不入库。
+  estimateAiDetection: async (file: File) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    const res = await fetch(`${API_BASE}/api/ai-detection/estimate`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${session.access_token}` },
+      body: fd,
+    });
+    return parseApiResponse<{
+      filename: string;
+      words: number;
+      pricePerWord: number;
+      estimatedAmount: number;
+      tooShort: boolean;
+      tooLong: boolean;
+      isScannedPdf: boolean;
+      isImage: boolean;
+    }>(res, '预估失败');
+  },
+  createAiDetection: async (file: File) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const formData = new FormData();
+    formData.append('files', file);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const res = await fetch(`${API_BASE}/api/ai-detection/create`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${session.access_token}` },
+        body: formData,
+        signal: controller.signal,
+      });
+      return await parseApiResponse<{ id: string; status: string } & Record<string, unknown>>(
+        res,
+        '创建检测请求失败',
+      );
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error('上传超时（60 秒），请检查网络或文件大小后重试。');
+      }
+      if (err instanceof TypeError && /fetch/i.test(err.message)) {
+        throw new Error('上传失败：网络不稳定或文件过大，请重试。');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  },
+  getAiDetectionCurrent: () => request<any>('/api/ai-detection/current'),
+  getAiDetection: (id: string) => request<any>(`/api/ai-detection/${id}`),
+  getAiDetectionList: (limit = 20, offset = 0) =>
+    request<any>(`/api/ai-detection/list?limit=${limit}&offset=${offset}`),
+
+  // Standalone Humanize (独立降 AI)
+  estimateStandaloneHumanize: async (file: File) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    const res = await fetch(`${API_BASE}/api/standalone-humanize/estimate`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${session.access_token}` },
+      body: fd,
+    });
+    return parseApiResponse<{
+      filename: string;
+      words: number;
+      pricePerWord: number;
+      estimatedAmount: number;
+      tooShort: boolean;
+      tooLong: boolean;
+      isScannedPdf: boolean;
+      isImage: boolean;
+    }>(res, '预估失败');
+  },
+  createStandaloneHumanize: async (file: File) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('未登录');
+
+    const formData = new FormData();
+    formData.append('files', file);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60_000);
+    try {
+      const res = await fetch(`${API_BASE}/api/standalone-humanize/create`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${session.access_token}` },
+        body: formData,
+        signal: controller.signal,
+      });
+      return await parseApiResponse<{ id: string; status: string } & Record<string, unknown>>(
+        res,
+        '创建降 AI 请求失败',
+      );
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error('上传超时（60 秒），请检查网络或文件大小后重试。');
+      }
+      if (err instanceof TypeError && /fetch/i.test(err.message)) {
+        throw new Error('上传失败：网络不稳定或文件过大，请重试。');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  },
+  getStandaloneHumanizeCurrent: () => request<any>('/api/standalone-humanize/current'),
+  getStandaloneHumanize: (id: string) => request<any>(`/api/standalone-humanize/${id}`),
+  getStandaloneHumanizeList: (limit = 20, offset = 0) =>
+    request<any>(`/api/standalone-humanize/list?limit=${limit}&offset=${offset}`),
+  getStandaloneHumanizeDownloadUrl: (humanizationId: string, fileId: string) =>
+    request<any>(`/api/standalone-humanize/${humanizationId}/file/${fileId}/download`),
+  acknowledgeStandaloneHumanize: (humanizationId: string) =>
+    request<{ id: string }>(`/api/standalone-humanize/${humanizationId}/acknowledge`, {
+      method: 'POST',
+    }),
+
   // Chat
   sendChatMessage: (message: string, history: Array<{ role: string; content: string }>) =>
     request<{ reply: string; remainingToday: number }>('/api/chat/message', {

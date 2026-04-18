@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { PenLine, LayoutDashboard, ListTodo, Wallet, LogOut, User, Menu, X, FileEdit, Gauge } from 'lucide-react';
+import { PenLine, LayoutDashboard, ListTodo, Wallet, LogOut, User, Menu, X, FileEdit, Gauge, Bot } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useBalance } from '../../contexts/BalanceContext';
@@ -24,6 +24,7 @@ export default function DashboardLayout() {
     { name: '工作台', href: '/dashboard/workspace', icon: LayoutDashboard },
     { name: '文章修改', href: '/dashboard/revision', icon: FileEdit },
     { name: '文章评审', href: '/dashboard/scoring', icon: Gauge },
+    { name: '检测 AI / 降 AI', href: '/dashboard/ai-tools', icon: Bot },
     { name: '我的任务', href: '/dashboard/tasks', icon: ListTodo },
     { name: '账户额度', href: '/dashboard/recharge', icon: Wallet },
   ];

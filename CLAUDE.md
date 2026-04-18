@@ -191,6 +191,20 @@ npx -y @aisuite/chub annotate --list
 - 文章评审反馈语言规则（2026-04-16）：SYSTEM prompt 强制 GPT 用简体中文写 overall_comment / strengths / weaknesses / suggestions / top_suggestions，无论文章原文是什么语言；维度名字保留 rubric 原文（未上传 rubric 时用默认英文 "Content & argument" 等五维度名）；引用论文原文时放引号里保留原始语言
 - 文章评审 PDF 字体规则：`scoringPdfService` 必须用 `server/fonts/SourceHanSansCN-Regular.otf`（Source Han Sans CN Regular，OFL 开源许可）渲染所有中文内容，pdfkit 内置 Times-Roman / Helvetica 不含 CJK 字形会渲染成方块；字体文件 git 追踪必须随代码一起部署
 - 文章评审材料清理规则（2026-04-16 补漏）：`cleanupRuntime` 新增 `cleanupExpiredScoringMaterials`（3 天后删终态 scoring 的材料）和 `cleanupExpiredScoringReports`（按 `expires_at` 删过期 PDF 报告）；此前 `cleanupExpiredMaterials` 只扫 `task_files` 不扫 `scoring_files` 是个漏洞
+- 2026-04-18 新上线功能：检测 AI / 降 AI 二合一独立页面（`/dashboard/ai-tools`）
+  - 顶部 Tab 切换：[检测 AI] / [降 AI]；两条功能线独立 DB 锁、独立 pollRef，可并行运行
+  - 两者都走 Undetectable.ai 官方 API，复用现有 `UNDETECTABLE_API_KEY`（不新增 env）
+- 检测 AI 规则：单价 0.05 积分/字（由 `system_config.ai_detection_price_per_word` 控制）；最低 200 词、最高 30,000 词（Undetectable 硬上限）；只支持 PDF/DOCX/TXT，图片/扫描件前置拒绝
+- 检测 AI API 规则：调 `POST https://ai-detect.undetectable.ai/detect` + 轮询 `POST /query`（REST，非 WebSocket）；认证用请求体 `key` 字段，不是 apikey header；返回 `result`（0-100 AI 概率，越高越 AI）+ `result_details.scoreXxx`（各子检测器的**人工编写%**，方向和 `result` 相反！前端必须换算 `100 - scoreXxx` 再画柱状图以保证方向一致）
+- 检测 AI 子检测器规则：Undetectable 一次调用返回 8 家聚合分数（scoreGptZero / scoreOpenAI / scoreCopyLeaks / scoreSapling / scoreWriter / scoreContentAtScale / scoreZeroGPT / scoreCrossPlag），全部存到 `ai_detections.result_json` 永久保存；前端用纯 CSS 柱状图展示，不引入图表库
+- 检测 AI 异步化规则：和 scoring 一样 `initializing → processing → completed/failed` 四态；`POST /api/ai-detection/create` 只做快速上传 + INSERT initializing + 立即返回，后台 `prepareAiDetection` 跑 pdf-parse + freezeCredits + UPDATE processing + 触发 `executeAiDetection`
+- 独立降 AI 规则：单价 0.4 积分/字（复用 `humanize_price_per_word`，**不新增单价**）；最低 500 词、最高 30,000 词；只支持 PDF/DOCX/TXT；一次一份文件；复用现有 `undetectableClient.humanizeText`（v11sr + More Human + University + Essay）
+- 独立降 AI 交付规则：生成的 `.docx` 用 `buildFormattedPaperDocBuffer` 简单版（paperTitle 从原稿文件名去扩展名提取、不带课号、不带封面/参考文献模板），降 AI 后的正文永久存在 `standalone_humanizations.humanized_text`
+- 独立降 AI 卡死回收规则：`standalone_humanizations` 表的 `initializing` / `processing` 记录由 `cleanupRuntime.cleanupStuckStandaloneHumanizations` 兜底，45 分钟超时；`initializing` 阶段卡死只清文件不退款（未冻结），`processing` 阶段卡死 refund + 标 failed
+- 独立降 AI acknowledged 规则：沿用 humanize_jobs 的 acknowledged 字段语义，`standalone_humanizations.acknowledged=false` 表示用户尚未关闭结果页；下次打开 `/dashboard/ai-tools` 会恢复显示最新一条未确认的完成/失败结果；用户点"降下一篇"时前端调 `POST /api/standalone-humanize/:id/acknowledge` 标记后就不再恢复
+- AI 检测 / 独立降 AI 并发规则：每张主表各自 1 把"同用户同时 1 进行中任务"的部分唯一索引锁（覆盖 initializing + processing）；两条功能线互不干扰，也不干扰现有工作台降 AI；用户可同时有 1 个工作台降 AI + 1 个检测 AI + 1 个独立降 AI 并行
+- AI 检测 / 独立降 AI 材料清理规则：`cleanupRuntime` 新增 `cleanupExpiredAiDetectionMaterials`（3 天后删终态 detection 的原稿）和 `cleanupExpiredStandaloneHumanizationFiles`（material 按 3 天 / humanized_doc 按 `expires_at` 过期）
+- AI 检测 / 独立降 AI 轮询规则：检测 AI 前端初始 2s 递增 2s 到 15s 上限、总超时 15 min；独立降 AI 前端初始 5s 递增 3s 到 15s 上限、总超时 20 min；后端 cleanupRuntime 45 min 兜底
 - 清理规则：`outline_ready` 代表等待用户确认大纲，不能被清理服务当成卡死任务自动失败
 - 安全规则：前端 Supabase 地址和公开 key 只能从环境变量读取，不能再在源码里写真实兜底值
 - 安全规则：后端跨域白名单必须走 `ALLOWED_ORIGINS`，不能再全开放
@@ -234,7 +248,8 @@ npx -y @aisuite/chub annotate --list
 | `/dashboard/workspace` | Workspace | 核心工作台 |
 | `/dashboard/revision` | Revision | 文章修改（上传文章 + 修改要求 → Claude 修改 → 下载） |
 | `/dashboard/scoring` | Scoring | 文章评审（上传文章 / rubric / brief → GPT 模拟学术评审 → PDF 报告 + 网页展示） |
-| `/dashboard/tasks` | Tasks | 历史任务列表 + 文章修改记录 + 评审记录（三 tab 切换） |
+| `/dashboard/ai-tools` | AiTools | 检测 AI / 降 AI（顶部 Tab 切换）：两条独立功能线并行，检测调 Undetectable Detector 聚合 8 家分数，降 AI 复用 Undetectable Humanization 引擎 |
+| `/dashboard/tasks` | Tasks | 历史任务列表 + 文章修改记录 + 评审记录 + AI 检测记录 + 独立降 AI 记录（五 tab 切换） |
 | `/dashboard/recharge` | Recharge | 余额和激活码兑换 |
 | `/activation-rules` | ActivationRules | 静态页 |
 | `/privacy-policy` | PrivacyPolicy | 静态页 |
@@ -275,6 +290,7 @@ npx -y @aisuite/chub annotate --list
 4. 不能为了图快，在公开仓库里写入密钥明文
 5. 不能推翻现有页面结构和主路由
    - 例外：`/dashboard/scoring` 为 2026-04-15 用户明示授权新增的"文章评审"独立主路由，不算违反红线 #5
+   - 例外：`/dashboard/ai-tools` 为 2026-04-18 用户明示授权新增的"检测 AI / 降 AI"独立主路由，不算违反红线 #5
 
 ## 改代码前先检查
 

@@ -16,6 +16,7 @@ import Tasks from './pages/dashboard/Tasks';
 import Recharge from './pages/dashboard/Recharge';
 import Revision from './pages/dashboard/Revision';
 import Scoring from './pages/dashboard/Scoring';
+import AiTools from './pages/dashboard/AiTools';
 import ActivationRules from './pages/ActivationRules';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import TermsOfService from './pages/TermsOfService';
@@ -52,6 +53,7 @@ export default function App() {
           <Route path="workspace" element={<Workspace />} />
           <Route path="revision" element={<Revision />} />
           <Route path="scoring" element={<Scoring />} />
+          <Route path="ai-tools" element={<AiTools />} />
           <Route path="tasks" element={<Tasks />} />
           <Route path="recharge" element={<Recharge />} />
         </Route>
