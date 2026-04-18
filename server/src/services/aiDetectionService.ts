@@ -15,7 +15,9 @@ import {
 import {
   undetectableDetectorClient,
   type DetectAiResult,
+  type DetectedSentence,
 } from '../lib/undetectableDetector';
+import { env } from '../lib/runtimeEnv';
 import { recordAuditLog } from './auditLogService';
 
 // ---------------------------------------------------------------------------
@@ -47,7 +49,17 @@ export interface AiDetectionServiceDeps {
 
 export const defaultAiDetectionServiceDeps: AiDetectionServiceDeps = {
   material: defaultScoringMaterialDeps,
-  runDetector: (text) => undetectableDetectorClient.detectAi(text),
+  // 2026-04-19 改成走 WebSocket 句子级；如果 UNDETECTABLE_USER_ID 没配会 fallback 到篇章级
+  // （不会崩但前端看不到句子标红；在日志里提醒运维）
+  runDetector: (text) => {
+    if (env.undetectableUserId) {
+      return undetectableDetectorClient.detectAiWithSentences(text);
+    }
+    console.warn(
+      '[ai_detection] UNDETECTABLE_USER_ID 未配置，fallback 到篇章级 REST（前端看不到句子标红）',
+    );
+    return undetectableDetectorClient.detectAi(text);
+  },
   now: () => Date.now(),
 };
 
@@ -510,6 +522,9 @@ export async function executeAiDetection(
           overall_score: detectResult.overallScore,
           result_details: detectResult.resultDetails,
           undetectable_document_id: detectResult.documentId,
+          // 句子级结果（走 WebSocket 时有值，走篇章级 fallback 时 undefined）
+          // 每项：{ chunk: 句子原文, result: 0-1 浮点 AI 概率, label?: 'Human'|'AI' }
+          sentences: detectResult.sentences,
           raw: detectResult.raw,
         },
         updated_at: new Date().toISOString(),

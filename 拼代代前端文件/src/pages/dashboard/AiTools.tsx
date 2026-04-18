@@ -11,6 +11,7 @@ import {
   Bot,
   Shield,
   Sparkles,
+  Info,
 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { triggerDownload } from '../../lib/downloadFile';
@@ -66,9 +67,20 @@ interface DetectionResultDetails {
   [key: string]: number | undefined;
 }
 
+interface DetectionSentence {
+  /** 句子原文 */
+  chunk: string;
+  /** AI 概率 0-1 浮点（注意：整体 overall_score 是 0-100！渲染时要 × 100） */
+  result: number;
+  /** Undetectable 附带分类 'Human'|'AI'，前端可选展示 */
+  label?: string;
+}
+
 interface DetectionResultJson {
   overall_score?: number;
   result_details?: DetectionResultDetails;
+  /** 句子级结果（WebSocket 流程有值；老数据或 fallback 时 undefined） */
+  sentences?: DetectionSentence[];
   undetectable_document_id?: string;
   raw?: Record<string, unknown>;
 }
@@ -179,13 +191,79 @@ function aiTextColorClass(aiPct: number) {
   return 'text-emerald-700 border-emerald-200 bg-emerald-50';
 }
 
+// 句子级标红（底色更浅，不盖过文字）
+function sentenceBgClass(aiPct: number) {
+  if (aiPct >= 60) return 'bg-red-100';
+  if (aiPct >= 30) return 'bg-amber-100';
+  return 'bg-emerald-50';
+}
+
+// ============================================================================
+// 客服提示 Banner（检测 AI 和降 AI 分开文案）
+// ============================================================================
+
+function DetectionCustomerBanner() {
+  return (
+    <div className="border border-amber-200 bg-amber-50 rounded-lg p-3 text-sm text-amber-900 flex items-start gap-2">
+      <Info className="h-4 w-4 mt-0.5 shrink-0" />
+      <span>
+        网络检测器不同于大学系统内的 Turnitin 检测，仅供参考。如需 Turnitin 检测报告请联系客服。
+      </span>
+    </div>
+  );
+}
+
+function HumanizeCustomerBanner() {
+  return (
+    <div className="border border-amber-200 bg-amber-50 rounded-lg p-3 text-sm text-amber-900 flex items-start gap-2">
+      <Info className="h-4 w-4 mt-0.5 shrink-0" />
+      <span>
+        机器降 AI 会导致一定程度的字数膨胀，需人工二次检查。如需精准润色人工降 AI 请联系客服。
+      </span>
+    </div>
+  );
+}
+
+// ============================================================================
+// 句子级标红组件
+// ============================================================================
+
+function SentenceHighlights({ sentences }: { sentences: DetectionSentence[] }) {
+  return (
+    <div className="border border-gray-200 bg-white rounded-lg p-6">
+      <h3 className="text-sm font-medium text-gray-800 mb-3">
+        原文逐句 AI 概率（鼠标悬停看分数）
+      </h3>
+      <div className="text-sm leading-relaxed text-gray-800">
+        {sentences.map((s, i) => {
+          // chunk.result 是 0-1 浮点，乘 100 得到 AI 百分比
+          const pct = Math.round((s.result ?? 0) * 100);
+          const bg = sentenceBgClass(pct);
+          return (
+            <span
+              key={i}
+              className={`${bg} px-1 rounded`}
+              title={`AI 概率: ${pct}%${s.label ? ` · ${s.label}` : ''}`}
+            >
+              {s.chunk}{' '}
+            </span>
+          );
+        })}
+      </div>
+      <div className="text-xs text-gray-500 mt-3">
+        红色 = AI 概率 ≥60%；橙色 = 30-60%；绿色 = &lt;30%。悬停在句子上查看具体分数。
+      </div>
+    </div>
+  );
+}
+
 function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [estimate, setEstimate] = useState<EstimateDetectionInfo | null>(null);
-  const [isEstimating, setIsEstimating] = useState(false);
+  // 2026-04-19 起：预估费用 UI 已删除，直接上传冻结扣费；保留 api.estimateAiDetection
+  // 接口便于未来扩展
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [data, setData] = useState<DetectionData | null>(null);
@@ -270,7 +348,7 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
     };
   }, [startPolling, stopPolling]);
 
-  const pickFile = useCallback(async (f: File) => {
+  const pickFile = useCallback((f: File) => {
     const ext = fileExt(f.name);
     if (!ALLOWED_EXTENSIONS.has(ext)) {
       setError(`不支持 .${ext} 文件。仅支持 PDF / DOCX / TXT。`);
@@ -282,21 +360,11 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
     }
     setFile(f);
     setError(null);
-    setEstimate(null);
-    setIsEstimating(true);
-    try {
-      const est = await api.estimateAiDetection(f);
-      setEstimate(est);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '预估失败，请重试。');
-    } finally {
-      setIsEstimating(false);
-    }
   }, []);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
-    if (f) void pickFile(f);
+    if (f) pickFile(f);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -304,54 +372,24 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
     e.preventDefault();
     setIsDragging(false);
     const f = e.dataTransfer.files?.[0];
-    if (f) void pickFile(f);
+    if (f) pickFile(f);
   };
 
   const handleRemove = () => {
     setFile(null);
-    setEstimate(null);
     setError(null);
   };
 
   const handleSubmit = async () => {
     if (!file) return;
-    if (!estimate) {
-      setError('正在预估费用，请稍候。');
-      return;
-    }
-    if (estimate.isScannedPdf) {
-      setError('这似乎是扫描件 PDF，无法提取文字。请上传文字版 PDF 或 DOCX。');
-      return;
-    }
-    if (estimate.tooShort) {
-      setError(`文章至少需要 200 词，当前只有 ${estimate.words} 词。`);
-      return;
-    }
-    if (estimate.tooLong) {
-      setError(`文章超出上限（30,000 词），当前 ${estimate.words} 词。请删减后重试。`);
-      return;
-    }
-
-    // 余额前置校验
-    try {
-      const profile = (await api.getProfile()) as { balance?: number };
-      const balance = profile?.balance ?? 0;
-      if (estimate.estimatedAmount > balance) {
-        setError(
-          `需要 ${estimate.estimatedAmount} 积分，您当前余额 ${balance} 积分，请先充值后再操作。`,
-        );
-        return;
-      }
-    } catch {
-      /* 余额查询失败不阻断，由后端兜底 */
-    }
+    // 所有前置校验（扫描件/字数上下限/余额）都交由后端 prepareAiDetection 兜底，
+    // 失败路径统一标 failed + 显示 failure_reason，不冻结积分。
 
     setIsSubmitting(true);
     setError(null);
     try {
       const resp = (await api.createAiDetection(file)) as { id: string; status: string };
       setFile(null);
-      setEstimate(null);
       // 立即拉一次以拿到完整 data
       const full = (await api.getAiDetection(resp.id)) as DetectionData;
       setData(full);
@@ -366,7 +404,6 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
   const handleReset = () => {
     setData(null);
     setFile(null);
-    setEstimate(null);
     setError(null);
     stopPolling();
   };
@@ -385,9 +422,11 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
     const d = data.detection;
     const results = d.result_json?.result_details || {};
     const overall = d.overall_score ?? 0;
+    const sentences = d.result_json?.sentences;
 
     return (
       <div className="space-y-4">
+        <DetectionCustomerBanner />
         {d.status === 'processing' && (
           <div className="border border-blue-200 bg-blue-50 rounded-lg p-6 flex items-center gap-3">
             <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
@@ -485,6 +524,10 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
               </div>
             </div>
 
+            {sentences && sentences.length > 0 && (
+              <SentenceHighlights sentences={sentences} />
+            )}
+
             <button
               onClick={handleReset}
               className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
@@ -500,6 +543,7 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
   // 上传表单（包含 initializing 和未开始两种）
   return (
     <div className="space-y-4">
+      <DetectionCustomerBanner />
       {data?.detection.status === 'initializing' && (
         <div className="border border-blue-200 bg-blue-50 rounded-lg p-4 flex items-center gap-3">
           <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
@@ -556,44 +600,6 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
             </button>
           </div>
 
-          <div className="mt-3 pt-3 border-t border-gray-100 text-sm">
-            {isEstimating ? (
-              <div className="flex items-center gap-2 text-gray-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                正在解析字数...
-              </div>
-            ) : estimate ? (
-              <div className="space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-gray-600">识别字数</span>
-                  <span className="font-medium text-gray-900">
-                    {estimate.words.toLocaleString()} 词
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">预估费用</span>
-                  <span className="font-medium text-red-700">
-                    {estimate.estimatedAmount} 积分（{estimate.pricePerWord} 积分/字）
-                  </span>
-                </div>
-                {estimate.isScannedPdf && (
-                  <div className="text-xs text-red-600 mt-2">
-                    ⚠️ 这似乎是扫描件 PDF，无法提取文字，请换文字版 PDF 或 DOCX。
-                  </div>
-                )}
-                {estimate.tooShort && !estimate.isScannedPdf && (
-                  <div className="text-xs text-red-600 mt-2">
-                    ⚠️ 文章至少需要 200 词。
-                  </div>
-                )}
-                {estimate.tooLong && (
-                  <div className="text-xs text-red-600 mt-2">
-                    ⚠️ 文章超出 30,000 词上限，请删减后重试。
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </div>
         </div>
       )}
 
@@ -606,15 +612,7 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
 
       <button
         onClick={handleSubmit}
-        disabled={
-          !file
-          || isSubmitting
-          || isEstimating
-          || !estimate
-          || estimate.isScannedPdf
-          || estimate.tooShort
-          || estimate.tooLong
-        }
+        disabled={!file || isSubmitting}
         className="w-full px-4 py-3 bg-red-700 text-white rounded-lg hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
       >
         {isSubmitting ? (
@@ -639,9 +637,8 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [estimate, setEstimate] = useState<EstimateHumanizeInfo | null>(null);
-  const [isEstimating, setIsEstimating] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  // 2026-04-19 起：预估费用 UI 已删除，直接上传冻结扣费
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [data, setData] = useState<HumanizationData | null>(null);
@@ -728,7 +725,7 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
     };
   }, [startPolling, stopPolling]);
 
-  const pickFile = useCallback(async (f: File) => {
+  const pickFile = useCallback((f: File) => {
     const ext = fileExt(f.name);
     if (!ALLOWED_EXTENSIONS.has(ext)) {
       setError(`不支持 .${ext} 文件。仅支持 PDF / DOCX / TXT。`);
@@ -740,21 +737,11 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
     }
     setFile(f);
     setError(null);
-    setEstimate(null);
-    setIsEstimating(true);
-    try {
-      const est = await api.estimateStandaloneHumanize(f);
-      setEstimate(est);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '预估失败，请重试。');
-    } finally {
-      setIsEstimating(false);
-    }
   }, []);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
-    if (f) void pickFile(f);
+    if (f) pickFile(f);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -762,49 +749,23 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
     e.preventDefault();
     setIsDragging(false);
     const f = e.dataTransfer.files?.[0];
-    if (f) void pickFile(f);
+    if (f) pickFile(f);
   };
 
   const handleRemove = () => {
     setFile(null);
-    setEstimate(null);
     setError(null);
   };
 
   const handleSubmit = async () => {
-    if (!file || !estimate) return;
-    if (estimate.isScannedPdf) {
-      setError('这似乎是扫描件 PDF，无法提取文字。请上传文字版 PDF 或 DOCX。');
-      return;
-    }
-    if (estimate.tooShort) {
-      setError(`文章至少需要 500 词，当前只有 ${estimate.words} 词。`);
-      return;
-    }
-    if (estimate.tooLong) {
-      setError(`文章超出上限（30,000 词），当前 ${estimate.words} 词。请删减后重试。`);
-      return;
-    }
-
-    try {
-      const profile = (await api.getProfile()) as { balance?: number };
-      const balance = profile?.balance ?? 0;
-      if (estimate.estimatedAmount > balance) {
-        setError(
-          `需要 ${estimate.estimatedAmount} 积分，您当前余额 ${balance} 积分，请先充值后再操作。`,
-        );
-        return;
-      }
-    } catch {
-      /* 由后端兜底 */
-    }
+    if (!file) return;
+    // 前置校验交由后端 prepareStandaloneHumanize 兜底（扫描件/字数/余额）
 
     setIsSubmitting(true);
     setError(null);
     try {
       const resp = (await api.createStandaloneHumanize(file)) as { id: string; status: string };
       setFile(null);
-      setEstimate(null);
       const full = (await api.getStandaloneHumanize(resp.id)) as HumanizationData;
       setData(full);
       startPolling(resp.id);
@@ -843,7 +804,6 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
     stopPolling();
     setData(null);
     setFile(null);
-    setEstimate(null);
     setError(null);
   };
 
@@ -862,6 +822,7 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
 
     return (
       <div className="space-y-4">
+        <HumanizeCustomerBanner />
         {h.status === 'failed' && (
           <div className="border border-red-200 bg-red-50 rounded-lg p-6 flex items-start gap-3">
             <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
@@ -978,6 +939,7 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
   // 上传表单
   return (
     <div className="space-y-4">
+      <HumanizeCustomerBanner />
       {!file ? (
         <div
           className={`
@@ -1027,44 +989,6 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
             </button>
           </div>
 
-          <div className="mt-3 pt-3 border-t border-gray-100 text-sm">
-            {isEstimating ? (
-              <div className="flex items-center gap-2 text-gray-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                正在解析字数...
-              </div>
-            ) : estimate ? (
-              <div className="space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-gray-600">识别字数</span>
-                  <span className="font-medium text-gray-900">
-                    {estimate.words.toLocaleString()} 词
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">预估费用</span>
-                  <span className="font-medium text-red-700">
-                    {estimate.estimatedAmount} 积分（{estimate.pricePerWord} 积分/字）
-                  </span>
-                </div>
-                {estimate.isScannedPdf && (
-                  <div className="text-xs text-red-600 mt-2">
-                    ⚠️ 这似乎是扫描件 PDF，无法提取文字。
-                  </div>
-                )}
-                {estimate.tooShort && !estimate.isScannedPdf && (
-                  <div className="text-xs text-red-600 mt-2">
-                    ⚠️ 文章至少需要 500 词。
-                  </div>
-                )}
-                {estimate.tooLong && (
-                  <div className="text-xs text-red-600 mt-2">
-                    ⚠️ 文章超出 30,000 词上限，请删减后重试。
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </div>
         </div>
       )}
 
@@ -1077,15 +1001,7 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
 
       <button
         onClick={handleSubmit}
-        disabled={
-          !file
-          || isSubmitting
-          || isEstimating
-          || !estimate
-          || estimate.isScannedPdf
-          || estimate.tooShort
-          || estimate.tooLong
-        }
+        disabled={!file || isSubmitting}
         className="w-full px-4 py-3 bg-red-700 text-white rounded-lg hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
       >
         {isSubmitting ? (
@@ -1120,7 +1036,7 @@ export default function AiTools() {
         </h1>
         <p className="text-sm text-gray-600 mt-1">
           一次调用拿到 8 家主流检测器（GPTZero / OpenAI / Copyleaks / Sapling / Writer / ContentAtScale / ZeroGPT / CrossPlag）的聚合 AI 检测结果；
-          或上传自己的文章直接降 AI 重写。
+          或上传自己的文章直接降 AI 改写。
         </p>
       </div>
 

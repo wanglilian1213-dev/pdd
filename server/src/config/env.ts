@@ -12,6 +12,7 @@ export interface Env {
   anthropicApiKey: string;
   anthropicBaseUrl: string | undefined;
   undetectableApiKey: string;
+  undetectableUserId: string | undefined;
   allowedOrigins: string[];
   opsWhitelistEmails: string[];
   configCacheTtlMs: number;
@@ -75,6 +76,10 @@ export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
     anthropicApiKey: readRequired(rawEnv, 'ANTHROPIC_API_KEY'),
     anthropicBaseUrl: rawEnv.ANTHROPIC_BASE_URL?.trim() || undefined,
     undetectableApiKey: readRequired(rawEnv, 'UNDETECTABLE_API_KEY'),
+    // 可选：只有句子级 AI 检测（WebSocket）流程需要；篇章级 REST 不需要
+    // 配了才能走 detectAiWithSentences 展示句子级标红；没配时 aiDetectionService 会抛错让
+    // executeAiDetection 兜底退款。Railway 后台在 app 服务里加这个 env。
+    undetectableUserId: rawEnv.UNDETECTABLE_USER_ID?.trim() || undefined,
     allowedOrigins: readAllowedOrigins(rawEnv),
     opsWhitelistEmails: (rawEnv.OPS_WHITELIST_EMAILS || '')
       .split(',')

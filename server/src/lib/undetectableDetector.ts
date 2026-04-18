@@ -1,14 +1,24 @@
+import { WebSocket } from 'ws';
 import { env } from './runtimeEnv';
 
-// Undetectable.ai AI Detector REST API
-// 端点:
+// Undetectable.ai AI Detector API（REST + WebSocket 句子级两条通路）
+//
+// REST 篇章级：
 //   POST https://ai-detect.undetectable.ai/detect   → 提交检测，拿 document id
-//   POST https://ai-detect.undetectable.ai/query    → 轮询检测结果
-// 认证：请求体里带 `key` 字段（而不是 apikey header，和 humanize API 不一样）
-// 计费：每字 0.1 credit（和同账户降 AI 共用同一个字数池）
+//   POST https://ai-detect.undetectable.ai/query    → 轮询检测结果（整体分 + 8 家聚合）
+//
+// WebSocket 句子级（2026-04-19 新增）：
+//   wss://ai-detect.undetectable.ai/ws/$USER_ID
+//   流程: 建连 → send document_watch → recv document_id → REST /detect（带 id）
+//        → recv document_chunk × N → recv document_done
+//   chunk.result: 0-1 浮点（与 /query.result 的 0-100 刻度不同！前端显示时 × 100）
+//
+// 认证：REST 请求体里带 `key`；WebSocket 在 document_watch 消息体里带 api_key
+// 计费：每字 0.1 credit（REST 和 WebSocket 一致，一次 submit 只扣一次）
 // 最低/最高：建议 ≥200 词；硬上限 ≤30,000 词
 
 const DEFAULT_BASE_URL = 'https://ai-detect.undetectable.ai';
+const DEFAULT_WS_BASE_URL = 'wss://ai-detect.undetectable.ai';
 const DEFAULT_MODEL = 'xlm_ud_detector';
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -16,12 +26,22 @@ type SleepLike = (ms: number) => Promise<void>;
 
 interface DetectorDeps {
   apiKey: string;
+  userId?: string;          // 可选：仅句子级 WebSocket 流程需要
   baseUrl?: string;
+  wsBaseUrl?: string;
   fetchImpl?: FetchLike;
   sleepImpl?: SleepLike;
   pollIntervalMs?: number;
   maxPollAttempts?: number;
   perCallTimeoutMs?: number;
+  // 句子级总超时（从建连到 document_done）
+  sentenceTotalTimeoutMs?: number;
+}
+
+export interface DetectedSentence {
+  chunk: string;       // 句子原文
+  result: number;      // AI 概率 0-1 浮点
+  label?: string;      // 'Human' | 'AI'（Undetectable 附带的分类，前端可选用）
 }
 
 interface SubmitDetectionResponse {
@@ -64,6 +84,8 @@ export interface DetectAiResult {
   resultDetails: DetectorResultDetails;
   /** 原始返回，便于排查和存库 */
   raw: DetectorQueryResponse;
+  /** 句子级结果（仅 detectAiWithSentences 返回非空；篇章级 detectAi 返回 undefined） */
+  sentences?: DetectedSentence[];
 }
 
 function defaultSleep(ms: number) {
@@ -106,13 +128,16 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 
 export function createUndetectableDetectorClient({
   apiKey,
+  userId,
   baseUrl = DEFAULT_BASE_URL,
+  wsBaseUrl = DEFAULT_WS_BASE_URL,
   fetchImpl = fetch,
   sleepImpl = defaultSleep,
   // 检测 API 官方说 2-4 秒出结果，开始用 2s 间隔，最多 150 次 = 5 分钟上限
   pollIntervalMs = 2000,
   maxPollAttempts = 150,
   perCallTimeoutMs = 20_000,
+  sentenceTotalTimeoutMs = 15 * 60 * 1000, // 句子级硬超时 15 min
 }: DetectorDeps) {
   async function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
     const response = await withTimeout(
@@ -130,18 +155,24 @@ export function createUndetectableDetectorClient({
   }
 
   /**
-   * 提交检测。返回 document id 用于后续轮询。
+   * 提交检测。
+   * - 不传 clientDocumentId 走篇章级老行为：服务器生成 id 返回
+   * - 传 clientDocumentId 走句子级 WebSocket 流程：服务器复用客户端从 WebSocket 拿到的 id
    */
-  async function submitDetection(text: string): Promise<string> {
+  async function submitDetection(text: string, clientDocumentId?: string): Promise<string> {
     if (!text || text.trim().length === 0) {
       throw new Error('检测文本为空');
     }
-    const data = await postJson<SubmitDetectionResponse>('/detect', {
+    const payload: Record<string, unknown> = {
       text,
       key: apiKey,
       model: DEFAULT_MODEL,
       retry_count: 0,
-    });
+    };
+    if (clientDocumentId) {
+      payload.id = clientDocumentId;
+    }
+    const data = await postJson<SubmitDetectionResponse>('/detect', payload);
 
     const documentId = data.id?.trim();
     if (!documentId) {
@@ -199,13 +230,164 @@ export function createUndetectableDetectorClient({
     throw new Error('Undetectable Detector 轮询超时，请稍后重试。');
   }
 
+  /**
+   * 句子级检测：WebSocket 流程。
+   * 步骤：
+   *   1. 建 WebSocket wss://.../ws/$USER_ID
+   *   2. send { event_type: 'document_watch', api_key }
+   *   3. recv { event_type: 'document_id', document_id }
+   *   4. 调 REST POST /detect，body 带上一步的 document_id
+   *   5. recv { event_type: 'document_chunk', chunk, result, label } × N
+   *   6. recv { event_type: 'document_done', result }
+   *   7. 并行调 REST /query 拿整体分 + 8 家 detector scores
+   *   8. 关闭 WebSocket
+   *
+   * 任何一步失败都抛错（调用方负责退款 + 标 failed）。
+   */
+  async function detectAiWithSentences(text: string): Promise<DetectAiResult> {
+    if (!userId) {
+      throw new Error(
+        'Undetectable USER_ID 未配置，句子级检测不可用。请在服务端 env 补 UNDETECTABLE_USER_ID。',
+      );
+    }
+    if (!text || text.trim().length === 0) {
+      throw new Error('检测文本为空');
+    }
+
+    const wsUrl = `${wsBaseUrl}/ws/${userId}`;
+
+    return new Promise<DetectAiResult>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      const sentences: DetectedSentence[] = [];
+      let documentId: string | null = null;
+      let settled = false;
+      let totalTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (totalTimeoutTimer) {
+          clearTimeout(totalTimeoutTimer);
+          totalTimeoutTimer = null;
+        }
+        try {
+          if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+            ws.close();
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+
+      const settle = (result: DetectAiResult | null, error: Error | null) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else if (result) resolve(result);
+        else reject(new Error('detectAiWithSentences internal error'));
+      };
+
+      totalTimeoutTimer = setTimeout(() => {
+        settle(null, new Error(`Undetectable 句子级检测超时（${sentenceTotalTimeoutMs}ms）`));
+      }, sentenceTotalTimeoutMs);
+
+      ws.on('open', () => {
+        try {
+          ws.send(JSON.stringify({ event_type: 'document_watch', api_key: apiKey }));
+        } catch (err) {
+          settle(null, err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+
+      ws.on('message', async (data) => {
+        let evt: Record<string, any>;
+        try {
+          evt = JSON.parse(data.toString());
+        } catch (err) {
+          settle(null, new Error('WebSocket 消息解析失败'));
+          return;
+        }
+
+        try {
+          if (evt.event_type === 'document_id') {
+            if (!evt.success || !evt.document_id) {
+              settle(null, new Error(evt.error || 'document_watch 失败'));
+              return;
+            }
+            documentId = evt.document_id as string;
+
+            // 用这个 documentId 调 REST /detect 提交检测
+            await submitDetection(text, documentId);
+          } else if (evt.event_type === 'document_chunk') {
+            if (typeof evt.chunk === 'string' && typeof evt.result === 'number') {
+              sentences.push({
+                chunk: evt.chunk,
+                result: evt.result,
+                label: typeof evt.label === 'string' ? evt.label : undefined,
+              });
+            }
+          } else if (evt.event_type === 'document_done') {
+            if (!documentId) {
+              settle(null, new Error('document_done 到达时 documentId 为空'));
+              return;
+            }
+
+            // 调 /query 拿整体分 + 8 家 detector scores（字段格式和 REST 篇章级一样）
+            const query = await queryDetection(documentId);
+            const overall = typeof query.result === 'number' ? query.result : null;
+            const hasDetails = query.result_details && Object.keys(query.result_details).length > 0;
+            if (overall === null || !hasDetails) {
+              // 退一步用 document_done 里的 result（0-1 浮点 → 转 0-100）
+              const fallbackOverall = typeof evt.result === 'number' ? evt.result * 100 : null;
+              if (fallbackOverall === null) {
+                settle(null, new Error('Undetectable 返回数据不完整'));
+                return;
+              }
+              settle({
+                documentId,
+                overallScore: fallbackOverall,
+                resultDetails: {},
+                raw: { result: fallbackOverall, result_details: {}, status: 'done' } as DetectorQueryResponse,
+                sentences,
+              }, null);
+              return;
+            }
+
+            settle({
+              documentId,
+              overallScore: overall,
+              resultDetails: query.result_details || {},
+              raw: query,
+              sentences,
+            }, null);
+          } else if (evt.event_type === 'error' || evt.error) {
+            settle(null, new Error(evt.error || evt.message || 'Undetectable WebSocket 返回错误'));
+          }
+        } catch (err) {
+          settle(null, err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+
+      ws.on('error', (err) => {
+        settle(null, err instanceof Error ? err : new Error(String(err)));
+      });
+
+      ws.on('close', () => {
+        if (!settled) {
+          settle(null, new Error('Undetectable WebSocket 连接提前关闭'));
+        }
+      });
+    });
+  }
+
   return {
     submitDetection,
     queryDetection,
     detectAi,
+    detectAiWithSentences,
   };
 }
 
 export const undetectableDetectorClient = createUndetectableDetectorClient({
   apiKey: env.undetectableApiKey,
+  userId: env.undetectableUserId,
 });
