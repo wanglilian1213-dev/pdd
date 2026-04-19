@@ -67,7 +67,13 @@ export function splitBodyAndReserved(text: string): { body: string; reserved: st
 // ---------------------------------------------------------------------------
 
 const MAX_CONDENSE_ATTEMPTS = 3;
-const CONDENSE_SINGLE_TIMEOUT_MS = 5 * 60 * 1000; // 单次最多 5 分钟
+// 单次 3 分钟（不是 5 分钟）—— 时间预算：
+//   Undetectable 降 AI 基线 ~10 min + condense 3 次 × 3 min = 19 min
+//   < 前端轮询总超时 20 min（POLL_TIMEOUT_HUMANIZE_MS）
+//   < cleanupRuntime 兜底 45 min
+// 如果改成 5 min（原默认），3 次重试 = 15 min，加 Undetectable 10 min = 25 min，
+// 会撑爆前端轮询上限，用户看到"降 AI 超时"但后端还在跑。
+const CONDENSE_SINGLE_TIMEOUT_MS = 3 * 60 * 1000;
 
 function buildCondenseSystemPrompt(
   currentWords: number,
