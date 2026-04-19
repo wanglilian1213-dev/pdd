@@ -15,6 +15,10 @@ import {
 import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { recordAuditLog } from './auditLogService';
+import {
+  splitBodyAndReserved,
+  condenseHumanizedBody,
+} from './standaloneHumanizeCondenseService';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -41,6 +45,11 @@ export interface StandaloneHumanizeServiceDeps {
   material: ScoringMaterialDeps;
   humanizeText: (text: string) => Promise<HumanizeTextResult>;
   buildDocx: (text: string, options: { paperTitle: string }) => Promise<Buffer>;
+  /**
+   * 删减膨胀后的正文到目标字数范围。
+   * 抛错代表整个删减失败（GPT 调用挂掉等），上层降级交付未删减版。
+   */
+  condenseBody: (text: string, minWords: number, maxWords: number) => Promise<string>;
   now: () => number;
 }
 
@@ -48,6 +57,7 @@ export const defaultStandaloneHumanizeServiceDeps: StandaloneHumanizeServiceDeps
   material: defaultScoringMaterialDeps,
   humanizeText: (text) => undetectableClient.humanizeText(text),
   buildDocx: (text, options) => buildFormattedPaperDocBuffer(text, { paperTitle: options.paperTitle }),
+  condenseBody: (text, min, max) => condenseHumanizedBody(text, min, max),
   now: () => Date.now(),
 };
 
@@ -529,14 +539,52 @@ export async function executeStandaloneHumanize(
       throw new AppError(500, '无法读取文章正文。');
     }
 
-    // 3. 调 Undetectable Humanization
-    const { documentId, output } = await deps.humanizeText(text);
-    const humanizedText = output.trim();
-    if (!humanizedText) throw new AppError(500, '降 AI 返回空文本。');
+    // 3. 分离正文和保护区（引用/附录）
+    //    只把正文送 Undetectable 降 AI，保护区原样保留
+    const { body: originalBody, reserved } = splitBodyAndReserved(text);
+    const originalBodyWords = countWords(originalBody);
 
+    // 正文过短（<200 词）Undetectable 效果差且可能直接报错，提前失败退款
+    if (originalBodyWords < 200) {
+      throw new AppError(
+        500,
+        '文章正文（去除参考文献 / 附录后）字数不足 200 词，无法降 AI。请上传更完整的文档。',
+      );
+    }
+
+    // 4. 调 Undetectable Humanization（只发正文）
+    const { documentId, output } = await deps.humanizeText(originalBody);
+    const humanizedBodyRaw = output.trim();
+    if (!humanizedBodyRaw) throw new AppError(500, '降 AI 返回空文本。');
+
+    // 5. 字数删减：以原正文字数为基准 ±10%
+    const minTargetWords = Math.round(originalBodyWords * 0.9);
+    const maxTargetWords = Math.round(originalBodyWords * 1.1);
+    const humanizedBodyRawWords = countWords(humanizedBodyRaw);
+
+    let humanizedBody = humanizedBodyRaw;
+    if (humanizedBodyRawWords > maxTargetWords) {
+      // 只有超出上限才触发删减；低于下限不做处理（Undetectable 膨胀是主要问题）
+      try {
+        humanizedBody = await deps.condenseBody(humanizedBodyRaw, minTargetWords, maxTargetWords);
+      } catch (condenseError) {
+        // 降级交付：整次 GPT 调用失败（超时/错误）→ 用未删减版，不让整条任务失败
+        // 用户已经付了降 AI 的钱，字数超标但还是能拿到降 AI 后的内容
+        captureError(condenseError, 'standalone_humanize.condense_failed', { humanizationId });
+        console.warn(
+          `[standalone-humanize] condense failed for ${humanizationId}, delivering un-condensed humanized body (${humanizedBodyRawWords} words, target ${minTargetWords}-${maxTargetWords})`,
+        );
+        humanizedBody = humanizedBodyRaw;
+      }
+    }
+
+    // 6. 拼回保护区（refs / 附录）
+    const humanizedText = reserved
+      ? humanizedBody.trimEnd() + '\n\n' + reserved
+      : humanizedBody;
     const humanizedWordCount = countWords(humanizedText);
 
-    // 4. 生成 docx
+    // 7. 生成 docx
     const articleTitle = extractArticleTitle(originalFilename);
     const docBuffer = await deps.buildDocx(humanizedText, { paperTitle: articleTitle });
 
