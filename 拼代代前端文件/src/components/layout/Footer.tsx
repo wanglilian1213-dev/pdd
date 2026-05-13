@@ -14,7 +14,7 @@ export default function Footer() {
               <span className="font-bold text-xl tracking-tight text-white">拼代代</span>
             </Link>
             <p className="text-sm text-gray-400 leading-relaxed">
-              专业的文章自动写作 SaaS 平台。为接单工作室和学生用户提供高效、稳定、可控的智能写作交付方案。
+              专为学术写作场景打造的专业平台。独家 Academic-RLHF™ 对齐算法、真实可核验文献、大纲先行流程。
             </p>
           </div>
           
@@ -41,7 +41,7 @@ export default function Footer() {
           <div>
             <h4 className="text-white font-semibold mb-4">免责声明</h4>
             <p className="text-xs text-gray-500 leading-relaxed">
-              本平台提供的自动写作服务仅供参考与辅助，用户需对最终生成内容的合法性、原创性及合规性负责。平台不对生成内容的最终使用结果承担法律责任。
+              本平台提供的智能写作辅助服务仅供参考与学习，用户需对最终生成内容的合法性、原创性及合规性负责。平台不对生成内容的最终使用结果承担法律责任。
             </p>
           </div>
         </div>

@@ -127,3 +127,77 @@
     @apply font-sans;
     }
 }
+
+
+/* ============================================================
+ * Landing page custom utilities (added 2026-04-19 redesign)
+ * 这些类仅被 Landing.tsx 使用，作为 Tailwind 原子类的补充。
+ * ============================================================ */
+
+/* 浅灰色网格背景（Hero 区与承诺区使用） */
+.grid-bg {
+  background-image:
+    linear-gradient(to right, rgba(0, 0, 0, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.04) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* 深色栅格背景（How 区、Final CTA 使用） */
+.dark-grid-bg {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* 红色渐变文字（品牌色强调） */
+.text-gradient-red {
+  background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* 悬浮抬起效果 */
+.card-lift {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.card-lift:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.15);
+}
+
+/* 信任条横向滚动 */
+.marquee {
+  display: flex;
+  overflow: hidden;
+  gap: 3rem;
+}
+.marquee-inner {
+  display: flex;
+  gap: 3rem;
+  animation: landing-marquee-scroll 40s linear infinite;
+  white-space: nowrap;
+}
+@keyframes landing-marquee-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* 浮动引用卡微动效 */
+@keyframes landing-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+.animate-landing-float {
+  animation: landing-float 4s ease-in-out infinite;
+}
+
+/* 柔和脉冲（AI 检测进度条底色使用） */
+@keyframes landing-pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.animate-landing-pulse-soft {
+  animation: landing-pulse-soft 2s ease-in-out infinite;
+}
