@@ -56,6 +56,7 @@ export const SCORING_SYSTEM_PROMPT_EN = `You are a seasoned academic mentor who 
    - 75–84  : Good. Fully meets rubric/brief requirements. ANY paper that simply meets the requirements belongs in this band.
    - 60–74  : Competent but with non-trivial gaps.
    - <60    : Serious problems (missing required sections, off-topic, unsupported claims, fabricated citations).
+   Rubric cap and automatic-fail rules override these anchors. If the rubric says a problem caps the score at 60, 50, zero, fail, or any other ceiling, the final overall_score must not exceed that cap. If the article triggers an automatic-fail / knockout rule, do not award a passing score.
 
 6. Output ONLY valid JSON matching this schema. No prose outside the JSON:
    {
@@ -212,6 +213,10 @@ export type ScoringValidation =
   | { ok: true; result: ScoringResult }
   | { ok: false; errors: string[] };
 
+export interface ScoringValidationOptions {
+  rubricText?: string | null;
+}
+
 function isIntegerInRange(value: unknown, min: number, max: number): boolean {
   return (
     typeof value === 'number' &&
@@ -242,12 +247,136 @@ function isStringArray(
 
 const VALID_ROLES: ScoringDetectedFile['role'][] = ['article', 'rubric', 'brief', 'other'];
 
+function capSentenceForMatch(text: string, matchIndex: number) {
+  const start = Math.max(text.lastIndexOf('.', matchIndex), text.lastIndexOf(';', matchIndex), text.lastIndexOf('\n', matchIndex)) + 1;
+  const nextStops = ['.', ';', '\n']
+    .map((stop) => text.indexOf(stop, matchIndex))
+    .filter((index) => index >= 0);
+  const end = nextStops.length > 0 ? Math.min(...nextStops) : text.length;
+  return text.slice(start, end).trim();
+}
+
+function resultMentionsMissingTerm(resultText: string, term: RegExp) {
+  return term.test(resultText)
+    && /\b(?:missing|absent|lacks?|no|not included|omitted|without)\b|缺少|没有|未包含|未提供|未出现/i.test(resultText);
+}
+
+function capConditionIsTriggered(sentence: string, resultText: string) {
+  const condition = sentence.toLowerCase();
+  const result = resultText.toLowerCase();
+
+  if (/\blate\b|late submission|迟交|逾期/i.test(condition)) {
+    return /\blate\b|late submission|submitted late|迟交|逾期/i.test(result)
+      && !/\b(?:not late|non-late|on time|submitted on time)\b|未迟交|准时/i.test(result);
+  }
+
+  if (/citation|references?|referencing|oscola|apa|harvard|bluebook|引文|引用|参考文献/i.test(condition)) {
+    return /\b(?:wrong|incorrect|inconsistent|missing|absent|lacks?|not follow|does not follow)\b[^.。！？]{0,80}\b(?:citation|references?|referencing|oscola|apa|harvard|bluebook)\b|\b(?:citation|references?|referencing|oscola|apa|harvard|bluebook)\b[^.。！？]{0,80}\b(?:wrong|incorrect|inconsistent|missing|absent|lacks?|not follow|does not follow)\b|引用.*(?:错误|缺失|不符合)|参考文献.*(?:错误|缺失|不符合)/i.test(resultText);
+  }
+
+  const termPatterns = [
+    /methodology|methods?|方法|研究方法/i,
+    /literature review|文献综述/i,
+    /references?|reference list|bibliography|参考文献/i,
+    /data analysis|统计分析|数据分析/i,
+    /appendix|appendices|附录/i,
+  ];
+  return termPatterns.some((pattern) => pattern.test(sentence) && resultMentionsMissingTerm(resultText, pattern));
+}
+
+function sentenceHasConditionalCap(sentence: string) {
+  return /\b(?:if|when|unless|where|late|plagiarism|without|missing|wrong|incorrect)\b|如果|若|迟交|逾期|缺少|没有|错误|不符合/i.test(sentence);
+}
+
+function detectRubricScoreCap(rubricText: string | null | undefined, resultText = '') {
+  const text = String(rubricText || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+
+  const patterns = [
+    /\b(?:maximum|max|highest)\s+(?:score|mark|grade)?\s*(?:is|=|:)?\s*(\d{1,3})\b/i,
+    /\b(?:score|mark|grade)\s+(?:is\s+)?(?:capped|limited)\s+at\s+(\d{1,3})\b/i,
+    /\b(?:cap|capped)\s*(?:at|=|:)?\s*(\d{1,3})\b/i,
+    /\b(?:no more than|not more than|must not exceed|cannot exceed|may not exceed|should not exceed)\s+(\d{1,3})\s*(?:marks?|points?|score)?\b/i,
+    /最高(?:分|成绩|得分)?(?:不得|不能|不应|不超过|上限|封顶)?\s*(\d{1,3})\s*分?/,
+    /(?:封顶|上限|不得超过|不能超过|最多)\s*(\d{1,3})\s*分?/,
+  ];
+
+  const caps: number[] = [];
+  for (const pattern of patterns) {
+    const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+    const globalPattern = new RegExp(pattern.source, flags);
+    for (const match of text.matchAll(globalPattern)) {
+      const value = Number.parseInt(match[1]!, 10);
+      if (value < 0 || value > 100) continue;
+      const sentence = capSentenceForMatch(text, match.index || 0);
+      if (sentenceHasConditionalCap(sentence) && !capConditionIsTriggered(sentence, resultText)) {
+        continue;
+      }
+      caps.push(value);
+    }
+  }
+
+  return caps.length > 0 ? Math.min(...caps) : null;
+}
+
+function detectRubricKnockoutTerms(rubricText: string | null | undefined) {
+  const text = String(rubricText || '').replace(/\s+/g, ' ').trim();
+  if (!text || !/\b(?:automatic\s+fail|fail|knockout|zero|cannot\s+(?:receive\s+)?a\s+passing\s+mark|cannot\s+pass|no\s+passing\s+mark)\b|一票否决|自动不及格|直接不及格|不得及格|不能及格|零分|0\s*分/i.test(text)) {
+    return [];
+  }
+
+  const terms = [
+    ['methodology', /methodology|methods?|方法|研究方法/i],
+    ['literature review', /literature review|文献综述/i],
+    ['references', /references?|reference list|bibliography|参考文献/i],
+    ['data analysis', /data analysis|统计分析|数据分析/i],
+    ['appendix', /appendix|appendices|附录/i],
+  ] as const;
+
+  return terms
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([term]) => term);
+}
+
+function scoringResultText(obj: Record<string, unknown>) {
+  return JSON.stringify(obj).replace(/\s+/g, ' ');
+}
+
+function weightedDimensionScore(dimensions: unknown[]) {
+  return Math.round(dimensions.reduce<number>((sum, item) => {
+    const dimension = item as Record<string, unknown>;
+    return sum + ((dimension.weight as number) * (dimension.score as number)) / 100;
+  }, 0));
+}
+
+function violatesRubricKnockout(obj: Record<string, unknown>, rubricText: string | null | undefined) {
+  const terms = detectRubricKnockoutTerms(rubricText);
+  if (terms.length === 0) return false;
+  const overallScore = typeof obj.overall_score === 'number' ? obj.overall_score : null;
+  if (overallScore === null || overallScore < 50) return false;
+
+  const resultText = scoringResultText(obj);
+  return terms.some((term) => {
+    const termPattern = term === 'methodology'
+      ? /methodology|methods?|方法|研究方法/i
+      : term === 'literature review'
+        ? /literature review|文献综述/i
+        : term === 'references'
+          ? /references?|reference list|bibliography|参考文献/i
+          : term === 'data analysis'
+            ? /data analysis|统计分析|数据分析/i
+            : /appendix|appendices|附录/i;
+
+    return termPattern.test(resultText)
+      && /\b(?:missing|absent|lacks?|no|not included|omitted)\b|缺少|没有|未包含|未提供|未出现/i.test(resultText);
+  });
+}
+
 /**
  * 硬校验。返回 { ok: false, errors } 时由调用方触发重试或整单失败退款。
- * 为什么 weight 和允许 [95,105]：GPT 偶尔 round 成 30/25/20/15/10 → 合 100；
- * 但有时会 33/25/20/15/8 → 合 101 这种小误差。不放行 100 之外就全废掉了。
+ * 权重必须合计 100。评分结果展示给用户时不能让 95、101 这种“差不多”进入报告。
  */
-export function validateScoringJson(parsed: unknown): ScoringValidation {
+export function validateScoringJson(parsed: unknown, options: ScoringValidationOptions = {}): ScoringValidation {
   const errors: string[] = [];
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -297,9 +426,8 @@ export function validateScoringJson(parsed: unknown): ScoringValidation {
         errors.push(`dimensions[${idx}].suggestions: ${suggestions.reason}`);
       }
     });
-    // 权重和允许 [95, 105] 的容差（GPT round 产生的轻微误差）
-    if (errors.length === 0 && (weightSum < 95 || weightSum > 105)) {
-      errors.push(`dimension weights must sum to 100 (allow 95..105), got ${weightSum}`);
+    if (errors.length === 0 && weightSum !== 100) {
+      errors.push(`dimension weights must sum to 100, got ${weightSum}`);
     }
   }
 
@@ -333,6 +461,21 @@ export function validateScoringJson(parsed: unknown): ScoringValidation {
   }
 
   if (errors.length > 0) return { ok: false, errors };
+
+  const resultText = scoringResultText(obj);
+  const cap = detectRubricScoreCap(options.rubricText, resultText);
+  if (cap !== null && (obj.overall_score as number) > cap) {
+    return { ok: false, errors: [`overall_score exceeds rubric cap ${cap}`] };
+  }
+
+  if (violatesRubricKnockout(obj, options.rubricText)) {
+    return { ok: false, errors: ['overall_score violates rubric automatic-fail/knockout rule'] };
+  }
+
+  const weightedScore = weightedDimensionScore(dimensionsRaw as unknown[]);
+  if (cap === null && Math.abs((obj.overall_score as number) - weightedScore) > 5) {
+    return { ok: false, errors: [`overall_score must match weighted dimension score (${weightedScore})`] };
+  }
 
   return { ok: true, result: obj as unknown as ScoringResult };
 }

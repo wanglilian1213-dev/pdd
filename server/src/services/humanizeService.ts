@@ -4,7 +4,11 @@ import { settleCredits, refundCredits } from './walletService';
 import { getConfig } from './configService';
 import { startHumanizeJobAtomic } from './atomicOpsService';
 import { storeGeneratedTaskFile, countMainBodyWords, getWordCountRange } from './writingService';
-import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
+import {
+  buildStealthwriterResultJson,
+  STEALTHWRITER_MODEL,
+  stealthwriterClient,
+} from '../lib/stealthwriter';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { recordAuditLog } from './auditLogService';
 import { captureError } from '../lib/errorMonitor';
@@ -12,13 +16,18 @@ import { normalizeDeliveryPaperTitle } from './paperTitleService';
 import { streamResponseText } from '../lib/openai';
 import { env } from '../lib/runtimeEnv';
 import { extractReferenceEntries } from './paperQualityService';
+import {
+  runStealthwriterHumanizationLoop,
+  StealthwriterHumanizationLoopError,
+  type StealthwriterHumanizationLoopDeps,
+} from './stealthwriterHumanizationService';
 
 const CONDENSE_SINGLE_TIMEOUT_MS = 240_000; // 4 minutes per single condensation call
 const CONDENSE_MAX_RETRIES = 3; // up to 3 additional retries after the first attempt
 const FORMAT_CHECK_TIMEOUT_MS = 600_000; // 10 minutes
 const CONDENSE_RATIO = 0.72; // Condense to 72% of target — with 30-40% inflation lands near 100%
 
-// ─── Condense & Format Check (GPT-5.4) ─────────────────────────────────────
+// ─── Condense & Format Check (GPT-5.5) ─────────────────────────────────────
 
 function buildCondenseSystemPrompt(targetWords: number, currentWords: number): string {
   return `You are an academic writing editor specializing in concise writing. Condense the following academic paper to approximately ${targetWords} words in the main body (excluding title and references). Current main body: ${currentWords} words.
@@ -90,12 +99,17 @@ async function condensePaperOnce(text: string, targetWordCount: number): Promise
   const currentWords = countMainBodyWords(text);
 
   const { text: condensed } = await Promise.race([
-    streamResponseText({
-      model: env.openaiModel,
-      instructions: buildCondenseSystemPrompt(targetWordCount, currentWords),
-      reasoning: { effort: 'high' as any },
-      input: text,
-    } as any),
+      streamResponseText({
+        model: env.openaiModel,
+        instructions: buildCondenseSystemPrompt(targetWordCount, currentWords),
+        reasoning: { effort: 'xhigh' as any },
+        input: [
+          {
+            role: 'user' as const,
+            content: [{ type: 'input_text' as const, text }],
+          },
+        ],
+      } as any),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('condense timeout')), CONDENSE_SINGLE_TIMEOUT_MS),
     ),
@@ -166,8 +180,13 @@ async function formatCheckPaper(text: string): Promise<string> {
       streamResponseText({
         model: env.openaiModel,
         instructions: buildFormatCheckSystemPrompt(),
-        reasoning: { effort: 'high' as any },
-        input: text,
+        reasoning: { effort: 'xhigh' as any },
+        input: [
+          {
+            role: 'user' as const,
+            content: [{ type: 'input_text' as const, text }],
+          },
+        ],
       } as any),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('format check timeout')), FORMAT_CHECK_TIMEOUT_MS),
@@ -189,8 +208,7 @@ async function formatCheckPaper(text: string): Promise<string> {
 
 // ─── Deps interface ─────────────────────────────────────────────────────────
 
-interface ExecuteHumanizeDeps {
-  humanizeText: (inputText: string) => Promise<HumanizeTextResult>;
+interface ExecuteHumanizeDeps extends StealthwriterHumanizationLoopDeps {
   condensePaper: (text: string, targetWordCount: number) => Promise<string>;
   formatCheckPaper: (text: string) => Promise<string>;
   getTargetWords: (taskId: string) => Promise<number>;
@@ -217,7 +235,9 @@ interface ExecuteHumanizeDeps {
 }
 
 const defaultExecuteHumanizeDeps: ExecuteHumanizeDeps = {
-  humanizeText: (inputText) => undetectableClient.humanizeText(inputText),
+  humanize: (inputText) => stealthwriterClient.humanize(inputText),
+  humanizeMore: (current) => stealthwriterClient.humanizeMore(current),
+  scanV2: (text) => stealthwriterClient.scanV2(text),
   condensePaper,
   formatCheckPaper,
   getTargetWords: async (taskId) => {
@@ -341,7 +361,7 @@ export async function executeHumanize(
   deps: ExecuteHumanizeDeps = defaultExecuteHumanizeDeps,
 ) {
   try {
-    // Step 1: Get target words and condense via Claude
+    // Step 1: Get target words and condense via GPT
     const targetWords = await deps.getTargetWords(taskId);
     const condensedTarget = Math.round(targetWords * CONDENSE_RATIO);
     console.log(`[humanize] task ${taskId}: target=${targetWords}, condenseTarget=${condensedTarget}, inputWords=${wordCount}`);
@@ -350,28 +370,32 @@ export async function executeHumanize(
     const condensedWords = condensed.split(/\s+/).filter(Boolean).length;
     console.log(`[humanize] task ${taskId}: condensed to ${condensedWords} words`);
 
-    // Step 2: Separate references before sending to Undetectable.
-    // Undetectable is a black-box third-party service that rewrites ALL input text,
-    // destroying academic reference formatting.  We strip the References section,
-    // humanize only the body, then re-attach the original references.
+    // Step 2: Separate references before sending to StealthWriter.
+    // 第三方降 AI 服务会改写全部输入；参考文献必须保护，只处理正文后再拼回。
     const { body: bodyOnly, referencesSection } = splitBodyAndReferences(condensed);
 
     if (referencesSection) {
-      console.log(`[humanize] task ${taskId}: references separated (${referencesSection.split('\n').length} lines), sending body only to Undetectable`);
+      console.log(`[humanize] task ${taskId}: references separated (${referencesSection.split('\n').length} lines), sending body only to StealthWriter`);
     } else {
-      console.warn(`[humanize] task ${taskId}: no References heading found in condensed text, sending full text to Undetectable`);
+      console.warn(`[humanize] task ${taskId}: no References heading found in condensed text, sending full text to StealthWriter`);
     }
 
-    const { documentId, output } = await deps.humanizeText(bodyOnly);
+    const loopResult = await runStealthwriterHumanizationLoop(bodyOnly, deps);
     const humanized = referencesSection
-      ? output.trimEnd() + '\n\n' + referencesSection
-      : output;
+      ? loopResult.output.trimEnd() + '\n\n' + referencesSection
+      : loopResult.output;
     const humanizedWords = humanized.split(/\s+/).filter(Boolean).length;
     const bodyWords = bodyOnly.split(/\s+/).filter(Boolean).length;
-    console.log(`[humanize] task ${taskId}: humanized to ${humanizedWords} words (body inflation: ${((output.split(/\s+/).filter(Boolean).length / (bodyWords || 1) - 1) * 100).toFixed(1)}%)`);
+    console.log(
+      `[humanize] task ${taskId}: humanized to ${humanizedWords} words (body inflation: ${((loopResult.output.split(/\s+/).filter(Boolean).length / (bodyWords || 1) - 1) * 100).toFixed(1)}%, score=${loopResult.finalHumanScore}, more=${loopResult.humanizeMoreAttempts})`,
+    );
 
-    // Step 3: Format check via Claude (best-effort)
+    // Step 3: Format check via GPT (best-effort)
     const formatted = await deps.formatCheckPaper(humanized);
+    const resultJson = buildStealthwriterResultJson(loopResult.finalScan, {
+      displayText: formatted,
+      originalText: inputText,
+    });
     const newWordCount = formatted.split(/\s+/).filter(Boolean).length;
 
     // Step 4: Final word count check (warning only, does not block)
@@ -422,6 +446,11 @@ export async function executeHumanize(
     await deps.updateHumanizeJob(jobId, {
       status: 'completed',
       completed_at: deps.now().toISOString(),
+      final_human_score: loopResult.finalHumanScore,
+      scan_version: loopResult.scanVersion,
+      humanize_more_attempts: loopResult.humanizeMoreAttempts,
+      stealthwriter_result_id: loopResult.resultId,
+      result_json: resultJson,
     });
 
     await deps.updateTask(taskId, {
@@ -438,8 +467,13 @@ export async function executeHumanize(
         main_body_words: mainBodyWords,
         condensed_words: condensedWords,
         humanized_words: humanizedWords,
-        provider: 'undetectable',
-        provider_document_id: documentId,
+        provider: 'stealthwriter',
+        model: STEALTHWRITER_MODEL,
+        level: 8,
+        scanner_version: loopResult.scanVersion,
+        final_human_score: loopResult.finalHumanScore,
+        humanize_more_attempts: loopResult.humanizeMoreAttempts,
+        provider_result_id: loopResult.resultId,
         input_word_count: wordCount,
       },
     });
@@ -454,20 +488,40 @@ export async function executeHumanize(
         wordCount: newWordCount,
         condensedWords,
         humanizedWords,
+        provider: 'stealthwriter',
+        model: STEALTHWRITER_MODEL,
+        level: 8,
+        scannerVersion: loopResult.scanVersion,
+        finalHumanScore: loopResult.finalHumanScore,
+        humanizeMoreAttempts: loopResult.humanizeMoreAttempts,
       },
     });
 
   } catch (err: any) {
+    const failureJobUpdate: Record<string, unknown> = {
+      status: 'failed',
+      failure_reason: `降 AI 处理失败，积分已退回。${err?.message ? `原因：${err.message}` : ''}`.trim(),
+      refunded: true,
+    };
+
+    if (err instanceof StealthwriterHumanizationLoopError) {
+      const resultJson = buildStealthwriterResultJson(err.lastScan, {
+        displayText: err.output,
+        originalText: inputText,
+      });
+      failureJobUpdate.final_human_score = resultJson.human_score;
+      failureJobUpdate.scan_version = err.scanVersion;
+      failureJobUpdate.humanize_more_attempts = err.humanizeMoreAttempts;
+      failureJobUpdate.stealthwriter_result_id = err.resultId || resultJson.stealthwriter_result_id;
+      failureJobUpdate.result_json = resultJson;
+    }
+
     try {
       await deps.refundCredits(userId, frozenCredits, 'humanize_job', jobId, `降 AI 失败退款：${frozenCredits} 积分`);
-      await deps.updateHumanizeJob(jobId, {
-        status: 'failed',
-        failure_reason: `降 AI 处理失败，积分已退回。${err?.message ? `原因：${err.message}` : ''}`.trim(),
-        refunded: true,
-      });
+      await deps.updateHumanizeJob(jobId, failureJobUpdate);
     } catch {
       await deps.updateHumanizeJob(jobId, {
-        status: 'failed',
+        ...failureJobUpdate,
         failure_reason: '降 AI 失败且退款异常，请联系客服。',
         refunded: false,
       });

@@ -16,8 +16,8 @@ export default function Login() {
   const { signIn } = useAuth();
   const navigate = useNavigate();
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitLogin = async () => {
+    if (submitting) return;
     setError('');
     setSubmitting(true);
 
@@ -29,6 +29,11 @@ export default function Login() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitLogin();
   };
 
   return (
@@ -53,7 +58,7 @@ export default function Login() {
           <CardContent>
             <form className="space-y-4" onSubmit={handleSubmit}>
               {error && (
-                <div className="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+                <div role="alert" className="rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">
                   {error}
                 </div>
               )}
@@ -91,7 +96,11 @@ export default function Login() {
               <p className="text-xs text-gray-400">
                 忘记密码请联系客服，由运营手动协助重置
               </p>
-              <Button type="submit" className="w-full h-11 text-base shadow-sm" disabled={submitting}>
+              <Button
+                type="submit"
+                className="w-full h-11 text-base shadow-sm"
+                disabled={submitting}
+              >
                 {submitting ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />

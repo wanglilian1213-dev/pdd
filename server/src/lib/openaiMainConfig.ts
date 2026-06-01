@@ -8,25 +8,35 @@ export type MainOpenAIStage =
   | 'word_calibration'
   | 'citation_verification'
   | 'scoring'
-  | 'article_detection';
+  | 'article_detection'
+  | 'revision_generation'
+  | 'chart_enhancement'
+  | 'post_chart_condense'
+  | 'final_quality_review';
 
 export type ReasoningEffort = 'medium' | 'high' | 'xhigh';
 
+export interface MainOpenAIResponsesOptions {
+  webSearch?: boolean;
+}
+
 const reasoningEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
-  outline_generation: 'medium',
-  outline_regeneration: 'medium',
-  outline_translation: 'medium',
+  outline_generation: 'xhigh',
+  outline_regeneration: 'xhigh',
+  outline_translation: 'xhigh',
   draft_generation: 'xhigh',
-  word_calibration: 'medium',
+  word_calibration: 'xhigh',
   // Citation report intentionally reuses citation_verification for now.
-  citation_verification: 'medium',
-  // 文章打分评审：reasoning 拉满到 high，保证评分严谨（但不到 xhigh，节约成本）。
+  citation_verification: 'xhigh',
   // 注意：绝不能进 stagesWithWebSearch —— 评审不联网，避免用户文章数据外流。
-  scoring: 'high',
+  scoring: 'xhigh',
   // 文章修改主文章识别：从用户上传的多个文件里挑出"哪份是要改的主文章"。
-  // 任务简单（文件名 + 内容样本分类），medium reasoning 足够；不联网（纯本地分类，
-  // 避免用户文档外流）。失败由调用方启发式 fallback 兜底。
-  article_detection: 'medium',
+  // 不联网（纯本地分类，避免用户文档外流）。失败由调用方启发式 fallback 兜底。
+  article_detection: 'xhigh',
+  revision_generation: 'xhigh',
+  chart_enhancement: 'xhigh',
+  post_chart_condense: 'xhigh',
+  final_quality_review: 'xhigh',
 };
 
 // Stages that need to verify citations against the live web. The model is given
@@ -35,7 +45,7 @@ const reasoningEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
 //
 // Background: when PDD's writing pipeline runs through the user's self-hosted
 // sub2api gateway (ChatGPT Plus OAuth → ChatGPT Codex backend), the model has
-// the same identity as Codex.app's `gpt-5.4 + xhigh` configuration but lacks
+// the same identity as Codex.app's `gpt-5.5 + xhigh` configuration but lacks
 // the `web_search` tool that Codex.app injects in every request. Without that
 // tool, the model has no way to verify citations and hallucinates DOIs at a
 // 22-36% rate (vs ~8% on direct api.openai.com calls and ~0% in Codex.app).
@@ -52,7 +62,10 @@ const WEB_SEARCH_TOOL = {
   search_content_types: ['text', 'image'],
 };
 
-export function buildMainOpenAIResponsesOptions(stage: MainOpenAIStage) {
+export function buildMainOpenAIResponsesOptions(
+  stage: MainOpenAIStage,
+  options: MainOpenAIResponsesOptions = {},
+) {
   // 注：'xhigh' 是 sub2api 透传给 OpenAI Responses API 的最高档位，
   // 但 @openai/openai SDK 的 ReasoningEffort 类型联合还没收录 'xhigh'，
   // 所以这里把 effort 强制转成 any，让上游 responses.create 不做编译期校验。
@@ -65,7 +78,7 @@ export function buildMainOpenAIResponsesOptions(stage: MainOpenAIStage) {
     },
   };
 
-  if (stagesWithWebSearch.has(stage)) {
+  if (stagesWithWebSearch.has(stage) && options.webSearch !== false) {
     // Same shape Codex.app sends to chatgpt.com/backend-api/codex/responses.
     // The Codex backend executes web_search server-side, so PDD does NOT need
     // to implement a tool execution loop — the SDK's `finalResponse()` returns

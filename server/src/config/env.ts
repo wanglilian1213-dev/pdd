@@ -1,4 +1,4 @@
-const allowedOpenAIModels = ['gpt-5.4'] as const;
+const allowedOpenAIModels = ['gpt-5.5'] as const;
 
 type AllowedOpenAIModel = (typeof allowedOpenAIModels)[number];
 
@@ -9,10 +9,9 @@ export interface Env {
   openaiApiKey: string;
   openaiBaseUrl: string | undefined;
   openaiModel: AllowedOpenAIModel;
-  anthropicApiKey: string;
-  anthropicBaseUrl: string | undefined;
-  undetectableApiKey: string;
-  undetectableUserId: string | undefined;
+  stealthwriterBaseUrl: string;
+  stealthwriterWorkerUrl: string | undefined;
+  stealthwriterWorkerToken: string | undefined;
   allowedOrigins: string[];
   opsWhitelistEmails: string[];
   configCacheTtlMs: number;
@@ -33,7 +32,7 @@ function readOpenAIModel(rawEnv: NodeJS.ProcessEnv): AllowedOpenAIModel {
   const value = readRequired(rawEnv, 'OPENAI_MODEL');
 
   if (!allowedOpenAIModels.includes(value as AllowedOpenAIModel)) {
-    throw new Error(`OPENAI_MODEL 只能是 gpt-5.4，当前值：${value}`);
+    throw new Error(`OPENAI_MODEL 只能是 gpt-5.5，当前值：${value}`);
   }
 
   return value as AllowedOpenAIModel;
@@ -73,13 +72,9 @@ export function parseEnv(rawEnv: NodeJS.ProcessEnv): Env {
     openaiApiKey: readRequired(rawEnv, 'OPENAI_API_KEY'),
     openaiBaseUrl: rawEnv.OPENAI_BASE_URL?.trim() || undefined,
     openaiModel: readOpenAIModel(rawEnv),
-    anthropicApiKey: readRequired(rawEnv, 'ANTHROPIC_API_KEY'),
-    anthropicBaseUrl: rawEnv.ANTHROPIC_BASE_URL?.trim() || undefined,
-    undetectableApiKey: readRequired(rawEnv, 'UNDETECTABLE_API_KEY'),
-    // 可选：只有句子级 AI 检测（WebSocket）流程需要；篇章级 REST 不需要
-    // 配了才能走 detectAiWithSentences 展示句子级标红；没配时 aiDetectionService 会抛错让
-    // executeAiDetection 兜底退款。Railway 后台在 app 服务里加这个 env。
-    undetectableUserId: rawEnv.UNDETECTABLE_USER_ID?.trim() || undefined,
+    stealthwriterBaseUrl: rawEnv.STEALTHWRITER_BASE_URL?.trim() || 'https://stealthwriter.ai',
+    stealthwriterWorkerUrl: rawEnv.STEALTHWRITER_WORKER_URL?.trim() || undefined,
+    stealthwriterWorkerToken: rawEnv.STEALTHWRITER_WORKER_TOKEN?.trim() || undefined,
     allowedOrigins: readAllowedOrigins(rawEnv),
     opsWhitelistEmails: (rawEnv.OPS_WHITELIST_EMAILS || '')
       .split(',')

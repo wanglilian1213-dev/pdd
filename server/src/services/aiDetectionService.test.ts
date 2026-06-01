@@ -8,7 +8,11 @@ import {
   AI_DETECTION_MAX_WORDS,
 } from './aiDetectionService';
 
-const { computeFrozenAmount, DEFAULT_AI_DETECTION_PRICE_PER_WORD } = aiDetectionServiceTestUtils;
+const {
+  computeFrozenAmount,
+  buildAiDetectionResultJson,
+  DEFAULT_AI_DETECTION_PRICE_PER_WORD,
+} = aiDetectionServiceTestUtils;
 
 // ---------------------------------------------------------------------------
 // computeFrozenAmount
@@ -44,6 +48,37 @@ test('AI_DETECTION_MAX_WORDS = 30,000', () => {
 
 test('默认单价 0.05', () => {
   assert.equal(DEFAULT_AI_DETECTION_PRICE_PER_WORD, 0.05);
+});
+
+test('buildAiDetectionResultJson: 生成 StealthWriter V2 结果结构', () => {
+  const result = buildAiDetectionResultJson(
+    {
+      normalScore: 92,
+      verdict: 'looks_human',
+      sentences: [
+        { sentence: 'Sentence A', score: 92 },
+        { sentence: 'Sentence B', score: 88 },
+      ],
+      resultId: 'scan-1',
+      raw: { normal_score: 92 },
+    },
+    'Sentence A Sentence B',
+  );
+
+  assert.deepEqual(result, {
+    human_score: 92,
+    ai_score: 8,
+    verdict: 'looks_human',
+    scan_version: 'v2',
+    stealthwriter_result_id: 'scan-1',
+    display_text: 'Sentence A Sentence B',
+    original_text: 'Sentence A Sentence B',
+    sentences: [
+      { sentence: 'Sentence A', score: 92 },
+      { sentence: 'Sentence B', score: 88 },
+    ],
+    raw: { normal_score: 92 },
+  });
 });
 
 // ---------------------------------------------------------------------------

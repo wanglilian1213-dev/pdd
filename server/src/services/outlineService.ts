@@ -44,6 +44,9 @@ import {
   type UnifiedTaskRequirements,
 } from './taskRequirementService';
 
+export const OUTLINE_GENERATION_RETRY_ATTEMPTS = 4;
+export const OUTLINE_REGENERATION_RETRY_ATTEMPTS = 4;
+
 interface ParsedOutlineResponse {
   paper_title: string;
   research_question: string;
@@ -726,10 +729,11 @@ export async function generateOutline(taskId: string, userId: string) {
             ],
           },
         ],
-      }), 2);
+      }), OUTLINE_GENERATION_RETRY_ATTEMPTS);
 
     // Parse the merged response — extract requirements, course code, and outline
     const mergedJson = parseMergedOutlineResponse(content);
+    assertNoRequirementConflicts(mergedJson.requirement_conflicts);
     // 注意：这里不传 trustSectionCount=true，走严格的 structureEvidence 白名单。
     // GPT 没提供合法 evidence 时，section count 会被回退为公式值，堵住 "1000 字返回 4 章" 这类自由发挥。
     const extractedRequirements = deriveUnifiedTaskRequirements(
@@ -847,9 +851,26 @@ interface MergedOutlineJson {
   citation_style?: string | null;
   required_section_count?: number | null;
   structure_evidence?: string | null;
+  requirement_conflicts: string[];
   paper_title: string;
   research_question: string;
   outline: string;
+}
+
+export function assertNoRequirementConflicts(conflicts: unknown) {
+  const conflictList = Array.isArray(conflicts) ? conflicts : [];
+  const uniqueConflicts = Array.from(new Set(
+    conflictList
+      .filter((value): value is string => typeof value === 'string')
+      .map((conflict) => conflict.trim())
+      .filter(Boolean),
+  ));
+  if (uniqueConflicts.length === 0) return;
+
+  throw new AppError(
+    400,
+    `上传材料里的要求互相冲突：${uniqueConflicts.slice(0, 3).join('；')}。请删除冲突材料，或在特殊要求里明确说明以哪一份为准。`,
+  );
 }
 
 function parseMergedOutlineResponse(content: string): MergedOutlineJson {
@@ -862,6 +883,9 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
       citation_style: typeof parsed.citation_style === 'string' ? parsed.citation_style : null,
       required_section_count: typeof parsed.required_section_count === 'number' ? parsed.required_section_count : null,
       structure_evidence: typeof parsed.structure_evidence === 'string' ? parsed.structure_evidence : null,
+      requirement_conflicts: Array.isArray(parsed.requirement_conflicts)
+        ? parsed.requirement_conflicts.filter((value): value is string => typeof value === 'string')
+        : [],
       paper_title: typeof parsed.paper_title === 'string' ? parsed.paper_title : '',
       research_question: typeof parsed.research_question === 'string' ? parsed.research_question : '',
       outline: typeof parsed.outline === 'string' ? parsed.outline : content,
@@ -873,6 +897,7 @@ function parseMergedOutlineResponse(content: string): MergedOutlineJson {
       citation_style: null,
       required_section_count: null,
       structure_evidence: null,
+      requirement_conflicts: [],
       paper_title: '',
       research_question: '',
       outline: content,
@@ -1011,7 +1036,7 @@ export async function regenerateOutline(taskId: string, userId: string, editInst
             ],
           },
         ],
-      }), 2);
+      }), OUTLINE_REGENERATION_RETRY_ATTEMPTS);
     const bulletFixed = await repairOutlineBulletCounts(
       'outline_regeneration',
       parseOutlineJson(content, {

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assessRevisionVisualDelivery,
   validateRevisionFileTypes,
   estimateRevisionForFile,
   estimateRevisionTotal,
 } from './revisionService';
 import { AppError } from '../lib/errors';
+import type { RenderedChart } from './chartRenderService';
 
 function file(name: string): Express.Multer.File {
   return { originalname: name } as Express.Multer.File;
@@ -25,6 +27,16 @@ function fakeFile(name: string, content: Buffer | string): Express.Multer.File {
     filename: '',
     path: '',
     stream: null as never,
+  };
+}
+
+function renderedChart(ok = true): RenderedChart {
+  return {
+    spec: { title: 'Figure 1', width: 600, height: 400, chartjs: {} },
+    png: ok ? Buffer.alloc(300) : null,
+    width: 600,
+    height: 400,
+    error: ok ? undefined : 'quickchart http 500',
   };
 }
 
@@ -77,6 +89,40 @@ test('validateRevisionFileTypes 拒绝无扩展名文件', () => {
     () => validateRevisionFileTypes([file('README')]),
     /不支持的文件类型/,
   );
+});
+
+test('assessRevisionVisualDelivery: 要求流程图但没有图时不放行', () => {
+  const result = assessRevisionVisualDelivery('请加入一个流程图说明修改后的论证结构。', 0, []);
+
+  assert.equal(result.pass, false);
+  assert.equal(result.requiresVisual, true);
+  assert.ok(result.failureCodes.includes('visual_required_missing'));
+});
+
+test('assessRevisionVisualDelivery: 要求两张图但只成功一张时不放行', () => {
+  const result = assessRevisionVisualDelivery('Please include two figures in the revised paper.', 1, [
+    renderedChart(true),
+  ]);
+
+  assert.equal(result.pass, false);
+  assert.equal(result.requiredVisualCount, 2);
+  assert.ok(result.failureCodes.includes('visual_count_too_low'));
+});
+
+test('assessRevisionVisualDelivery: 模型输出了图但渲染失败时不交付坏文件', () => {
+  const result = assessRevisionVisualDelivery('Normal revision request.', 1, [
+    renderedChart(false),
+  ]);
+
+  assert.equal(result.pass, false);
+  assert.ok(result.failureCodes.includes('visual_render_failed'));
+});
+
+test('assessRevisionVisualDelivery: 明确不要图表时允许无图交付', () => {
+  const result = assessRevisionVisualDelivery('Please do not include charts or diagrams.', 0, []);
+
+  assert.equal(result.pass, true);
+  assert.equal(result.requiresVisual, false);
 });
 
 // ===========================================================================

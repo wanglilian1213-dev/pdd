@@ -1,9 +1,10 @@
 /**
- * 解析 Claude 修改输出里的图表 DSL。
+ * 解析 AI 修改输出里的图表 DSL。
  *
- * Claude 被 system prompt 要求用以下分隔符把图表配置包起来：
+ * AI 被 system prompt 要求用以下分隔符把图表配置包起来：
  *   [CHART_BEGIN]
  *   { "title": "图 1：xxx", "width": 720, "height": 440, "chartjs": {...} }
+ *   { "title": "图 2：xxx", "width": 720, "height": 440, "diagram": {...} }
  *   [CHART_END]
  *
  * 为什么不用 markdown fenced code block？
@@ -37,16 +38,28 @@ function tryParseSpec(jsonRaw: string): ChartSpec | null {
     const parsed = JSON.parse(jsonRaw.trim());
     if (!parsed || typeof parsed !== 'object') return null;
     if (typeof parsed.title !== 'string' || !parsed.title.trim()) return null;
-    if (!parsed.chartjs || typeof parsed.chartjs !== 'object') return null;
+    const hasChart = parsed.chartjs && typeof parsed.chartjs === 'object';
+    const hasDiagram = isValidDiagramSpec(parsed.diagram);
+    if (!hasChart && !hasDiagram) return null;
     return {
       title: parsed.title,
       width: typeof parsed.width === 'number' ? parsed.width : 600,
       height: typeof parsed.height === 'number' ? parsed.height : 400,
-      chartjs: parsed.chartjs,
+      ...(hasChart ? { chartjs: parsed.chartjs } : {}),
+      ...(hasDiagram ? { diagram: parsed.diagram } : {}),
     };
   } catch {
     return null;
   }
+}
+
+function isValidDiagramSpec(value: any) {
+  return !!value
+    && typeof value === 'object'
+    && Array.isArray(value.nodes)
+    && value.nodes.length >= 2
+    && Array.isArray(value.edges)
+    && value.edges.length >= 1;
 }
 
 export function parseRevisionOutput(raw: string): ParsedRevision {

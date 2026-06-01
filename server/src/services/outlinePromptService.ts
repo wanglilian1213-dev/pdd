@@ -244,6 +244,7 @@ const MERGED_RESPONSE_SCHEMA = `Respond with valid JSON only in this shape:
   "citation_style": "string" | null,
   "required_section_count": number | null,
   "structure_evidence": "string or null",
+  "requirement_conflicts": ["string"],
   "paper_title": "a concrete English paper title",
   "research_question": "a concrete English research question",
   "outline": "the full outline text"
@@ -266,6 +267,9 @@ Requirement extraction rules:
 - Only extract target_words and citation_style that are explicitly stated in the materials.
 - Do not infer defaults. If the materials do not clearly specify a value, return null.
 - The system will use defaults (1000 words, APA 7) when you return null for target_words or citation_style.
+- Before generating the outline, check whether the uploaded materials or special requirements directly conflict on target word count, citation style, source restrictions, output type, required sections, or chart/data requirements.
+- If there are direct conflicts, list each conflict in requirement_conflicts using concrete values from the materials. Do not silently choose one side.
+- If there are no direct conflicts, return an empty array for requirement_conflicts.
 
 Required section count — STRICT rules (read carefully):
 - DEFAULT: return null for required_section_count and return null for structure_evidence. The system has its own formula and will override any number you provide unless you cite verifiable evidence.
@@ -289,6 +293,7 @@ ${OUTLINE_TOPIC_RULES}
 ${MERGED_RESPONSE_SCHEMA}`,
     userPrompt: `Please read every uploaded material file directly. In a single JSON response:
 - Extract the target word count and citation style if explicitly stated in the materials. Return null if not found.
+- Detect direct conflicts between uploaded materials or special requirements; return them in requirement_conflicts.
 - Extract the course code if present.
 - Generate an English academic paper outline based on the extracted (or default) requirements.
 

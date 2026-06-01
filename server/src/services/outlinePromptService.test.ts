@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildInitialOutlinePrompt,
+  buildMergedOutlineGenerationPrompt,
   buildOutlineThemeReviewPrompt,
   buildRepairOutlinePrompt,
   buildRegenerateOutlinePrompt,
@@ -83,6 +84,18 @@ test('buildRegenerateOutlinePrompt keeps original requirements even when blank e
 
   assert.match(prompt.userPrompt, /Keep a concise comparative structure/i);
   assert.match(prompt.userPrompt, /Please make the second section stronger/i);
+});
+
+test('buildMergedOutlineGenerationPrompt requires direct material conflicts to be reported', () => {
+  const prompt = buildMergedOutlineGenerationPrompt({
+    specialRequirements: 'Use the latest rubric if materials disagree.',
+    knownCourseCode: 'BUSI1001',
+  });
+
+  assert.match(prompt.systemPrompt, /directly conflict/i);
+  assert.match(prompt.systemPrompt, /requirement_conflicts/i);
+  assert.match(prompt.systemPrompt, /do not silently choose one side/i);
+  assert.match(prompt.userPrompt, /Detect direct conflicts/i);
 });
 
 test('buildRepairOutlinePrompt explicitly fixes sections that break the 3 to 5 bullet rule', () => {

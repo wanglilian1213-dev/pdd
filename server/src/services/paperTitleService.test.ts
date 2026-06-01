@@ -37,3 +37,11 @@ test('buildDocxFileName uses the cleaned delivery title', () => {
     'Essay Topic.docx',
   );
 });
+
+test('buildDocxFileName caps extremely long paper titles for safe downloads', () => {
+  const filename = buildDocxFileName(`${'A'.repeat(180)}.txt`, 'Academic Essay');
+
+  assert.equal(filename.endsWith('.docx'), true);
+  assert.equal(filename.length <= 125, true);
+  assert.doesNotMatch(filename, /\.txt\.docx$/);
+});

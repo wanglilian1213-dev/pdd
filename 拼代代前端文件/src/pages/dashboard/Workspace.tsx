@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { UploadCloud, FileText, CheckCircle2, ChevronRight, AlertCircle, Download, Bot, ShieldCheck, RefreshCw, X, Loader2, File } from 'lucide-react';
@@ -7,6 +8,10 @@ import { api } from '../../lib/api';
 import { useBalance } from '../../contexts/BalanceContext';
 import { buildDownloadCards, normalizeTaskFiles, TaskFile, TaskFileCategory } from '../../lib/taskFiles';
 import { triggerDownload } from '../../lib/downloadFile';
+import {
+  SentenceHighlights,
+  type SentenceAnalysisResultJson,
+} from '../../components/ai/SentenceHighlights';
 import {
   getHumanizeStepAfterStartAttempt,
   getWorkspaceStep,
@@ -34,6 +39,10 @@ interface HumanizeJob {
   id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
   failure_reason?: string | null;
+  final_human_score?: number | null;
+  humanize_more_attempts?: number | null;
+  scan_version?: string | null;
+  result_json?: SentenceAnalysisResultJson | null;
 }
 
 interface Task {
@@ -93,6 +102,10 @@ function reshapeTaskResponse(raw: Record<string, unknown>): TaskData {
           id: humanizeJobs[0].id as string,
           status: humanizeJobs[0].status as HumanizeJob['status'],
           failure_reason: (humanizeJobs[0].failure_reason as string | null | undefined) ?? null,
+          final_human_score: (humanizeJobs[0].final_human_score as number | null | undefined) ?? null,
+          humanize_more_attempts: (humanizeJobs[0].humanize_more_attempts as number | null | undefined) ?? null,
+          scan_version: (humanizeJobs[0].scan_version as string | null | undefined) ?? null,
+          result_json: (humanizeJobs[0].result_json as SentenceAnalysisResultJson | null | undefined) ?? null,
         }
       : undefined,
   };
@@ -151,6 +164,7 @@ export default function Workspace() {
   // ---------------------
   // State
   // ---------------------
+  const navigate = useNavigate();
   const { balance, refreshBalance } = useBalance();
   const [step, setStep] = useState(1);
   const [files, setFiles] = useState<File[]>([]);
@@ -990,10 +1004,10 @@ export default function Workspace() {
                       <Bot className="w-5 h-5 text-red-700" /> 觉得 AI 痕迹过重？
                     </h3>
                     <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
-                      请注意：自动降AI有可能会导致文章字数膨胀，如需精准润色降AI / 获取 Turnitin AI 检测报告请联系客服。
+                      系统会自动处理正文，并且只有检测分数达到 90 分以上才会交付。
                     </p>
                     <p className="text-sm text-gray-600 mb-6">
-                      您可以使用自动降AI功能，系统将重写部分文本结构以降低检测率。
+                      如果当前文章还不放心，可以直接启动自动降 AI，系统会自己补降到达标或者自动退款。
                     </p>
 
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1004,8 +1018,12 @@ export default function Workspace() {
                           <><RefreshCw className="w-4 h-4" /> 开始自动降AI</>
                         )}
                       </Button>
-                      <Button variant="secondary" className="flex-1 gap-2 bg-white border border-gray-200">
-                        人工降AI请联系客服
+                      <Button
+                        variant="secondary"
+                        className="flex-1 gap-2 bg-white border border-gray-200"
+                        onClick={() => navigate('/dashboard/ai-tools')}
+                      >
+                        打开 AI 工具页
                       </Button>
                     </div>
                   </div>
@@ -1033,7 +1051,7 @@ export default function Workspace() {
                 </div>
                 <CardTitle className="text-2xl">AI 降重处理</CardTitle>
               </div>
-              <CardDescription>系统正在使用对抗网络降低文本的 AI 生成特征。</CardDescription>
+              <CardDescription>系统会自动循环补降，并持续复查，直到检测分数达标。</CardDescription>
             </CardHeader>
             <CardContent>
               {isHumanizeFailed ? (
@@ -1046,6 +1064,12 @@ export default function Workspace() {
                     </p>
                     <p className="text-xs text-red-600">如需协助，请联系客服。</p>
                   </div>
+
+                  <SentenceHighlights
+                    result={taskData?.humanizeJob?.result_json}
+                    title="最后一次降 AI 尝试"
+                    emptyLabel="这次失败记录没有留下可展示的正文。"
+                  />
 
                   {/* 失败时仍显示原始正文和引用核验下载（humanized_doc 不存在，自动不显示） */}
                   {humanizeDownloadCards.length > 0 && (
@@ -1092,8 +1116,8 @@ export default function Workspace() {
                 <div className="p-12 flex flex-col items-center justify-center space-y-6">
                   <Loader2 className="w-16 h-16 text-blue-600 animate-spin" />
                   <div className="text-center space-y-2">
-                    <h3 className="text-xl font-bold text-gray-900">正在进行深度 AI 降重...</h3>
-                    <p className="text-gray-500">预计需要 1-2 分钟，请勿关闭页面</p>
+                    <h3 className="text-xl font-bold text-gray-900">正在自动循环降 AI...</h3>
+                    <p className="text-gray-500">系统会继续补降，直到检测分数达到 90 分以上</p>
                   </div>
                 </div>
               ) : (
@@ -1102,9 +1126,18 @@ export default function Workspace() {
                     <CheckCircle2 className="w-6 h-6 text-emerald-600" />
                     <div>
                       <p className="font-bold">降重完成！</p>
-                      <p className="text-sm">AI 特征已显著降低，请下载最新版本。</p>
+                      <p className="text-sm">
+                        最终检测分数 {taskData?.humanizeJob?.final_human_score ?? 0}% ，
+                        共补降 {taskData?.humanizeJob?.humanize_more_attempts ?? 0} 次。
+                      </p>
                     </div>
                   </div>
+
+                  <SentenceHighlights
+                    result={taskData?.humanizeJob?.result_json}
+                    title="降 AI 后正文标记"
+                    emptyLabel="这次降 AI 还没有拿到可展示的正文。"
+                  />
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     {humanizeDownloadCards.map((card) => {
@@ -1138,9 +1171,10 @@ export default function Workspace() {
                     })}
                   </div>
 
-                  <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1 text-center">
-                    <p className="text-sm text-amber-800 font-medium">〈机械一键降AI可能出现字数膨胀或者拼写错误等问题，提交前务必先检查一遍，具体AI率以turnitin为准</p>
-                    <p className="text-sm text-amber-700">如需人工高质量润色降重降AI请联系客服〉</p>
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 space-y-1 text-center">
+                    <p className="text-sm text-emerald-800 font-medium">
+                      当前结果已经按站内 AI 检测达到交付线，下载前仍建议快速过一眼正文是否顺畅。
+                    </p>
                   </div>
 
                   <div className="flex justify-center pt-4 border-t border-gray-100">

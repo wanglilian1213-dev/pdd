@@ -5,8 +5,10 @@ import { failTask } from './services/taskService';
 import { deleteExpiredFiles } from './services/fileService';
 import { getConfig } from './services/configService';
 import { captureError } from './lib/errorMonitor';
+import { refreshStealthwriterSessionIfNeeded } from './services/stealthwriterSessionService';
 
 export interface CleanupDeps {
+  refreshStealthwriterSessionIfNeeded?: () => Promise<void>;
   cleanupStuckTasks: () => Promise<void>;
   cleanupStuckRevisions: () => Promise<void>;
   cleanupStuckScorings: () => Promise<void>;
@@ -63,8 +65,8 @@ const AUTO_CLEANUP_STAGES = new Set([
   'word_calibrating',
   'citation_checking',
   'polishing',
+  'quality_checking',
   'delivering',
-  'humanizing',
 ]);
 
 export function isAutoCleanupStage(stage: string): boolean {
@@ -98,7 +100,7 @@ async function cleanupStuckTasks() {
 
     console.log(`[cleanup] Processing stuck task ${task.id} at stage ${task.stage}`);
 
-    const paidStages = ['writing', 'word_calibrating', 'citation_checking', 'polishing', 'delivering'];
+    const paidStages = ['writing', 'word_calibrating', 'citation_checking', 'polishing', 'quality_checking', 'delivering'];
     const needsRefund = paidStages.includes(task.stage) && task.frozen_credits > 0;
 
     if (needsRefund) {
@@ -109,30 +111,6 @@ async function cleanupStuckTasks() {
         console.error(`[cleanup] Refund failed for task ${task.id}:`, err);
         await failTask(task.id, task.stage, '任务超时，退款异常，请联系客服。', false);
       }
-    } else if (task.stage === 'humanizing') {
-      const { data: pendingJobs } = await supabaseAdmin
-        .from('humanize_jobs')
-        .select('id, frozen_credits')
-        .eq('task_id', task.id)
-        .eq('status', 'processing');
-
-      for (const job of pendingJobs || []) {
-        try {
-          await refundCredits(task.user_id, job.frozen_credits, 'humanize_job', job.id, `降 AI 超时退款：${job.frozen_credits} 积分`);
-          await supabaseAdmin.from('humanize_jobs').update({
-            status: 'failed',
-            failure_reason: '处理超时，积分已退回。',
-            refunded: true,
-          }).eq('id', job.id);
-        } catch (err) {
-          console.error(`[cleanup] Humanize refund failed for job ${job.id}:`, err);
-        }
-      }
-
-      await supabaseAdmin.from('tasks').update({
-        stage: 'completed',
-        updated_at: new Date().toISOString(),
-      }).eq('id', task.id);
     } else {
       await failTask(task.id, task.stage, '任务处理超时，请重新创建任务。', false);
     }
@@ -402,7 +380,7 @@ async function cleanupScoringMaterialsForId(scoringId: string) {
 
 /**
  * 过期 scoring 材料清理（2026-04-16 新增，补之前 cleanupExpiredMaterials 只扫 task_files 的漏洞）。
- * 规则：scoring_files.category='material' 且 created_at > retention_days 天前，
+ * 规则：scoring_files.category='material' 且 created_at 早于 retention_days 截止时间，
  * 对应 scoring 是 'completed' | 'failed' 终态时才删（processing / initializing 的保留）。
  */
 async function cleanupExpiredScoringMaterials() {
@@ -943,6 +921,9 @@ async function cleanupExpiredMaterials() {
 
 export function createDefaultCleanupDeps(): CleanupDeps {
   return {
+    refreshStealthwriterSessionIfNeeded: async () => {
+      await refreshStealthwriterSessionIfNeeded();
+    },
     cleanupStuckTasks,
     cleanupStuckRevisions,
     cleanupStuckScorings,
@@ -961,6 +942,13 @@ export function createDefaultCleanupDeps(): CleanupDeps {
 export async function runCleanupCycle(
   deps: CleanupDeps = createDefaultCleanupDeps(),
 ) {
+  if (deps.refreshStealthwriterSessionIfNeeded) {
+    try {
+      await deps.refreshStealthwriterSessionIfNeeded();
+    } catch (err) {
+      captureError(err, 'cleanup.stealthwriter_session');
+    }
+  }
   await deps.cleanupStuckTasks();
   await deps.cleanupStuckRevisions();
   await deps.cleanupStuckScorings();
@@ -1005,6 +993,24 @@ export function scheduleCleanup(
   });
 }
 
+export function scheduleStealthwriterSessionHeartbeat(
+  deps: CleanupDeps = createDefaultCleanupDeps(),
+  logger: CleanupLogger = defaultLogger,
+) {
+  return cron.schedule('*/30 * * * *', async () => {
+    if (!deps.refreshStealthwriterSessionIfNeeded) return;
+
+    logger.log('[cleanup] Checking StealthWriter session health...');
+    try {
+      await deps.refreshStealthwriterSessionIfNeeded();
+      logger.log('[cleanup] StealthWriter session check completed.');
+    } catch (err) {
+      logger.error('[cleanup] StealthWriter session check failed:', err);
+      captureError(err, 'cleanup.stealthwriter_session');
+    }
+  });
+}
+
 export function startCleanupService(
   deps: CleanupDeps = createDefaultCleanupDeps(),
   logger: CleanupLogger = defaultLogger,
@@ -1012,5 +1018,6 @@ export function startCleanupService(
   logger.log('[cleanup] ENTRYPOINT verified: running dedicated cleanup service process.');
   logger.log('[cleanup] Cleanup service started. Scheduled for 3:00 AM daily.');
   scheduleCleanup(deps, logger);
+  scheduleStealthwriterSessionHeartbeat(deps, logger);
   void runInitialCleanup(deps, logger);
 }

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   UploadCloud,
   FileText,
@@ -16,6 +17,10 @@ import {
 import { api } from '../../lib/api';
 import { triggerDownload } from '../../lib/downloadFile';
 import { useBalance } from '../../contexts/BalanceContext';
+import {
+  SentenceHighlights,
+  type SentenceAnalysisResultJson,
+} from '../../components/ai/SentenceHighlights';
 
 // ============================================================================
 // 公共常量 & 类型
@@ -54,36 +59,7 @@ function fileExt(name: string): string {
 // 检测 AI 类型
 // ============================================================================
 
-interface DetectionResultDetails {
-  scoreGptZero?: number;
-  scoreOpenAI?: number;
-  scoreWriter?: number;
-  scoreCrossPlag?: number;
-  scoreCopyLeaks?: number;
-  scoreSapling?: number;
-  scoreContentAtScale?: number;
-  scoreZeroGPT?: number;
-  human?: number;
-  [key: string]: number | undefined;
-}
-
-interface DetectionSentence {
-  /** 句子原文 */
-  chunk: string;
-  /** AI 概率 0-1 浮点（注意：整体 overall_score 是 0-100！渲染时要 × 100） */
-  result: number;
-  /** Undetectable 附带分类 'Human'|'AI'，前端可选展示 */
-  label?: string;
-}
-
-interface DetectionResultJson {
-  overall_score?: number;
-  result_details?: DetectionResultDetails;
-  /** 句子级结果（WebSocket 流程有值；老数据或 fallback 时 undefined） */
-  sentences?: DetectionSentence[];
-  undetectable_document_id?: string;
-  raw?: Record<string, unknown>;
-}
+type DetectionResultJson = SentenceAnalysisResultJson;
 
 interface DetectionFile {
   id: string;
@@ -100,25 +76,16 @@ interface DetectionData {
     id: string;
     status: 'initializing' | 'processing' | 'completed' | 'failed';
     overall_score: number | null;
+    human_score?: number | null;
     input_word_count: number;
     frozen_credits: number;
     settled_credits: number | null;
     result_json: DetectionResultJson | null;
+    scan_version?: string | null;
     failure_reason: string | null;
     created_at: string;
   };
   files: DetectionFile[];
-}
-
-interface EstimateDetectionInfo {
-  filename: string;
-  words: number;
-  pricePerWord: number;
-  estimatedAmount: number;
-  tooShort: boolean;
-  tooLong: boolean;
-  isScannedPdf: boolean;
-  isImage: boolean;
 }
 
 // ============================================================================
@@ -144,6 +111,10 @@ interface HumanizationData {
     frozen_credits: number;
     settled_credits: number | null;
     humanized_text: string | null;
+    final_human_score?: number | null;
+    scan_version?: string | null;
+    humanize_more_attempts?: number | null;
+    result_json?: DetectionResultJson | null;
     failure_reason: string | null;
     acknowledged: boolean;
     created_at: string;
@@ -151,51 +122,30 @@ interface HumanizationData {
   files: HumanizationFile[];
 }
 
-interface EstimateHumanizeInfo {
-  filename: string;
-  words: number;
-  pricePerWord: number;
-  estimatedAmount: number;
-  tooShort: boolean;
-  tooLong: boolean;
-  isScannedPdf: boolean;
-  isImage: boolean;
-}
-
 // ============================================================================
 // 检测 AI 子组件
 // ============================================================================
 
-// 8 家检测器的显示顺序和标签（前端统一展示为"AI 概率"：100 - scoreXxx）
-const DETECTOR_ENTRIES: Array<{ key: keyof DetectionResultDetails; label: string }> = [
-  { key: 'scoreGptZero', label: 'GPTZero' },
-  { key: 'scoreOpenAI', label: 'OpenAI' },
-  { key: 'scoreCopyLeaks', label: 'Copyleaks' },
-  { key: 'scoreSapling', label: 'Sapling' },
-  { key: 'scoreWriter', label: 'Writer' },
-  { key: 'scoreContentAtScale', label: 'Content At Scale' },
-  { key: 'scoreZeroGPT', label: 'ZeroGPT' },
-  { key: 'scoreCrossPlag', label: 'CrossPlag' },
-];
-
-function aiColorClass(aiPct: number) {
-  // 越高越像 AI → 越红
-  if (aiPct >= 60) return 'bg-red-500';
-  if (aiPct >= 30) return 'bg-amber-500';
-  return 'bg-emerald-500';
+function humanScoreBarClass(score: number) {
+  if (score >= 90) return 'bg-emerald-500';
+  if (score >= 75) return 'bg-amber-500';
+  return 'bg-red-500';
 }
 
-function aiTextColorClass(aiPct: number) {
-  if (aiPct >= 60) return 'text-red-700 border-red-200 bg-red-50';
-  if (aiPct >= 30) return 'text-amber-700 border-amber-200 bg-amber-50';
-  return 'text-emerald-700 border-emerald-200 bg-emerald-50';
+function humanScoreCardClass(score: number) {
+  if (score >= 90) return 'text-emerald-700 border-emerald-200 bg-emerald-50';
+  if (score >= 75) return 'text-amber-700 border-amber-200 bg-amber-50';
+  return 'text-red-700 border-red-200 bg-red-50';
 }
 
-// 句子级标红（底色更浅，不盖过文字）
-function sentenceBgClass(aiPct: number) {
-  if (aiPct >= 60) return 'bg-red-100';
-  if (aiPct >= 30) return 'bg-amber-100';
-  return 'bg-emerald-50';
+function verdictLabel(verdict?: DetectionResultJson['verdict']) {
+  return verdict === 'looks_human' ? 'Looks Human' : 'AI Detected';
+}
+
+function humanScoreHint(score: number) {
+  if (score >= 90) return '已达到较稳的人类写作区间。';
+  if (score >= 75) return '处在边界区间，建议谨慎查看。';
+  return '当前仍偏像 AI 生成。';
 }
 
 // ============================================================================
@@ -207,7 +157,7 @@ function DetectionCustomerBanner() {
     <div className="border border-amber-200 bg-amber-50 rounded-lg p-3 text-sm text-amber-900 flex items-start gap-2">
       <Info className="h-4 w-4 mt-0.5 shrink-0" />
       <span>
-        网络检测器不同于大学系统内的 Turnitin 检测，仅供参考。如需 Turnitin 检测报告请联系客服。
+        这里展示的是站内 AI 检测结果，分数越高越像人写，适合用来快速判断风险。
       </span>
     </div>
   );
@@ -218,51 +168,26 @@ function HumanizeCustomerBanner() {
     <div className="border border-amber-200 bg-amber-50 rounded-lg p-3 text-sm text-amber-900 flex items-start gap-2">
       <Info className="h-4 w-4 mt-0.5 shrink-0" />
       <span>
-        机器降 AI 会导致一定程度的字数膨胀，需人工二次检查。如需精准润色人工降 AI 请联系客服。
+        系统会自动尝试多轮优化正文，并用站内 AI 检测复查；未达标时会保留真实原因或按规则处理退款。
       </span>
     </div>
   );
 }
 
-// ============================================================================
-// 句子级标红组件
-// ============================================================================
-
-function SentenceHighlights({ sentences }: { sentences: DetectionSentence[] }) {
-  return (
-    <div className="border border-gray-200 bg-white rounded-lg p-6">
-      <h3 className="text-sm font-medium text-gray-800 mb-3">
-        原文逐句 AI 概率（鼠标悬停看分数）
-      </h3>
-      <div className="text-sm leading-relaxed text-gray-800">
-        {sentences.map((s, i) => {
-          // chunk.result 是 0-1 浮点，乘 100 得到 AI 百分比
-          const pct = Math.round((s.result ?? 0) * 100);
-          const bg = sentenceBgClass(pct);
-          return (
-            <span
-              key={i}
-              className={`${bg} px-1 rounded`}
-              title={`AI 概率: ${pct}%${s.label ? ` · ${s.label}` : ''}`}
-            >
-              {s.chunk}{' '}
-            </span>
-          );
-        })}
-      </div>
-      <div className="text-xs text-gray-500 mt-3">
-        红色 = AI 概率 ≥60%；橙色 = 30-60%；绿色 = &lt;30%。悬停在句子上查看具体分数。
-      </div>
-    </div>
-  );
-}
-
-function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
+function DetectionTab({
+  refreshBalance,
+  historicalDetectionId,
+  onClearHistoricalDetection,
+}: {
+  refreshBalance: () => void;
+  historicalDetectionId: string | null;
+  onClearHistoricalDetection: () => void;
+}) {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 2026-04-19 起：预估费用 UI 已删除，直接上传冻结扣费；保留 api.estimateAiDetection
+  // 2026-04-19 起：预估费用 UI 已删除，直接上传后由后端解析、冻结和兜底。
   // 接口便于未来扩展
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -320,24 +245,31 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
     [stopPolling, refreshBalance],
   );
 
-  // Load current on mount
+  // Load historical result from the URL first; otherwise recover the current in-progress detection.
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setIsLoading(true);
+      setError(null);
       try {
-        const resp = (await api.getAiDetectionCurrent()) as DetectionData | null;
+        const resp = historicalDetectionId
+          ? (await api.getAiDetection(historicalDetectionId)) as DetectionData
+          : (await api.getAiDetectionCurrent()) as DetectionData | null;
         if (cancelled) return;
-        if (resp) {
-          setData(resp);
-          if (
+        setData(resp ?? null);
+        if (
+          resp
+          && (
             resp.detection.status === 'initializing'
             || resp.detection.status === 'processing'
-          ) {
-            startPolling(resp.detection.id);
-          }
+          )
+        ) {
+          startPolling(resp.detection.id);
         }
-      } catch {
-        /* ignore */
+      } catch (err) {
+        if (cancelled) return;
+        setData(null);
+        setError(err instanceof Error ? err.message : '检测记录不存在或已无法打开。');
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -346,7 +278,7 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
       cancelled = true;
       stopPolling();
     };
-  }, [startPolling, stopPolling]);
+  }, [historicalDetectionId, startPolling, stopPolling]);
 
   const pickFile = useCallback((f: File) => {
     const ext = fileExt(f.name);
@@ -406,6 +338,7 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
     setFile(null);
     setError(null);
     stopPolling();
+    onClearHistoricalDetection();
   };
 
   if (isLoading) {
@@ -420,9 +353,9 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
   // 显示结果页（completed / failed 或 processing）
   if (data && data.detection.status !== 'initializing') {
     const d = data.detection;
-    const results = d.result_json?.result_details || {};
-    const overall = d.overall_score ?? 0;
-    const sentences = d.result_json?.sentences;
+    const humanScore = d.human_score ?? d.result_json?.human_score ?? d.overall_score ?? 0;
+    const aiScore = d.result_json?.ai_score ?? Math.max(0, 100 - humanScore);
+    const verdict = d.result_json?.verdict;
 
     return (
       <div className="space-y-4">
@@ -433,7 +366,7 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
             <div>
               <div className="font-medium text-blue-900">正在检测中...</div>
               <div className="text-sm text-blue-700">
-                Undetectable 通常 2-4 秒出结果，最多等 15 分钟。
+                正在使用站内 AI 检测，页面会自动刷新结果。
               </div>
             </div>
           </div>
@@ -459,11 +392,11 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
 
         {d.status === 'completed' && (
           <>
-            <div className={`border rounded-lg p-6 ${aiTextColorClass(overall)}`}>
+            <div className={`border rounded-lg p-6 ${humanScoreCardClass(humanScore)}`}>
               <div className="flex items-center justify-between mb-3">
                 <div>
-                  <div className="text-sm font-medium opacity-80">综合 AI 可能性</div>
-                  <div className="text-4xl font-bold mt-1">{Math.round(overall)}%</div>
+                  <div className="text-sm font-medium opacity-80">检测分数</div>
+                  <div className="text-4xl font-bold mt-1">{Math.round(humanScore)}%</div>
                 </div>
                 <div className="text-right text-sm opacity-80">
                   <div>检测字数：{d.input_word_count.toLocaleString()} 词</div>
@@ -472,61 +405,44 @@ function DetectionTab({ refreshBalance }: { refreshBalance: () => void }) {
               </div>
               <div className="h-3 bg-white/60 rounded-full overflow-hidden">
                 <div
-                  className={`h-full ${aiColorClass(overall)} transition-all duration-500`}
-                  style={{ width: `${Math.min(100, Math.max(0, overall))}%` }}
+                  className={`h-full ${humanScoreBarClass(humanScore)} transition-all duration-500`}
+                  style={{ width: `${Math.min(100, Math.max(0, humanScore))}%` }}
                 />
               </div>
               <div className="text-xs mt-3 opacity-80">
-                {overall >= 60
-                  ? '⚠️ 大概率会被检测器判定为 AI 生成，建议用降 AI 处理一次。'
-                  : overall >= 30
-                  ? '⚠️ 部分检测器可能判定为 AI 生成，边界文本，建议谨慎。'
-                  : '✅ 多数检测器判定为人工写作，可较安全提交。'}
+                {humanScoreHint(humanScore)}
               </div>
             </div>
 
             <div className="border border-gray-200 bg-white rounded-lg p-6">
-              <h3 className="text-sm font-medium text-gray-800 mb-3">
-                各检测器明细（全部已换算为 AI 概率）
-              </h3>
-              <div className="space-y-2">
-                {DETECTOR_ENTRIES.map(({ key, label }) => {
-                  const humanScore = results[key];
-                  if (humanScore === undefined || humanScore === null) {
-                    return (
-                      <div key={key} className="flex items-center gap-3 text-sm">
-                        <div className="w-32 text-gray-600">{label}</div>
-                        <div className="flex-1 text-xs text-gray-400">未返回数据</div>
-                      </div>
-                    );
-                  }
-                  // Undetectable 的 scoreXxx 是"人工 %"，换算成 AI %
-                  const aiPct = Math.max(0, Math.min(100, 100 - humanScore));
-                  return (
-                    <div key={key} className="flex items-center gap-3 text-sm">
-                      <div className="w-32 text-gray-700 shrink-0">{label}</div>
-                      <div className="flex-1 h-5 bg-gray-100 rounded overflow-hidden">
-                        <div
-                          className={`h-full ${aiColorClass(aiPct)} transition-all duration-500`}
-                          style={{ width: `${aiPct}%` }}
-                        />
-                      </div>
-                      <div className="w-12 text-right text-gray-700 shrink-0">
-                        {Math.round(aiPct)}%
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="text-xs text-gray-500 mt-4">
-                说明：本分数由 Undetectable.ai 官方 API 返回。子检测器原始返回为"人工编写百分比"，
-                这里统一换算为"AI 概率"以便直观对比（分数越高越像 AI）。
+              <h3 className="text-sm font-medium text-gray-800 mb-4">检测结果说明</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                  <div className="text-gray-500 mb-1">当前结论</div>
+                  <div className="font-medium text-gray-900">{verdictLabel(verdict)}</div>
+                </div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                  <div className="text-gray-500 mb-1">AI 风险参考</div>
+                  <div className="font-medium text-gray-900">{Math.round(aiScore)}%</div>
+                </div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                  <div className="text-gray-500 mb-1">扫描口径</div>
+                  <div className="font-medium text-gray-900">
+                    站内 AI 检测
+                  </div>
+                </div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                  <div className="text-gray-500 mb-1">系统参考</div>
+                  <div className="font-medium text-gray-900 break-all">90 分以上可视为更稳妥</div>
+                </div>
               </div>
             </div>
 
-            {sentences && sentences.length > 0 && (
-              <SentenceHighlights sentences={sentences} />
-            )}
+            <SentenceHighlights
+              result={d.result_json}
+              title="原文检测标记"
+              emptyLabel="这次检测还没有拿到可展示的原文结果。"
+            />
 
             <button
               onClick={handleReset}
@@ -824,20 +740,27 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
       <div className="space-y-4">
         <HumanizeCustomerBanner />
         {h.status === 'failed' && (
-          <div className="border border-red-200 bg-red-50 rounded-lg p-6 flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
-            <div className="flex-1">
-              <div className="font-medium text-red-900">降 AI 失败</div>
-              <div className="text-sm text-red-700 mt-1">
-                {h.failure_reason || '未知错误，请重试。'}
+          <div className="space-y-4">
+            <div className="border border-red-200 bg-red-50 rounded-lg p-6 flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600 mt-0.5" />
+              <div className="flex-1">
+                <div className="font-medium text-red-900">降 AI 失败</div>
+                <div className="text-sm text-red-700 mt-1">
+                  {h.failure_reason || '未知错误，请重试。'}
+                </div>
+                <button
+                  onClick={handleReset}
+                  className="mt-3 text-sm text-red-700 underline hover:text-red-900"
+                >
+                  重新开始
+                </button>
               </div>
-              <button
-                onClick={handleReset}
-                className="mt-3 text-sm text-red-700 underline hover:text-red-900"
-              >
-                重新开始
-              </button>
             </div>
+            <SentenceHighlights
+              result={h.result_json}
+              title="最后一次降 AI 尝试"
+              emptyLabel="这次失败记录没有留下可展示的正文。"
+            />
           </div>
         )}
 
@@ -871,8 +794,32 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
                   <div className="text-emerald-700 opacity-80">预冻结</div>
                   <div className="font-medium text-emerald-900">{h.frozen_credits} 积分</div>
                 </div>
+                <div>
+                  <div className="text-emerald-700 opacity-80">最终检测分数</div>
+                  <div className="font-medium text-emerald-900">
+                    {h.final_human_score ?? 0}%
+                  </div>
+                </div>
+                <div>
+                  <div className="text-emerald-700 opacity-80">补降次数</div>
+                  <div className="font-medium text-emerald-900">
+                    {h.humanize_more_attempts ?? 0} 次
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 text-sm text-emerald-800">
+                {(h.final_human_score ?? 0) >= 90
+                  ? '已达到系统交付线，结果基于站内 AI 检测判定。'
+                  : '该记录未达到系统交付线。'}
               </div>
             </div>
+
+            <SentenceHighlights
+              result={h.result_json}
+              title="降 AI 后正文标记"
+              emptyLabel="这次降 AI 还没有拿到可展示的正文。"
+              displayTextOverride={h.humanized_text}
+            />
 
             {humanizedDoc && (
               <div className="border border-gray-200 bg-white rounded-lg p-4">
@@ -922,10 +869,10 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
           <div className="font-medium text-blue-900 text-lg">
             {data.humanization.status === 'initializing'
               ? '正在解析文件并冻结积分...'
-              : '正在进行深度降 AI 处理...'}
+              : '正在自动循环降 AI...'}
           </div>
           <div className="text-sm text-blue-700 mt-2">
-            通常需要 2-10 分钟，请耐心等待，页面可保持打开。
+            系统会尝试多轮补降和复查；如果仍未达标，会保留真实原因或按规则处理退款。
           </div>
           <div className="text-xs text-blue-600 mt-3">
             文章字数：{data.humanization.input_word_count.toLocaleString()} 词
@@ -1023,9 +970,32 @@ function HumanizationTab({ refreshBalance }: { refreshBalance: () => void }) {
 
 type ActiveTab = 'detection' | 'humanization';
 
+function resolveAiToolsTab(tab: string | null, historicalDetectionId: string | null): ActiveTab {
+  if (historicalDetectionId) return 'detection';
+  return tab === 'humanization' ? 'humanization' : 'detection';
+}
+
 export default function AiTools() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('detection');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const historicalDetectionId = searchParams.get('detection');
+  const tabParam = searchParams.get('tab');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(
+    () => resolveAiToolsTab(tabParam, historicalDetectionId),
+  );
   const { refreshBalance } = useBalance();
+
+  useEffect(() => {
+    setActiveTab(resolveAiToolsTab(tabParam, historicalDetectionId));
+  }, [tabParam, historicalDetectionId]);
+
+  const switchTab = useCallback((tab: ActiveTab) => {
+    setActiveTab(tab);
+    setSearchParams({ tab });
+  }, [setSearchParams]);
+
+  const clearHistoricalDetection = useCallback(() => {
+    setSearchParams({ tab: 'detection' }, { replace: true });
+  }, [setSearchParams]);
 
   return (
     <div className="p-4 md:p-8 max-w-4xl mx-auto">
@@ -1035,8 +1005,7 @@ export default function AiTools() {
           检测 AI / 降 AI
         </h1>
         <p className="text-sm text-gray-600 mt-1">
-          一次调用拿到 8 家主流检测器（GPTZero / OpenAI / Copyleaks / Sapling / Writer / ContentAtScale / ZeroGPT / CrossPlag）的聚合 AI 检测结果；
-          或上传自己的文章直接降 AI 改写。
+          用站内 AI 检测查看文章的人类写作分数，或上传自己的文章自动降 AI，系统会尝试多轮优化并复查。
         </p>
       </div>
 
@@ -1044,7 +1013,7 @@ export default function AiTools() {
       <div className="border-b border-gray-200 mb-6">
         <nav className="-mb-px flex gap-4">
           <button
-            onClick={() => setActiveTab('detection')}
+            onClick={() => switchTab('detection')}
             className={`
               py-3 px-1 border-b-2 text-sm font-medium flex items-center gap-2 transition-colors
               ${
@@ -1058,7 +1027,7 @@ export default function AiTools() {
             检测 AI
           </button>
           <button
-            onClick={() => setActiveTab('humanization')}
+            onClick={() => switchTab('humanization')}
             className={`
               py-3 px-1 border-b-2 text-sm font-medium flex items-center gap-2 transition-colors
               ${
@@ -1076,7 +1045,11 @@ export default function AiTools() {
 
       {/* 两个 Tab 都渲染但用 display 切换，保证切换 Tab 时对方轮询不中断 */}
       <div style={{ display: activeTab === 'detection' ? 'block' : 'none' }}>
-        <DetectionTab refreshBalance={refreshBalance} />
+        <DetectionTab
+          refreshBalance={refreshBalance}
+          historicalDetectionId={historicalDetectionId}
+          onClearHistoricalDetection={clearHistoricalDetection}
+        />
       </div>
       <div style={{ display: activeTab === 'humanization' ? 'block' : 'none' }}>
         <HumanizationTab refreshBalance={refreshBalance} />

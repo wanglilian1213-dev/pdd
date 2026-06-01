@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../lib/supabase';
-import { openai, extractOutputText } from '../lib/openai';
+import { streamResponseText } from '../lib/openai';
 import { env } from '../lib/runtimeEnv';
 import { getConfig } from './configService';
 import { AppError } from '../lib/errors';
@@ -43,6 +43,7 @@ function translateStage(stage: string): string {
     word_calibrating: '字数校准中',
     citation_checking: '引用核验中',
     polishing: '润色中',
+    quality_checking: '交付前检查中',
     delivering: '交付整理中',
     completed: '已完成',
     humanizing: '降 AI 处理中',
@@ -197,11 +198,11 @@ export async function sendChatMessage(
       content: typeof m.content === 'string' ? m.content.slice(0, 2000) : '',
     }));
 
-  // 4. Call GPT-5.4
-  const response = await openai.responses.create({
+  // 4. Call GPT-5.5
+  const { text } = await streamResponseText({
     model: env.openaiModel,
     instructions: systemPrompt,
-    max_output_tokens: 1024,
+    reasoning: { effort: 'xhigh' as any },
     input: [
       ...sanitizedHistory.map(m => ({
         role: m.role as 'user' | 'assistant',
@@ -211,7 +212,7 @@ export async function sendChatMessage(
     ],
   } as any);
 
-  const reply = extractOutputText(response) || '抱歉，我暂时无法回答这个问题。请联系人工客服微信：PDDService01';
+  const reply = text || '抱歉，我暂时无法回答这个问题。请联系人工客服微信：PDDService01';
 
   return { reply, remaining: limit.remaining };
 }

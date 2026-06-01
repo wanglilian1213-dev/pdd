@@ -8,6 +8,7 @@ export type TaskStage =
   | 'word_calibrating'
   | 'citation_checking'
   | 'polishing'
+  | 'quality_checking'
   | 'delivering'
   | 'completed'
   | 'humanizing';

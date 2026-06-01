@@ -64,7 +64,7 @@ router.post('/estimate', upload.single('file'), async (req: AuthRequest, res: Re
 
 // POST /api/revision/estimate-precise
 //
-// 多文件精准预估：调 GPT-5.4 article_detection 识别主文章，按
+// 多文件精准预估：调 GPT-5.5 article_detection 识别主文章，按
 // ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100 公式算冻结字数。
 // - 不写库不冻结
 // - 前端在文件列表停止变化 1.5 秒后防抖调用，给用户展示「主文章: xxx · 实际冻结 X 积分」

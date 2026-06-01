@@ -29,6 +29,7 @@ export interface ReferenceComplianceSummary {
   referenceEntries: string[];
   analyses: ReferenceEntryAnalysis[];
   totalReferences: number;
+  distinctReferenceCount: number;
   referencesFrom2020Onward: number;
   likelyAcademicPaperCount: number;
   suspectedBookCount: number;
@@ -132,7 +133,127 @@ function hasInTextCitation(text: string) {
     // Harvard without comma: (Smith 2024)
     || /\([A-Z][A-Za-z-]+(?:\s+(?:et al\.?|and|&)\s+[A-Z][A-Za-z-]+)*\s+(19|20)\d{2}[a-z]?\)/.test(text)
     // Numeric: [1], [2,3], [1-3]
-    || /\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/.test(text);
+    || /\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/.test(text)
+    // Footnote/endnote marker: ^1 or superscript digits.
+    || /(?:\^\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹⁰])/.test(text);
+}
+
+function hasAuthorYearInTextCitation(text: string) {
+  return /\([^)]+,\s*(19|20)\d{2}[a-z]?\)/.test(text)
+    || /\b[A-Z][A-Za-z-]+(?:\s+et al\.)?\s*\((19|20)\d{2}[a-z]?\)/.test(text)
+    || /\([A-Z][A-Za-z-]+(?:\s+(?:et al\.?|and|&)\s+[A-Z][A-Za-z-]+)*\s+(19|20)\d{2}[a-z]?\)/.test(text);
+}
+
+function textBeforeReferences(text: string) {
+  const headingMatch = text.match(/(?:^|\n)\s*(references|reference list|bibliography|works cited|参考文献|引用文献)\s*(?:\n|$)/i);
+  if (!headingMatch || headingMatch.index === undefined) {
+    return text;
+  }
+  return text.slice(0, headingMatch.index);
+}
+
+function firstAuthorKey(value: string) {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\bet al\.?\b/gi, '')
+    .replace(/\b(?:and|&)\b/gi, ' ')
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/gi, ' ')
+    .trim()
+    .split(/\s+/)[0]
+    ?.toLowerCase() || '';
+}
+
+function authorYearKey(author: string, year: string) {
+  const authorKey = firstAuthorKey(author);
+  const yearKey = year.toLowerCase();
+  return authorKey && yearKey ? `${authorKey}:${yearKey}` : '';
+}
+
+function authorYearCitationKeys(text: string) {
+  const keys = new Set<string>();
+  const body = textBeforeReferences(text);
+
+  for (const match of body.matchAll(/\(([^)]*(?:19|20)\d{2}[a-z]?[^)]*)\)/gi)) {
+    const segments = String(match[1] || '').split(';');
+    for (const segment of segments) {
+      const citation = segment.match(/([A-Z][A-Za-z'’.-]+(?:\s+(?:et al\.?|and|&)\s+[A-Z][A-Za-z'’.-]+)*|[\p{L}][^,;()]{0,80}?)\s*,?\s*((?:19|20)\d{2}[a-z]?)/iu);
+      if (!citation) continue;
+      const key = authorYearKey(citation[1] || '', citation[2] || '');
+      if (key) keys.add(key);
+    }
+  }
+
+  for (const match of body.matchAll(/\b([A-Z][A-Za-z'’.-]+(?:\s+et al\.?)?)\s*\(((?:19|20)\d{2}[a-z]?)\)/g)) {
+    const key = authorYearKey(match[1] || '', match[2] || '');
+    if (key) keys.add(key);
+  }
+
+  return keys;
+}
+
+function referenceEntryKey(entry: string) {
+  const yearMatch = entry.match(/\b(?:\((19|20)\d{2}[a-z]?\)|((?:19|20)\d{2}[a-z]?))\b/i);
+  if (!yearMatch || yearMatch.index === undefined) return '';
+  const year = yearMatch[1] || yearMatch[2] || '';
+  return authorYearKey(entry.slice(0, yearMatch.index), year);
+}
+
+function referenceDistinctKey(entry: string) {
+  const normalizedEntry = normalize(entry);
+  const doiMatch = normalizedEntry.match(/\b(?:doi:\s*|https?:\/\/(?:dx\.)?doi\.org\/)(10\.\d{4,9}\/\S+)/i);
+  if (doiMatch) {
+    return `doi:${(doiMatch[1] || '').replace(/[)\].,;]+$/g, '').toLowerCase()}`;
+  }
+
+  return normalizedEntry
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function hasUnmatchedAuthorYearCitation(text: string, summary: ReferenceComplianceSummary) {
+  if (!hasAuthorYearInTextCitation(text)) return false;
+  const citationKeys = Array.from(authorYearCitationKeys(text));
+  if (citationKeys.length === 0 || summary.referenceEntries.length === 0) return false;
+  const referenceKeys = new Set(summary.referenceEntries.map(referenceEntryKey).filter(Boolean));
+  return citationKeys.some((key) => !referenceKeys.has(key));
+}
+
+function hasNumericInTextCitation(text: string) {
+  return /\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/.test(text);
+}
+
+function numericCitationNumbers(text: string) {
+  const numbers = new Set<number>();
+  const body = textBeforeReferences(text);
+
+  for (const match of body.matchAll(/\[(\d+(?:\s*[,\u2013-]\s*\d+)*)\]/g)) {
+    const content = match[1] || '';
+    for (const part of content.split(/\s*,\s*/)) {
+      const range = part.match(/^(\d+)\s*[\u2013-]\s*(\d+)$/);
+      if (range) {
+        const start = Number.parseInt(range[1]!, 10);
+        const end = Number.parseInt(range[2]!, 10);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+        for (let value = Math.min(start, end); value <= Math.max(start, end); value += 1) {
+          numbers.add(value);
+        }
+        continue;
+      }
+
+      const value = Number.parseInt(part, 10);
+      if (Number.isFinite(value)) numbers.add(value);
+    }
+  }
+
+  return Array.from(numbers);
+}
+
+function hasFootnoteInTextCitation(text: string) {
+  return /(?:\^\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹⁰])/.test(text);
 }
 
 function getOutlineSectionCount(outline: string) {
@@ -141,7 +262,7 @@ function getOutlineSectionCount(outline: string) {
 }
 
 export function extractReferenceEntries(text: string) {
-  const headingMatch = text.match(/(?:^|\n)\s*(references|reference list|bibliography|works cited)\s*(?:\n|$)/i);
+  const headingMatch = text.match(/(?:^|\n)\s*(references|reference list|bibliography|works cited|参考文献|引用文献)\s*(?:\n|$)/i);
   if (!headingMatch || headingMatch.index === undefined) {
     return [];
   }
@@ -222,6 +343,7 @@ export function summarizeReferenceCompliance(text: string): ReferenceComplianceS
     referenceEntries,
     analyses,
     totalReferences: referenceEntries.length,
+    distinctReferenceCount: new Set(referenceEntries.map(referenceDistinctKey).filter(Boolean)).size,
     referencesFrom2020Onward: analyses.filter((analysis) => typeof analysis.year === 'number' && analysis.year >= 2020).length,
     likelyAcademicPaperCount: analyses.filter((analysis) => analysis.looksLikeAcademicPaper).length,
     suspectedBookCount: analyses.filter((analysis) => analysis.looksLikeBook).length,
@@ -238,6 +360,17 @@ function hasObviousCitationStyleConflict(summary: ReferenceComplianceSummary, ci
 
   if (/apa/i.test(normalizedStyle)) {
     return summary.referenceEntries.every((entry) => !/\(\d{4}[a-z]?\)/.test(entry));
+  }
+
+  return false;
+}
+
+function hasObviousInTextCitationStyleConflict(text: string, citationStyle?: string | null) {
+  const normalizedStyle = normalize(citationStyle);
+  if (!normalizedStyle) return false;
+
+  if (/\b(?:apa|harvard)\b/i.test(normalizedStyle)) {
+    return hasNumericInTextCitation(text) || hasFootnoteInTextCitation(text);
   }
 
   return false;
@@ -335,6 +468,10 @@ export function assessGeneratedPaper(
     reasons.push(`reference count below required minimum (${summary.totalReferences}/${options.requiredReferenceCount})`);
   }
 
+  if (summary.totalReferences > 0 && summary.distinctReferenceCount < summary.totalReferences) {
+    reasons.push('references must be distinct');
+  }
+
   if (summary.analyses.some((analysis) => analysis.isBefore2020)) {
     reasons.push('references must be from 2020 onwards');
   }
@@ -347,8 +484,21 @@ export function assessGeneratedPaper(
     reasons.push('references must include proper links');
   }
 
+  if (hasUnmatchedAuthorYearCitation(normalized, summary)) {
+    reasons.push('in-text citations must match reference entries');
+  }
+
+  const numericCitations = numericCitationNumbers(normalized);
+  if (summary.totalReferences > 0 && numericCitations.some((number) => number < 1 || number > summary.totalReferences)) {
+    reasons.push('numeric citations must match reference entries');
+  }
+
   if (hasObviousCitationStyleConflict(summary, options.citationStyle)) {
     reasons.push(`references do not appear to match ${normalize(options.citationStyle)} format`);
+  }
+
+  if (hasObviousInTextCitationStyleConflict(normalized, options.citationStyle)) {
+    reasons.push(`in-text citations do not appear to match ${normalize(options.citationStyle)} format`);
   }
 
   return {

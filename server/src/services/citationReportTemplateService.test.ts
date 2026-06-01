@@ -36,10 +36,34 @@ test('parseCitationReportData normalizes malformed or incomplete model output', 
   }`, 'APA 7');
 
   assert.equal(report.overallScore, 100);
-  assert.equal(report.totalCitations, 2);
+  assert.equal(report.totalCitations, 1);
   assert.equal(report.citations.length, 1);
   assert.equal(report.citations[0]?.status, 'good');
   assert.equal(report.recommendations.length > 0, true);
+});
+
+test('parseCitationReportData caps excellent-looking scores when detail checks fail', () => {
+  const report = parseCitationReportData(`{
+    "overall_score": 95,
+    "total_citations": 1,
+    "key_findings": ["The report says everything is excellent."],
+    "citations": [
+      {
+        "citation_label": "Citation 1",
+        "source_text": "[2]",
+        "score": 95,
+        "assessment": "Excellent alignment despite a failed DOI check.",
+        "details": [
+          { "criterion": "DOI", "expected": "Resolvable DOI", "found": "No matching DOI", "status": "fail" }
+        ]
+      }
+    ]
+  }`, 'Vancouver');
+
+  assert.equal(report.citations[0]?.score, 49);
+  assert.equal(report.citations[0]?.status, 'problematic');
+  assert.equal(report.overallScore, 49);
+  assert.equal(report.reliabilityLabel, 'Problematic');
 });
 
 test('renderCitationReportPdf returns a real PDF buffer', async () => {

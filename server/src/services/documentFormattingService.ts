@@ -69,10 +69,15 @@ const LINE_SPACING = 1.5;
 const DOCX_FONT_SIZE = FONT_SIZE * 2;
 const DOCX_LINE_SPACING = 360;
 const HANGING_INDENT_TWIPS = 720;
-const REFERENCE_HEADINGS = new Set(['references', 'reference list', 'bibliography', 'works cited']);
+const REFERENCE_HEADINGS = new Set(['references', 'reference list', 'bibliography', 'works cited', '参考文献', '引用文献']);
+const ILLEGAL_DOCX_TEXT_CHAR_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+
+function stripIllegalDocxTextChars(value: string) {
+  return value.replace(ILLEGAL_DOCX_TEXT_CHAR_RE, ' ');
+}
 
 function stripLeadingMarkdownSyntax(value: string) {
-  return value
+  return stripIllegalDocxTextChars(value)
     .replace(/^#{1,6}\s*/, '')
     .replace(/^[-*+]\s+/, '')
     .replace(/^\d+\.\s+/, '')
@@ -167,7 +172,7 @@ function cleanInlineFormatting(value: string) {
  *    所以 body 路径其实可以省一次显式剥离，但显式更清晰）
  */
 function splitIntoBlocks(text: string): string[][] {
-  const normalized = text.replace(/\r\n/g, '\n').trim();
+  const normalized = stripIllegalDocxTextChars(text.replace(/\r\n/g, '\n')).trim();
   if (!normalized) {
     return [];
   }
@@ -212,6 +217,19 @@ function isHeadingBlock(lines: string[]) {
   );
 }
 
+function isLikelyBodyHeadingLine(line: string) {
+  const text = stripLeadingMarkdownSyntax(line).trim();
+  if (!text) return false;
+
+  return (
+    /^[IVXLC]+\.\s+/i.test(text) ||
+    /^\d+(\.\d+)*\s+/.test(text) ||
+    /^(section|chapter|part)\s+\d+\s*[:.]\s*\S/i.test(text) ||
+    /^(abstract|introduction|background|literature review|analysis|discussion|conclusion|methodology|results|findings|recommendations|limitations|executive summary)$/i.test(text) ||
+    /^(摘要|引言|导论|研究背景|文献综述|研究方法|方法|结果|发现|讨论|分析|建议|局限|结论)$/.test(text)
+  );
+}
+
 /**
  * 判断一行文本是否是 heading。对外导出供 writingService / calibration 复用。
  * 用法：`isSingleHeadingLine('Section 2: Macroeconomic Conditions')` → true。
@@ -234,15 +252,13 @@ export function extractBodyHeadingLines(text: string): string[] {
   // Find first non-empty line index:
   let startIdx = 0;
   while (startIdx < rawLines.length && !rawLines[startIdx]!.trim()) startIdx += 1;
-  // Skip the title line if it looks like a long title (> 60 chars) OR if the 2nd non-empty line is also content
-  // Simplest rule: skip the very first non-empty line unconditionally when extracting body headings.
-  if (startIdx < rawLines.length) startIdx += 1;
+  if (startIdx < rawLines.length && !isLikelyBodyHeadingLine(rawLines[startIdx]!)) startIdx += 1;
 
   // Find References / Bibliography heading to know where body ends.
   let endIdx = rawLines.length;
   for (let i = startIdx; i < rawLines.length; i += 1) {
-    const trimmed = rawLines[i]!.trim();
-    if (/^(references|reference list|bibliography|works cited)\s*$/i.test(trimmed)) {
+    const trimmed = stripLeadingMarkdownSyntax(rawLines[i]!.trim());
+    if (isReferenceHeading(trimmed)) {
       endIdx = i;
       break;
     }
@@ -406,19 +422,38 @@ function findReferenceSections(blocks: string[][]) {
 
 const CHART_PLACEHOLDER_RE = /^\[\[CHART_PLACEHOLDER_(\d+)\]\]$/;
 const TABLE_SEPARATOR_RE = /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/;
+const TABLE_CAPTION_RE = /^(?:table|表)\s*\d+\s*[:：.\-]/i;
 
 function isChartPlaceholderBlock(lines: string[]): boolean {
   return lines.length === 1 && CHART_PLACEHOLDER_RE.test(lines[0]!.trim());
 }
 
+function getTableStartIndex(lines: string[]): number {
+  if (lines.length >= 2 && TABLE_SEPARATOR_RE.test(lines[1]!.trim())) {
+    return 0;
+  }
+
+  if (
+    lines.length >= 3 &&
+    TABLE_CAPTION_RE.test(stripLeadingMarkdownSyntax(lines[0]!).trim()) &&
+    TABLE_SEPARATOR_RE.test(lines[2]!.trim())
+  ) {
+    return 1;
+  }
+
+  return -1;
+}
+
 function isTableBlock(lines: string[]): boolean {
-  if (lines.length < 2) return false;
-  return TABLE_SEPARATOR_RE.test(lines[1]!.trim());
+  return getTableStartIndex(lines) !== -1;
 }
 
 function parseTableBlock(lines: string[]): string[][] {
-  // 跳过分隔行（第二行）
-  const dataLines = lines.filter((_, idx) => idx !== 1);
+  const tableStartIndex = getTableStartIndex(lines);
+  if (tableStartIndex === -1) return [];
+
+  // 跳过分隔行（表头后一行）；如果前面有 caption，也不把 caption 当成表格数据。
+  const dataLines = lines.slice(tableStartIndex).filter((_, idx) => idx !== 1);
 
   const rows = dataLines.map((line) => {
     // 处理 \| 转义：先临时替换为 NULL 字符，split 完再还原
@@ -727,7 +762,7 @@ function toDocxNodes(
  * 构造支持图表 + 表格的最终 docx buffer。
  *
  * 调用方需要：
- *  1. 把 Claude 返回的原文先经 `parseRevisionOutput` 处理，得到带 [[CHART_PLACEHOLDER_N]]
+ *  1. 把 AI 返回的原文先经 `parseRevisionOutput` 处理，得到带 [[CHART_PLACEHOLDER_N]]
  *     占位 token 的 text + charts 数组
  *  2. 把 charts 喂给 `chartRenderService.renderCharts` 拿到 RenderedChart 数组
  *  3. 把 token → RenderedChart 的映射表传进来

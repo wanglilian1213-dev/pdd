@@ -1,4 +1,5 @@
 const KNOWN_FILE_EXTENSIONS = ['.docx', '.doc', '.pdf', '.txt'];
+const MAX_FILENAME_BASE_LENGTH = 120;
 
 function normalizeWhitespace(value: string | null | undefined) {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -32,7 +33,11 @@ export function sanitizeFilenameBase(value: string | null | undefined, fallback:
     .replace(/\s+/g, ' ')
     .trim();
 
-  return safe || fallback;
+  const capped = safe.length > MAX_FILENAME_BASE_LENGTH
+    ? safe.slice(0, MAX_FILENAME_BASE_LENGTH).trim()
+    : safe;
+
+  return capped || fallback;
 }
 
 export function deriveTaskTitle(

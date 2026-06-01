@@ -39,3 +39,15 @@ test('parseFrontendEnv throws when VITE_SUPABASE_ANON_KEY is missing', () => {
     /VITE_SUPABASE_ANON_KEY/,
   );
 });
+
+test('parseFrontendEnv throws when VITE_API_BASE_URL is missing', () => {
+  assert.throws(
+    () =>
+      parseFrontendEnv({
+        VITE_SUPABASE_URL: 'https://example.supabase.co',
+        VITE_SUPABASE_ANON_KEY: 'anon-key',
+        VITE_API_BASE_URL: '',
+      } as unknown as ImportMetaEnv),
+    /VITE_API_BASE_URL/,
+  );
+});

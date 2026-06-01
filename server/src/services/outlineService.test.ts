@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError } from '../lib/errors';
-import { mapOutlineGenerationError } from './outlineService';
+import { assertNoRequirementConflicts, mapOutlineGenerationError } from './outlineService';
 import { normalizeCitationStyle } from './citationStyleService';
 import * as outlineService from './outlineService';
 
@@ -21,6 +21,22 @@ test('mapOutlineGenerationError turns oversized input errors into a clear user m
   const mapped = mapOutlineGenerationError(new Error('Request too large for model input'));
   assert.equal(mapped.statusCode, 400);
   assert.match(mapped.userMessage, /文件太大|拆分/);
+});
+
+test('assertNoRequirementConflicts stops instead of silently choosing between conflicting materials', () => {
+  assert.throws(
+    () => assertNoRequirementConflicts([
+      'Brief says 1500 words, rubric says 2500 words.',
+      'Brief says APA 7, rubric says Harvard.',
+    ]),
+    /上传材料里的要求互相冲突.*1500 words.*Harvard/,
+  );
+});
+
+test('assertNoRequirementConflicts tolerates missing conflict lists from outline output', () => {
+  assert.doesNotThrow(() => assertNoRequirementConflicts(undefined));
+  assert.doesNotThrow(() => assertNoRequirementConflicts(null));
+  assert.doesNotThrow(() => assertNoRequirementConflicts(['', '  ', 123]));
 });
 
 test('normalizeCitationStyle collapses mixed APA and Harvard wording into one final style', () => {

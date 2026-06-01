@@ -75,7 +75,7 @@ export default function Revision() {
 
   // --- Estimate state (前端实时显示预估字数 + 余额校验) ---
   // 第一阶段：每个文件添加时调单文件 estimate（粗估算），累加显示「上传材料 X 字（原始总字数）」
-  // 第二阶段：文件列表停止变化 1.5 秒后调多文件 estimate-precise（GPT-5.4 识别主文章 + 精准冻结）
+  // 第二阶段：文件列表停止变化 1.5 秒后调多文件 estimate-precise（识别主文章 + 精准冻结）
   //          展示「主文章: xxx · 实际冻结 X 积分」
   const [wordsByFile, setWordsByFile] = useState<Map<File, number>>(new Map());
   const [pricePerWord, setPricePerWord] = useState<number>(0.2);
@@ -180,7 +180,7 @@ export default function Revision() {
   }, [startPolling, stopPolling]);
 
   // --- File validation ---
-  // 后端走 Anthropic Messages API，inline document 只接受 application/pdf。
+  // 后端走统一 AI 接口，PDF 和图片按服务支持的格式传入。
   // .docx 后端会用 mammoth 抽成纯文本再上送。.doc/.rtf/.odt 仍不支持。
   const ALLOWED_EXTENSIONS = new Set([
     'pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'txt', 'md', 'markdown', 'docx',
@@ -244,10 +244,10 @@ export default function Revision() {
       });
   }, []);
 
-  // --- 多文件精准估算（GPT-5.4 识别主文章 + 1.2x 缓冲公式）---
+  // --- 多文件精准估算（识别主文章 + 1.2x 缓冲公式）---
   // 文件列表停止变化 1.5 秒后触发；删文件不发请求（前端按 wordsByFile 自动重算）。
   // 失败时不阻断提交，UI 显示「精准估算失败，提交时按主文章字数计费」。
-  // createRevision 内部独立再调一次 GPT-5.4，所以这里失败也不影响最终金额。
+  // createRevision 内部独立再做一次识别，所以这里失败也不影响最终金额。
   useEffect(() => {
     if (preciseDebounceRef.current) clearTimeout(preciseDebounceRef.current);
 
@@ -343,7 +343,7 @@ export default function Revision() {
   const estimatedAmount = Math.ceil(estimatedWords * pricePerWord);
   const isEstimating = estimatingCount > 0;
   const isPrecising = precisingState === 'loading';
-  // 余额校验取数策略：优先 precise（GPT 识别后的精准金额），否则用单文件累加（粗保守上限）
+  // 余额校验取数策略：优先 precise（识别后的精准金额），否则用单文件累加（粗保守上限）
   const effectiveAmount = precise?.preciseFrozenAmount ?? estimatedAmount;
   const isInsufficient = balance != null && effectiveAmount > balance;
 
@@ -636,7 +636,7 @@ export default function Revision() {
 
           {/* 预估卡片 + 计费提示 */}
           {/* 两阶段：先单文件累加显示「上传材料 X 字（原始总字数）」，
-              然后等 1.5 秒后台 GPT 识别主文章 + 显示「主文章: xxx · 实际冻结 Y 积分」 */}
+              然后等 1.5 秒后台识别主文章 + 显示「主文章: xxx · 实际冻结 Y 积分」 */}
           <div className="space-y-2">
             {files.length > 0 && (
               <div className={`rounded-md border p-3 text-sm ${
@@ -662,7 +662,7 @@ export default function Revision() {
                     {!isEstimating && isPrecising && (
                       <p className="text-gray-700 flex items-center gap-1.5">
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        正在让 GPT 识别主文章并精准估算...
+                        正在识别主文章并精准估算...
                       </p>
                     )}
                     {!isEstimating && precise && (

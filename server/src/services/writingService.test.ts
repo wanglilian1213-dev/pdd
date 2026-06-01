@@ -30,6 +30,16 @@ test('buildDraftGenerationSystemPrompt includes the stronger first-draft writing
   assert.match(prompt, /not book/i);
 });
 
+test('buildDraftGenerationSystemPrompt disables web-search citation rules for closed-book tasks', () => {
+  const prompt = buildDraftGenerationSystemPrompt(2500, 'APA 7', 15, {
+    externalSourcesAllowed: false,
+  });
+
+  assert.match(prompt, /Do not use web_search/i);
+  assert.match(prompt, /only the uploaded materials/i);
+  assert.doesNotMatch(prompt, /MUST use web_search/i);
+});
+
 test('buildWordCalibrationSystemPrompt also forbids markdown-style output', () => {
   const prompt = buildWordCalibrationSystemPrompt(1200, 1500, 'APA 7', 10);
 
@@ -49,13 +59,290 @@ test('buildWordCalibrationSystemPrompt enforces a strict main-body-only word ran
   assert.match(prompt, /very strict rule, must follow/i);
 });
 
-test('buildCitationVerificationSystemPrompt also forbids markdown-style output', () => {
+test('rewrite-stage prompts preserve uploaded data analysis boundaries', () => {
+  const qualityContext = 'QUALITY GATE CONTEXT: Use only structured results. Data analysis evidence is available. Use only these structured results when making numeric claims: {"numericColumns":{"score":{"mean":80}}}.';
+  const calibrationPrompt = buildWordCalibrationSystemPrompt(
+    1200,
+    1000,
+    'APA 7',
+    5,
+    ['Introduction', 'Data Analysis', 'Conclusion'],
+    qualityContext,
+  );
+  const citationPrompt = buildCitationVerificationSystemPrompt('APA 7', 5, {
+    qualityContext,
+  });
+  const polishingPrompt = writingServiceTestUtils.buildPolishingSystemPrompt(
+    1000,
+    950,
+    qualityContext,
+  );
+
+  for (const prompt of [calibrationPrompt, citationPrompt, polishingPrompt]) {
+    assert.match(prompt, /QUALITY CONTEXT PRESERVATION/i);
+    assert.match(prompt, /Use only structured results/i);
+    assert.match(prompt, /Do not add new numeric findings/i);
+    assert.match(prompt, /regressions, p-values, confidence intervals/i);
+  }
+});
+
+test('buildCitationVerificationSystemPrompt only allows citation/reference patch output', () => {
   const prompt = buildCitationVerificationSystemPrompt('APA 7', 10);
 
-  assert.match(prompt, /Output the corrected paper text only/i);
+  assert.match(prompt, /JSON/i);
+  assert.match(prompt, /in-text citation/i);
+  assert.match(prompt, /References section/i);
+  assert.match(prompt, /Do NOT change the title/i);
+  assert.match(prompt, /Do NOT change section headings/i);
+  assert.match(prompt, /Do NOT rewrite ordinary body sentences/i);
+  assert.doesNotMatch(prompt, /Output the corrected paper text only/i);
   assert.match(prompt, /Do not use Markdown syntax/i);
   assert.match(prompt, /at least 10 references/i);
   assert.match(prompt, /2020 onwards/i);
+});
+
+test('buildCitationVerificationSystemPrompt does not replace references from the web when external sources are blocked', () => {
+  const prompt = buildCitationVerificationSystemPrompt('APA 7', 10, {
+    externalSourcesAllowed: false,
+  });
+
+  assert.match(prompt, /Do not use web_search/i);
+  assert.match(prompt, /only the uploaded materials/i);
+  assert.doesNotMatch(prompt, /replace it with a real paper.*web_search/i);
+});
+
+test('applyCitationVerificationPatch applies only in-text citation edits and references', () => {
+  const applyCitationVerificationPatch = (writingServiceTestUtils as Record<string, unknown>).applyCitationVerificationPatch as
+    | ((originalText: string, modelOutput: string) => { text: string; appliedInTextEditCount: number; replacedReferences: boolean })
+    | undefined;
+
+  assert.equal(typeof applyCitationVerificationPatch, 'function');
+
+  const original = [
+    'Why Schools Should Limit Phone Use',
+    '',
+    'Introduction',
+    'Students concentrate better when phones are restricted.',
+    '',
+    'Body Paragraphs',
+    'Classroom notifications interrupt attention (Old, 2019).',
+    '',
+    'Conclusion',
+    'Schools should set clear boundaries.',
+    '',
+    'References',
+    'Old, A. (2019). Old classroom study. https://doi.org/10.1000/old',
+  ].join('\n');
+
+  const modelOutput = JSON.stringify({
+    inTextCitationEdits: [
+      {
+        find: 'Classroom notifications interrupt attention (Old, 2019).',
+        replace: 'Classroom notifications interrupt attention (Chen, 2024).',
+      },
+    ],
+    references: [
+      'Chen, L. (2024). Student attention and mobile phone notifications. Journal of Educational Psychology, 116(2), 210-225. https://doi.org/10.1000/chen2024',
+    ],
+  });
+
+  const result = applyCitationVerificationPatch!(original, modelOutput);
+
+  assert.equal(result.appliedInTextEditCount, 1);
+  assert.equal(result.replacedReferences, true);
+  assert.match(result.text, /Why Schools Should Limit Phone Use/);
+  assert.match(result.text, /Introduction/);
+  assert.match(result.text, /Body Paragraphs/);
+  assert.match(result.text, /Conclusion/);
+  assert.match(result.text, /Classroom notifications interrupt attention \(Chen, 2024\)\./);
+  assert.match(result.text, /Chen, L\. \(2024\)/);
+  assert.doesNotMatch(result.text, /Old, A\. \(2019\)/);
+});
+
+test('applyCitationVerificationPatch rejects body rewrites outside citations', () => {
+  const applyCitationVerificationPatch = (writingServiceTestUtils as Record<string, unknown>).applyCitationVerificationPatch as
+    | ((originalText: string, modelOutput: string) => { text: string; appliedInTextEditCount: number; replacedReferences: boolean })
+    | undefined;
+
+  assert.equal(typeof applyCitationVerificationPatch, 'function');
+
+  const original = [
+    'Why Schools Should Limit Phone Use',
+    '',
+    'Introduction',
+    'Students concentrate better when phones are restricted.',
+    '',
+    'References',
+    'Old, A. (2019). Old classroom study. https://doi.org/10.1000/old',
+  ].join('\n');
+
+  const modelOutput = JSON.stringify({
+    inTextCitationEdits: [
+      {
+        find: 'Students concentrate better when phones are restricted.',
+        replace: 'Strict phone bans dramatically improve achievement (Chen, 2024).',
+      },
+    ],
+    references: [
+      'Chen, L. (2024). Student attention and mobile phone notifications. Journal of Educational Psychology, 116(2), 210-225. https://doi.org/10.1000/chen2024',
+    ],
+  });
+
+  const result = applyCitationVerificationPatch!(original, modelOutput);
+
+  assert.equal(result.appliedInTextEditCount, 0);
+  assert.equal(result.replacedReferences, true);
+  assert.match(result.text, /Students concentrate better when phones are restricted\./);
+  assert.doesNotMatch(result.text, /Strict phone bans dramatically improve achievement/);
+  assert.match(result.text, /Chen, L\. \(2024\)/);
+});
+
+test('applyCitationVerificationPatch does not treat ordinary year parentheses as citations', () => {
+  const applyCitationVerificationPatch = (writingServiceTestUtils as Record<string, unknown>).applyCitationVerificationPatch as
+    | ((originalText: string, modelOutput: string) => { text: string; appliedInTextEditCount: number; replacedReferences: boolean })
+    | undefined;
+
+  assert.equal(typeof applyCitationVerificationPatch, 'function');
+
+  const original = [
+    'Why Schools Should Limit Phone Use',
+    '',
+    'Introduction',
+    'The dataset covered the recovery period (2020-2022).',
+    '',
+    'References',
+    'Old, A. (2021). Classroom study. https://doi.org/10.1000/old2021',
+  ].join('\n');
+
+  const modelOutput = JSON.stringify({
+    inTextCitationEdits: [
+      {
+        find: 'The dataset covered the recovery period (2020-2022).',
+        replace: 'The dataset covered the recovery period (Chen, 2024).',
+      },
+    ],
+    references: [
+      'Chen, L. (2024). Student attention and mobile phone notifications. Journal of Educational Psychology, 116(2), 210-225. https://doi.org/10.1000/chen2024',
+    ],
+  });
+
+  const result = applyCitationVerificationPatch!(original, modelOutput);
+
+  assert.equal(result.appliedInTextEditCount, 0);
+  assert.match(result.text, /The dataset covered the recovery period \(2020-2022\)\./);
+  assert.doesNotMatch(result.text, /The dataset covered the recovery period \(Chen, 2024\)\./);
+  assert.match(result.text, /Chen, L\. \(2024\)/);
+});
+
+test('applyCitationVerificationPatch keeps the original article when the model returns a rewritten paper', () => {
+  const applyCitationVerificationPatch = (writingServiceTestUtils as Record<string, unknown>).applyCitationVerificationPatch as
+    | ((originalText: string, modelOutput: string) => { text: string; appliedInTextEditCount: number; replacedReferences: boolean })
+    | undefined;
+
+  assert.equal(typeof applyCitationVerificationPatch, 'function');
+
+  const original = [
+    'Why Schools Should Limit Phone Use',
+    '',
+    'Introduction',
+    'Students concentrate better when phones are restricted (Old, 2019).',
+    '',
+    'Body Paragraphs',
+    'Classroom notifications interrupt attention.',
+    '',
+    'Conclusion',
+    'Schools should set clear boundaries.',
+    '',
+    'References',
+    'Old, A. (2019). Old classroom study. https://doi.org/10.1000/old',
+  ].join('\n');
+
+  const rewrittenPaper = [
+    'A Better Title That Must Not Be Used',
+    '',
+    'Students learn best when schools remove phones completely (Chen, 2024). This rewritten paragraph merged the introduction and body.',
+    '',
+    'Therefore, every school should ban phones.',
+    '',
+    'References',
+    'Chen, L. (2024). Student attention and mobile phone notifications. Journal of Educational Psychology, 116(2), 210-225. https://doi.org/10.1000/chen2024',
+  ].join('\n');
+
+  const result = applyCitationVerificationPatch!(original, rewrittenPaper);
+
+  assert.equal(result.appliedInTextEditCount, 0);
+  assert.equal(result.replacedReferences, true);
+  assert.match(result.text, /^Why Schools Should Limit Phone Use/);
+  assert.match(result.text, /Introduction/);
+  assert.match(result.text, /Body Paragraphs/);
+  assert.match(result.text, /Conclusion/);
+  assert.match(result.text, /Students concentrate better when phones are restricted \(Old, 2019\)\./);
+  assert.doesNotMatch(result.text, /A Better Title That Must Not Be Used/);
+  assert.doesNotMatch(result.text, /merged the introduction and body/);
+  assert.match(result.text, /Chen, L\. \(2024\)/);
+});
+
+test('chart enhancement repair enforces requested chart type and axis titles', () => {
+  const repaired = writingServiceTestUtils.applyRequiredChartOptions({
+    title: 'Figure 1: Maintenance trend',
+    width: 720,
+    height: 440,
+    chartjs: {
+      type: 'bar',
+      data: {
+        labels: ['Jan', 'Feb'],
+        datasets: [{ label: 'Downtime', data: [42, 38] }],
+      },
+      options: {},
+    },
+  }, {
+    chartType: 'line',
+    chartTypes: ['line'],
+    xAxis: 'month',
+    yAxis: 'downtime_hours',
+  });
+
+  assert.equal(repaired.chartjs.type, 'line');
+  assert.equal(repaired.chartjs.options.scales.x.title.display, true);
+  assert.equal(repaired.chartjs.options.scales.x.title.text, 'month');
+  assert.equal(repaired.chartjs.options.scales.y.title.display, true);
+  assert.equal(repaired.chartjs.options.scales.y.title.text, 'downtime_hours');
+});
+
+test('final review text describes rendered figures instead of internal placeholders', () => {
+  const reviewText = writingServiceTestUtils.buildFinalReviewTextWithRenderedFigures(
+    'Findings\nFigure 1 shows the trend.\n\n[[CHART_PLACEHOLDER_1]]\n\nReferences',
+    new Map([[
+      '[[CHART_PLACEHOLDER_1]]',
+      {
+        spec: {
+          title: 'Figure 1: Monthly downtime hours',
+          width: 720,
+          height: 440,
+          chartjs: {
+            type: 'line',
+            data: { labels: ['Jan'], datasets: [{ label: 'downtime_hours', data: [42] }] },
+            options: {
+              scales: {
+                x: { title: { display: true, text: 'month' } },
+                y: { title: { display: true, text: 'downtime_hours' } },
+              },
+            },
+          },
+        },
+        png: Buffer.from([1, 2, 3]),
+        width: 720,
+        height: 440,
+      },
+    ]]),
+  );
+
+  assert.doesNotMatch(reviewText, /\[\[CHART_PLACEHOLDER_1\]\]/);
+  assert.match(reviewText, /Rendered figure embedded in the Word document/);
+  assert.match(reviewText, /Figure 1: Monthly downtime hours/);
+  assert.match(reviewText, /chart type: line/);
+  assert.match(reviewText, /x-axis: month/);
+  assert.match(reviewText, /y-axis: downtime_hours/);
 });
 
 test('storeGeneratedTaskFile throws when storage upload fails', async () => {
@@ -133,6 +420,30 @@ test('buildWritingFailureReason keeps the deliver-stage wording specific', () =>
   assert.equal(
     buildWritingFailureReason('delivering', new Error('storage failed')),
     '文件交付过程中出现问题，积分已自动退回。请重新创建任务。',
+  );
+});
+
+test('buildWritingFailureReason explains final quality gate failures specifically', () => {
+  assert.equal(
+    buildWritingFailureReason('quality_checking', new Error('quality_gate_failed:unsupported_data_analysis_claim')),
+    '数据分析结论没有被可验证的数据结果支撑，积分已自动退回。请重新创建任务。',
+  );
+});
+
+test('buildWritingFailureReason explains final format and rubric review failures separately', () => {
+  assert.equal(
+    buildWritingFailureReason('quality_checking', new Error('quality_gate_failed:final_format_review_failed')),
+    '交付前排版和格式复查没有通过，积分已自动退回。请重新创建任务。',
+  );
+
+  assert.equal(
+    buildWritingFailureReason('quality_checking', new Error('quality_gate_failed:final_rubric_review_failed')),
+    '交付前作业要求和评分标准复查没有通过，积分已自动退回。请重新创建任务。',
+  );
+
+  assert.equal(
+    buildWritingFailureReason('quality_checking', new Error('quality_gate_failed:final_review_timeout:600000ms')),
+    '交付前质量复查超时，积分已自动退回。请稍后重试。',
   );
 });
 
@@ -299,6 +610,28 @@ test('countMainBodyWords ignores the title and references section', () => {
     'Essay Title',
     '',
     'This paragraph totals exactly six words.',
+    '',
+    'References',
+    'Smith, J. (2024). Example article. https://example.com',
+  ].join('\n');
+
+  assert.equal(countMainBodyWords!(text), 6);
+});
+
+test('countMainBodyWords ignores appendices before the references section', () => {
+  const countMainBodyWords = (writingServiceTestUtils as Record<string, unknown>).countMainBodyWords as
+    | ((text: string) => number)
+    | undefined;
+
+  assert.equal(typeof countMainBodyWords, 'function');
+
+  const text = [
+    'Essay Title',
+    '',
+    'Actual body has exactly six words.',
+    '',
+    'Appendix',
+    'These extra appendix words must not count toward the main body.',
     '',
     'References',
     'Smith, J. (2024). Example article. https://example.com',

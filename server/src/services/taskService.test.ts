@@ -6,6 +6,7 @@ import {
   acknowledgeHumanize,
   createTask,
   discardPendingTaskWithDeps,
+  failTask,
   getCurrentTask,
 } from './taskService';
 
@@ -127,6 +128,47 @@ test('createTask turns database unique conflicts into ActiveTaskExistsError', as
   } finally {
     restore();
   }
+});
+
+test('failTask retries transient task status write errors before recording failure event', async () => {
+  let taskUpdateCalls = 0;
+  let failedEventInserted = false;
+
+  const restore = stubSupabaseFrom((table: string) => {
+    if (table === 'tasks') {
+      return {
+        update: () => ({
+          eq: async () => {
+            taskUpdateCalls += 1;
+            if (taskUpdateCalls === 1) {
+              return { error: { message: 'fetch failed' } };
+            }
+            return { error: null };
+          },
+        }),
+      };
+    }
+
+    if (table === 'task_events') {
+      return {
+        insert: async () => {
+          failedEventInserted = true;
+          return { error: null };
+        },
+      };
+    }
+
+    throw new Error(`unexpected table ${table}`);
+  });
+
+  try {
+    await failTask('task-1', 'outline_generating', '大纲生成失败，请稍后重试。', false, '503');
+  } finally {
+    restore();
+  }
+
+  assert.equal(taskUpdateCalls, 2);
+  assert.equal(failedEventInserted, true);
 });
 
 // ---------------------

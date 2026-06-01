@@ -574,9 +574,6 @@ function WhySection() {
                   Academic-RLHF™ 驱动
                 </span>
               </div>
-              <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-amber-400 text-amber-950 text-[10px] font-black px-2 py-0.5 rounded-full shadow-lg whitespace-nowrap">
-                推荐
-              </span>
             </div>
           </div>
 
