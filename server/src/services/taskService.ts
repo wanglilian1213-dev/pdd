@@ -15,6 +15,40 @@ interface DiscardPendingTaskDeps {
   deleteTask: (taskId: string) => Promise<void>;
 }
 
+const TASK_STATUS_WRITE_RETRY_ATTEMPTS = 3;
+
+function formatSupabaseError(error: unknown) {
+  if (!error) return '';
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function isTransientTaskWriteError(error: unknown) {
+  const detail = formatSupabaseError(error);
+  return /fetch failed|timeout|timed out|ECONNRESET|ETIMEDOUT|EAI_AGAIN|5\d\d|Service temporarily unavailable/i.test(detail);
+}
+
+async function writeTaskStatusWithRetry(
+  label: string,
+  write: () => Promise<{ error: unknown }>,
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= TASK_STATUS_WRITE_RETRY_ATTEMPTS; attempt += 1) {
+    const { error } = await write();
+    if (!error) return;
+    lastError = error;
+    if (!isTransientTaskWriteError(error) || attempt === TASK_STATUS_WRITE_RETRY_ATTEMPTS) break;
+    console.warn(`[${label}] task status write failed on attempt ${attempt}/${TASK_STATUS_WRITE_RETRY_ATTEMPTS}, retrying: ${formatSupabaseError(error)}`);
+    await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+  }
+  throw new AppError(500, '任务状态更新失败。', formatSupabaseError(lastError));
+}
+
 export async function createTask(userId: string, title: string, specialRequirements: string) {
   const { data: activeTask } = await supabaseAdmin
     .from('tasks')
@@ -269,31 +303,25 @@ export async function getTaskList(userId: string, status?: string, limit = 20, o
 }
 
 export async function updateTaskStage(taskId: string, stage: string, extraFields: Record<string, unknown> = {}) {
-  const { error } = await supabaseAdmin
-    .from('tasks')
-    .update({ stage, updated_at: new Date().toISOString(), ...extraFields })
-    .eq('id', taskId);
-
-  if (error) {
-    throw new AppError(500, '任务状态更新失败。');
-  }
+  await writeTaskStatusWithRetry('task.update_stage', async () =>
+    await supabaseAdmin
+      .from('tasks')
+      .update({ stage, updated_at: new Date().toISOString(), ...extraFields })
+      .eq('id', taskId));
 }
 
 export async function failTask(taskId: string, failureStage: string, failureReason: string, refunded: boolean, technicalDetail?: string) {
-  const { error } = await supabaseAdmin
-    .from('tasks')
-    .update({
-      status: 'failed',
-      failure_stage: failureStage,
-      failure_reason: failureReason,
-      refunded,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', taskId);
-
-  if (error) {
-    throw new AppError(500, '任务状态更新失败。');
-  }
+  await writeTaskStatusWithRetry('task.fail', async () =>
+    await supabaseAdmin
+      .from('tasks')
+      .update({
+        status: 'failed',
+        failure_stage: failureStage,
+        failure_reason: failureReason,
+        refunded,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', taskId));
 
   await supabaseAdmin.from('task_events').insert({
     task_id: taskId,

@@ -12,16 +12,24 @@ import {
   extractBodyHeadingLines,
   countBodyHeadingLines,
 } from './documentFormattingService';
-import { anthropic } from '../lib/anthropic';
-import { renderCharts, type RenderedChart } from './chartRenderService';
+import { renderCharts, type ChartSpec, type RenderedChart } from './chartRenderService';
 import { parseRevisionOutput } from './revisionContentParser';
 import { buildDocxFileName, normalizeDeliveryPaperTitle } from './paperTitleService';
 import { getOrUploadMaterialContent, type StoredMaterialFile } from './materialInputService';
+import { runStructuredDataAnalysisForMaterials } from './structuredDataAnalysisService';
 import {
   assessGeneratedPaper as assessGeneratedPaperInternal,
   summarizeReferenceCompliance,
   extractReferenceEntries,
 } from './paperQualityService';
+import {
+  assessWritingQualityRequirements,
+  assertFinalAcademicDelivery,
+  buildQualityContextForPrompt,
+  type ChartRequirement,
+  type ChartRequirementType,
+} from './writingQualityGateService';
+import { runFinalWritingQualityReview } from './finalWritingQualityReviewService';
 import {
   buildCitationReportPrompt,
   parseCitationReportData,
@@ -60,6 +68,12 @@ interface WritingContextInput {
   requirements: string;
   courseCode?: string | null;
   versionBase?: number;
+  externalSourcesAllowed?: boolean;
+}
+
+interface ExternalSourcePromptOptions {
+  externalSourcesAllowed?: boolean;
+  qualityContext?: string;
 }
 
 interface GeneratedTaskFilePayload {
@@ -159,11 +173,52 @@ export function buildWritingFailureReason(stage: string, error: unknown) {
     }
   }
 
+  if (message.startsWith('quality_gate_failed:')) {
+    if (message.includes('data_analysis_missing')) {
+      return '数据分析没有形成可验证结果，积分已自动退回。请补充可分析的数据文件后重新创建任务。';
+    }
+
+    if (message.includes('visual_required') || message.includes('chart_render_failed') || message.includes('visual_count_too_low')) {
+      return '图表或图示没有成功生成，积分已自动退回。请重新创建任务。';
+    }
+
+    if (message.includes('word_count_out_of_range') || message.includes('section_count_too_low') || message.includes('format_artifact_leftover')) {
+      return '交付前排版和格式检查没有通过，积分已自动退回。请重新创建任务。';
+    }
+
+    if (message.includes('final_format_review_failed')) {
+      return '交付前排版和格式复查没有通过，积分已自动退回。请重新创建任务。';
+    }
+
+    if (message.includes('final_requirement_review_failed') || message.includes('final_rubric_review_failed')) {
+      return '交付前作业要求和评分标准复查没有通过，积分已自动退回。请重新创建任务。';
+    }
+
+    if (message.includes('final_review_unparseable')) {
+      return '交付前质量复查结果不可用，积分已自动退回。请重新创建任务。';
+    }
+
+    if (message.includes('final_review_timeout')) {
+      return '交付前质量复查超时，积分已自动退回。请稍后重试。';
+    }
+
+    if (message.includes('unsupported_data_analysis_claim')) {
+      return '数据分析结论没有被可验证的数据结果支撑，积分已自动退回。请重新创建任务。';
+    }
+
+    if (message.includes('professional_schematic_not_explicit') || message.includes('uncited_professional_parameter')) {
+      return '医学或工程图示里的参数依据不够清楚，积分已自动退回。请重新创建任务。';
+    }
+
+    return '交付前质量检查没有通过，积分已自动退回。请重新创建任务。';
+  }
+
   const stageMessages: Record<string, string> = {
     writing: '初稿生成过程中出现问题',
     word_calibrating: '字数校准过程中出现问题',
     citation_checking: '引用检查过程中出现问题',
     polishing: '润色过程中出现问题',
+    quality_checking: '交付前质量检查过程中出现问题',
     delivering: '文件交付过程中出现问题',
   };
 
@@ -236,9 +291,9 @@ function stripLeadingTitleLine(text: string) {
 function extractMainBodyText(text: string) {
   const withoutTitle = stripLeadingTitleLine(String(text || '').trim());
   const lines = withoutTitle.replace(/\r\n/g, '\n').split('\n');
-  const referenceHeadingIndex = lines.findIndex((line) => /^(references|reference list|bibliography|works cited)\s*$/i.test(line.trim()));
+  const mainBodyEndIndex = lines.findIndex((line) => /^(references|reference list|bibliography|works cited|appendix(?:\s+[A-Z0-9一二三四五六七八九十]+)?|appendices|参考文献|引用文献|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)(?:\s*[:：].*)?$/i.test(line.trim()));
 
-  const bodyLines = referenceHeadingIndex >= 0 ? lines.slice(0, referenceHeadingIndex) : lines;
+  const bodyLines = mainBodyEndIndex >= 0 ? lines.slice(0, mainBodyEndIndex) : lines;
   return bodyLines.join('\n').trim();
 }
 
@@ -319,9 +374,9 @@ async function runWordCalibrationAttempts(options: {
   }
 
   // 所有尝试都不完美。两段式挑最优：
-  //  (a) 先从"heading 数量达标(>= 预期 - 1, 允许 ±1 容差)"的候选里挑 distance 最小的
-  //  (b) 如果过滤后空集（全部掉 heading），按 heading 数量多 + distance 小挑
-  const headingThreshold = Math.max(0, expectedHeadingCount - 1);
+  //  (a) 先从 heading 数量完整的候选里挑 distance 最小的
+  //  (b) 如果过滤后空集，按 heading 数量多 + distance 小挑
+  const headingThreshold = expectedHeadingCount;
   const structurallyOk = attempts.filter((a) => a.headingCount >= headingThreshold);
   let best: AttemptRecord;
   if (structurallyOk.length > 0) {
@@ -338,6 +393,280 @@ async function runWordCalibrationAttempts(options: {
   };
 }
 
+const IN_TEXT_CITATION_PATTERN = /\([A-Z][A-Za-z'’.-]+(?:\s+et al\.?)?(?:\s*(?:,|and|&)\s*[A-Z][A-Za-z'’.-]+)*\s*,?\s*(?:19|20)\d{2}[a-z]?(?:\s*;\s*[A-Z][A-Za-z'’.-]+(?:\s+et al\.?)?(?:\s*(?:,|and|&)\s*[A-Z][A-Za-z'’.-]+)*\s*,?\s*(?:19|20)\d{2}[a-z]?)*\)|\b[A-Z][A-Za-z'’.-]+(?:\s+et al\.)?\s*\((?:19|20)\d{2}[a-z]?\)|\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/g;
+const REFERENCE_HEADING_LINE_PATTERN = /^(references|reference list|bibliography|works cited|参考文献|引用文献)\s*(?:[:：].*)?$/i;
+
+interface ReferenceSectionParts {
+  beforeReferences: string;
+  referenceHeading: string;
+  referenceBody: string;
+  hasReferenceSection: boolean;
+}
+
+interface CitationPatchOutput {
+  inTextCitationEdits?: Array<{ find?: unknown; replace?: unknown }>;
+  inTextEdits?: Array<{ find?: unknown; replace?: unknown }>;
+  references?: unknown;
+  referenceEntries?: unknown;
+  referencesText?: unknown;
+}
+
+interface CitationPatchApplyResult {
+  text: string;
+  appliedInTextEditCount: number;
+  replacedReferences: boolean;
+}
+
+function splitReferenceSection(text: string): ReferenceSectionParts {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!normalized) {
+    return {
+      beforeReferences: '',
+      referenceHeading: 'References',
+      referenceBody: '',
+      hasReferenceSection: false,
+    };
+  }
+
+  const lines = normalized.split('\n');
+  let offset = 0;
+  for (const line of lines) {
+    const start = offset;
+    const end = start + line.length;
+    if (REFERENCE_HEADING_LINE_PATTERN.test(line.trim())) {
+      return {
+        beforeReferences: normalized.slice(0, start).trimEnd(),
+        referenceHeading: line.trim() || 'References',
+        referenceBody: normalized.slice(Math.min(end + 1, normalized.length)).trim(),
+        hasReferenceSection: true,
+      };
+    }
+    offset = end + 1;
+  }
+
+  return {
+    beforeReferences: normalized,
+    referenceHeading: 'References',
+    referenceBody: '',
+    hasReferenceSection: false,
+  };
+}
+
+function joinBodyAndReferences(body: string, originalParts: ReferenceSectionParts, referenceEntries?: string[]) {
+  const cleanBody = String(body || '').trimEnd();
+  if (referenceEntries && referenceEntries.length > 0) {
+    return `${cleanBody}\n\n${originalParts.referenceHeading || 'References'}\n${referenceEntries.join('\n\n')}`.trim();
+  }
+
+  if (!originalParts.hasReferenceSection) {
+    return cleanBody.trim();
+  }
+
+  return `${cleanBody}\n\n${originalParts.referenceHeading}\n${originalParts.referenceBody}`.trim();
+}
+
+function normalizeWithoutInTextCitations(value: string) {
+  IN_TEXT_CITATION_PATTERN.lastIndex = 0;
+  return String(value || '')
+    .replace(IN_TEXT_CITATION_PATTERN, '')
+    .replace(/\s+([.,;:!?])/g, '$1')
+    .replace(/\(\s*\)/g, '')
+    .replace(/\[\s*\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasInTextCitation(value: string) {
+  IN_TEXT_CITATION_PATTERN.lastIndex = 0;
+  return IN_TEXT_CITATION_PATTERN.test(value);
+}
+
+function isCitationOnlyReplacement(find: string, replace: string) {
+  const original = String(find || '').trim();
+  const revised = String(replace || '').trim();
+  if (!original || !revised || original === revised) return false;
+  if (original.length > 1200 || revised.length > 1400) return false;
+  if (!hasInTextCitation(original) && !hasInTextCitation(revised)) return false;
+
+  return normalizeWithoutInTextCitations(original) === normalizeWithoutInTextCitations(revised);
+}
+
+function applyInTextCitationEdits(body: string, edits: Array<{ find?: unknown; replace?: unknown }> = []) {
+  let nextBody = body;
+  let applied = 0;
+
+  for (const edit of edits) {
+    const find = typeof edit.find === 'string' ? edit.find.trim() : '';
+    const replace = typeof edit.replace === 'string' ? edit.replace.trim() : '';
+    if (!isCitationOnlyReplacement(find, replace)) continue;
+    if (!nextBody.includes(find)) continue;
+
+    nextBody = nextBody.replace(find, replace);
+    applied += 1;
+  }
+
+  return { body: nextBody, applied };
+}
+
+function extractJsonObject(raw: string) {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const first = cleaned.indexOf('{');
+  const last = cleaned.lastIndexOf('}');
+  if (first < 0 || last <= first) return null;
+  return cleaned.slice(first, last + 1);
+}
+
+function parseCitationPatchOutput(raw: string): CitationPatchOutput | null {
+  const json = extractJsonObject(raw);
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed as CitationPatchOutput;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeReferenceEntry(entry: unknown) {
+  if (typeof entry !== 'string') return '';
+  return entry
+    .replace(/^[-*]\s+/, '')
+    .replace(/^\d+\.\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getReferenceEntriesFromPatch(patch: CitationPatchOutput | null) {
+  if (!patch) return [];
+
+  const rawEntries = Array.isArray(patch.references)
+    ? patch.references
+    : Array.isArray(patch.referenceEntries)
+      ? patch.referenceEntries
+      : [];
+  const entries = rawEntries.map(normalizeReferenceEntry).filter(Boolean);
+  if (entries.length > 0) return entries;
+
+  if (typeof patch.referencesText === 'string' && patch.referencesText.trim()) {
+    const text = REFERENCE_HEADING_LINE_PATTERN.test(patch.referencesText.split(/\r?\n/)[0]?.trim() || '')
+      ? patch.referencesText
+      : `References\n${patch.referencesText}`;
+    return extractReferenceEntries(text).map(normalizeReferenceEntry).filter(Boolean);
+  }
+
+  return [];
+}
+
+function hasSameBodyHeadingLines(before: string, after: string) {
+  const beforeHeadings = extractBodyHeadingLines(before);
+  if (beforeHeadings.length === 0) return true;
+
+  const afterHeadings = extractBodyHeadingLines(after);
+  return beforeHeadings.length === afterHeadings.length
+    && beforeHeadings.every((heading, index) => heading === afterHeadings[index]);
+}
+
+function isCitationOnlyPaperChange(originalText: string, nextText: string) {
+  const originalParts = splitReferenceSection(originalText);
+  const nextParts = splitReferenceSection(nextText);
+
+  return hasSameBodyHeadingLines(originalText, nextText)
+    && normalizeWithoutInTextCitations(originalParts.beforeReferences) === normalizeWithoutInTextCitations(nextParts.beforeReferences);
+}
+
+function mergeCitationOnlyFromFullPaper(originalText: string, rewrittenPaper: string): CitationPatchApplyResult {
+  const originalParts = splitReferenceSection(originalText);
+  const rewrittenParts = splitReferenceSection(rewrittenPaper);
+  const originalLines = originalParts.beforeReferences.split('\n');
+  const rewrittenLines = rewrittenParts.beforeReferences.split('\n');
+  let body = originalParts.beforeReferences;
+  let appliedInTextEditCount = 0;
+
+  if (originalLines.length === rewrittenLines.length) {
+    const mergedLines: string[] = [];
+    let canMergeBody = true;
+
+    for (let index = 0; index < originalLines.length; index += 1) {
+      const originalLine = originalLines[index]!;
+      const rewrittenLine = rewrittenLines[index]!;
+      if (originalLine === rewrittenLine) {
+        mergedLines.push(originalLine);
+        continue;
+      }
+
+      if (isCitationOnlyReplacement(originalLine, rewrittenLine)) {
+        mergedLines.push(rewrittenLine);
+        appliedInTextEditCount += 1;
+        continue;
+      }
+
+      canMergeBody = false;
+      break;
+    }
+
+    if (canMergeBody) {
+      body = mergedLines.join('\n');
+    }
+  }
+
+  const referenceEntries = rewrittenParts.hasReferenceSection
+    ? extractReferenceEntries(`${rewrittenParts.referenceHeading}\n${rewrittenParts.referenceBody}`)
+    : [];
+  const replacedReferences = referenceEntries.length > 0;
+  const text = joinBodyAndReferences(body, originalParts, replacedReferences ? referenceEntries : undefined);
+
+  return {
+    text: isCitationOnlyPaperChange(originalText, text)
+      ? text
+      : joinBodyAndReferences(originalParts.beforeReferences, originalParts, replacedReferences ? referenceEntries : undefined),
+    appliedInTextEditCount,
+    replacedReferences,
+  };
+}
+
+function applyCitationVerificationPatch(originalText: string, modelOutput: string): CitationPatchApplyResult {
+  const originalParts = splitReferenceSection(originalText);
+  const patch = parseCitationPatchOutput(modelOutput);
+
+  if (!patch) {
+    return mergeCitationOnlyFromFullPaper(originalText, modelOutput);
+  }
+
+  const edits = Array.isArray(patch.inTextCitationEdits)
+    ? patch.inTextCitationEdits
+    : Array.isArray(patch.inTextEdits)
+      ? patch.inTextEdits
+      : [];
+  const bodyPatch = applyInTextCitationEdits(originalParts.beforeReferences, edits);
+  const referenceEntries = getReferenceEntriesFromPatch(patch);
+  const replacedReferences = referenceEntries.length > 0;
+  let nextText = joinBodyAndReferences(
+    bodyPatch.body,
+    originalParts,
+    replacedReferences ? referenceEntries : undefined,
+  );
+
+  if (!isCitationOnlyPaperChange(originalText, nextText)) {
+    nextText = joinBodyAndReferences(
+      originalParts.beforeReferences,
+      originalParts,
+      replacedReferences ? referenceEntries : undefined,
+    );
+    bodyPatch.applied = 0;
+  }
+
+  return {
+    text: nextText,
+    appliedInTextEditCount: bodyPatch.applied,
+    replacedReferences,
+  };
+}
+
 export const writingServiceTestUtils = {
   withRewriteStageTimeout,
   withDraftGenerationTimeout,
@@ -350,24 +679,49 @@ export const writingServiceTestUtils = {
   countMainBodyWords,
   isMainBodyWordCountWithinRange,
   runWordCalibrationAttempts,
+  applyCitationVerificationPatch,
+  isCitationOnlyReplacement,
+  hasSameBodyHeadingLines,
+  applyRequiredChartOptions,
+  buildFinalReviewTextWithRenderedFigures,
+  buildPolishingSystemPrompt,
 };
 
 export { countMainBodyWords, getWordCountRange };
+
+function buildQualityContextPreservationRule(qualityContext?: string) {
+  const normalized = String(qualityContext || '').trim();
+  if (!normalized) return '';
+
+  return `
+
+QUALITY CONTEXT PRESERVATION (CRITICAL):
+- The rules below are still binding during this rewrite stage.
+- Preserve every data boundary, uploaded-material restriction, chart/table requirement, and safety limit.
+- Do not add new numeric findings, statistical methods, causal claims, correlations, regressions, p-values, confidence intervals, or chart values unless they are explicitly supported by these rules.
+- If the current paper already contains an unsupported data claim, soften or remove that claim instead of making it more specific.
+
+${normalized}`;
+}
 
 function deriveWritingTaskRequirements(task: {
   target_words?: number | null;
   citation_style?: string | null;
   required_reference_count?: number | null;
+  required_section_count?: number | null;
 }) {
   const derived = deriveUnifiedTaskRequirements({
     targetWords: typeof task.target_words === 'number' ? task.target_words : undefined,
     citationStyle: typeof task.citation_style === 'string' ? task.citation_style : undefined,
+    requiredSectionCount: typeof task.required_section_count === 'number' ? task.required_section_count : undefined,
+    trustSectionCount: typeof task.required_section_count === 'number',
   });
 
   return {
     targetWords: derived.targetWords,
     citationStyle: derived.citationStyle,
     requiredReferenceCount: Number(task.required_reference_count || derived.requiredReferenceCount),
+    requiredSectionCount: derived.requiredSectionCount,
   };
 }
 
@@ -448,20 +802,41 @@ export async function startWritingPipeline(taskId: string, userId: string) {
     const researchQuestion = String(latestOutline.research_question || task.research_question || '').trim();
     const versionBase = await getDocumentVersionBase(taskId);
     const unifiedRequirements = deriveWritingTaskRequirements(task);
+    const typedMaterialFiles = materialFiles as StoredMaterialFile[];
+    const qualityProfile = assessWritingQualityRequirements({
+      specialRequirements: task.special_requirements,
+      outline: latestOutline.content,
+      materialFiles: typedMaterialFiles,
+    });
+    const dataAnalysis = await runStructuredDataAnalysisForMaterials(typedMaterialFiles, {
+      required: qualityProfile.requiresDataAnalysis,
+    });
+
+    if (qualityProfile.requiresDataAnalysis && dataAnalysis.status !== 'completed') {
+      const dataReason = 'reason' in dataAnalysis ? dataAnalysis.reason : 'No structured data analysis result was produced.';
+      throw new Error(`quality_gate_failed:data_analysis_missing:${dataReason}`);
+    }
+
+    const qualityContext = buildQualityContextForPrompt(qualityProfile, dataAnalysis);
+    const requirementsWithQualityContext = [
+      task.special_requirements,
+      qualityContext,
+    ].map((value) => String(value || '').trim()).filter(Boolean).join('\n\n');
 
     // Step 1: Draft
     await updateTaskStage(taskId, 'writing');
     const draft = await generateDraft({
       taskId,
-      materialFiles: materialFiles as StoredMaterialFile[],
+      materialFiles: typedMaterialFiles,
       outline: latestOutline.content,
       paperTitle,
       researchQuestion,
       targetWords: unifiedRequirements.targetWords,
       citationStyle: unifiedRequirements.citationStyle,
       requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
-      requirements: task.special_requirements,
+      requirements: requirementsWithQualityContext,
       versionBase,
+      externalSourcesAllowed: qualityProfile.externalSourcesAllowed,
     });
 
     // Step 2: Calibrate
@@ -473,6 +848,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       unifiedRequirements.citationStyle,
       unifiedRequirements.requiredReferenceCount,
       versionBase,
+      qualityContext,
     );
 
     // Step 3: Citation check
@@ -483,29 +859,55 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       unifiedRequirements.citationStyle,
       unifiedRequirements.requiredReferenceCount,
       versionBase,
+      qualityProfile.externalSourcesAllowed,
+      qualityContext,
     );
 
     // Step 3.5: Polish (best-effort, never fails the task)
     await updateTaskStage(taskId, 'polishing');
-    const polished = await polishText(taskId, verified, versionBase, unifiedRequirements.targetWords);
+    const polished = await polishText(taskId, verified, versionBase, unifiedRequirements.targetWords, qualityContext);
 
-    // Step 3.6: Chart enhancement (best-effort, never fails the task)
-    await updateTaskStage(taskId, 'delivering');
+    // Step 3.6: Chart enhancement + final quality gate
+    await updateTaskStage(taskId, 'quality_checking');
     const chartResult = await enhanceWithCharts(
       polished, paperTitle, researchQuestion,
       unifiedRequirements.targetWords,
-      task.special_requirements,
+      requirementsWithQualityContext,
       latestOutline.content,
+      qualityProfile.chartRequirement,
     );
+    const finalDeliveryText = chartResult.text;
+
+    assertFinalAcademicDelivery({
+      finalText: finalDeliveryText,
+      chartText: chartResult.text,
+      mediaMap: chartResult.mediaMap,
+      profile: qualityProfile,
+      dataAnalysis,
+      requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      citationStyle: unifiedRequirements.citationStyle,
+      targetWords: unifiedRequirements.targetWords,
+      requiredSectionCount: unifiedRequirements.requiredSectionCount,
+    });
+    const finalReviewMaterialContent = await getOrUploadMaterialContent(taskId);
+    const finalReviewText = buildFinalReviewTextWithRenderedFigures(finalDeliveryText, chartResult.mediaMap);
+    await runFinalWritingQualityReview({
+      finalText: finalReviewText,
+      specialRequirements: requirementsWithQualityContext,
+      outline: latestOutline.content,
+      profile: qualityProfile,
+      materialParts: finalReviewMaterialContent.parts,
+    });
 
     // Step 4: Deliver (store final version + Word file + citation report)
+    await updateTaskStage(taskId, 'delivering');
     const taskMeta = {
       ...task,
       target_words: unifiedRequirements.targetWords,
       citation_style: unifiedRequirements.citationStyle,
       required_reference_count: unifiedRequirements.requiredReferenceCount,
     };
-    await deliverResults(taskId, userId, polished, taskMeta, versionBase, chartResult);
+    await deliverResults(taskId, userId, finalDeliveryText, taskMeta, versionBase, chartResult);
 
     // Step 4.5: Citation report (best-effort, with process-level crash guard)
     // The OpenAI stream call through sub2api/Cloudflare can throw uncaught
@@ -522,7 +924,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
     process.on('uncaughtException', uncaughtGuard);
     try {
       await generateAndStoreCitationReport(
-        taskId, polished, taskMeta, displayTitle, reportExpiry,
+        taskId, finalDeliveryText, taskMeta, displayTitle, reportExpiry,
       );
     } finally {
       process.removeListener('uncaughtException', uncaughtGuard);
@@ -578,8 +980,20 @@ export function buildDraftGenerationSystemPrompt(
   targetWords: number,
   citationStyle: string,
   requiredReferenceCount: number,
+  options: ExternalSourcePromptOptions = {},
 ) {
   const { minWords, maxWords } = getWordCountRange(targetWords);
+  const externalSourcesAllowed = options.externalSourcesAllowed !== false;
+  const sourceRules = externalSourcesAllowed
+    ? `You have access to the web_search tool. Before writing any in-text citation or any entry in the references section, you MUST use web_search to verify that the cited work actually exists. Search for the exact title, the author name combined with the year, and the DOI when possible. Only cite a work after web_search returns a credible match (a publisher page, a Crossref entry, a journal landing page, or an indexed scholarly database). If web_search cannot find a real source for a claim, weaken or remove the claim instead of inventing a citation. Never fabricate authors, titles, journals, years, DOIs, or URLs. Every reference in the final references section must correspond to a real paper that you confirmed via web_search during this turn.
+
+URL / DOI integrity rules (very strict):
+- Only include a URL or DOI in a reference entry if that EXACT URL / DOI appeared in the web_search results you just reviewed. Never construct, guess, or back-derive a DOI from the title / year / publisher pattern.
+- If web_search returned a verifiable DOI, prefer the canonical form: "https://doi.org/<DOI>". Avoid publisher-specific URLs when the DOI is available.
+- If web_search cannot confirm a verified URL AND cannot confirm a verified DOI for a citation, OMIT the URL field entirely from that reference entry. A complete reference without a URL is MUCH better than a reference with a fabricated link. Do NOT invent one to "look complete".
+- Never write a URL that redirects through a tracker, proxy, or shortener. Never encode titles inside URLs.`
+    : `Do not use web_search, browsing, or any external source discovery. This is a closed-book task: use only the uploaded materials and references already present in those materials. Do not add newly found external references. If the uploaded materials do not contain enough citable sources to satisfy the requested reference count, do not invent authors, titles, journals, years, DOIs, or URLs; write only what can be supported by the uploaded materials and make the limitation clear in the paper.`;
+
   return `You are an academic writing expert.
 
 Write the entire article at once.
@@ -595,13 +1009,7 @@ Every reference must be from 2020 onwards.
 Every reference must be an academic scholar paper.
 Do not use book sources. References must be academic scholar papers, not books.
 
-You have access to the web_search tool. Before writing any in-text citation or any entry in the references section, you MUST use web_search to verify that the cited work actually exists. Search for the exact title, the author name combined with the year, and the DOI when possible. Only cite a work after web_search returns a credible match (a publisher page, a Crossref entry, a journal landing page, or an indexed scholarly database). If web_search cannot find a real source for a claim, weaken or remove the claim instead of inventing a citation. Never fabricate authors, titles, journals, years, DOIs, or URLs. Every reference in the final references section must correspond to a real paper that you confirmed via web_search during this turn.
-
-URL / DOI integrity rules (very strict):
-- Only include a URL or DOI in a reference entry if that EXACT URL / DOI appeared in the web_search results you just reviewed. Never construct, guess, or back-derive a DOI from the title / year / publisher pattern.
-- If web_search returned a verifiable DOI, prefer the canonical form: "https://doi.org/<DOI>". Avoid publisher-specific URLs when the DOI is available.
-- If web_search cannot confirm a verified URL AND cannot confirm a verified DOI for a citation, OMIT the URL field entirely from that reference entry. A complete reference without a URL is MUCH better than a reference with a fabricated link. Do NOT invent one to "look complete".
-- Never write a URL that redirects through a tracker, proxy, or shortener. Never encode titles inside URLs.
+${sourceRules}
 
 The reasoning effort should be high.
 Think very hard and deep.
@@ -638,6 +1046,7 @@ export function buildWordCalibrationSystemPrompt(
   citationStyle: string,
   requiredReferenceCount: number,
   draftHeadings: string[] = [],
+  qualityContext?: string,
 ) {
   const { minWords, maxWords } = getWordCountRange(targetWords);
   const headingRule = draftHeadings.length > 0
@@ -661,44 +1070,97 @@ All references must be from 2020 onwards.
 All references must remain academic scholar paper sources, not book sources.
 Output only the revised paper.
 Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
-Return clean academic prose only.${headingRule}`;
+Return clean academic prose only.${headingRule}${buildQualityContextPreservationRule(qualityContext)}`;
 }
 
-export function buildCitationVerificationSystemPrompt(citationStyle: string, requiredReferenceCount: number) {
+export function buildCitationVerificationSystemPrompt(
+  citationStyle: string,
+  requiredReferenceCount: number,
+  options: ExternalSourcePromptOptions = {},
+) {
+  const externalSourcesAllowed = options.externalSourcesAllowed !== false;
+  const sourceRules = externalSourcesAllowed
+    ? `You have access to the web_search tool. For every reference in the references section, you MUST use web_search to verify that the work actually exists (search for title, author+year, or DOI). If web_search confirms the work, keep it and ensure the formatting matches ${citationStyle}. If web_search cannot find the work, replace it with a real paper that supports the same in-text claim, found via web_search. Never leave a fabricated reference in the paper. Never invent DOIs, URLs, journals, or author names.`
+    : `Do not use web_search, browsing, or newly found external sources. Use only the uploaded materials. Check only whether the citations are internally consistent with the paper and the uploaded materials. Do not replace a missing or weak reference with a web-found paper. If a citation cannot be supported from uploaded materials, report it in unresolvedIssues instead of inventing a source or changing the article body.`;
+
   return `You are a citation verification expert. Review the paper and ensure all citations follow ${citationStyle} format.
 Keep at least ${requiredReferenceCount} references.
 All references must be from 2020 onwards.
 All references must remain academic scholar paper sources, not book sources.
 
-You have access to the web_search tool. For every reference in the references section, you MUST use web_search to verify that the work actually exists (search for title, author+year, or DOI). If web_search confirms the work, keep it and ensure the formatting matches ${citationStyle}. If web_search cannot find the work, replace it with a real paper that supports the same in-text claim, found via web_search. Never leave a fabricated reference in the paper. Never invent DOIs, URLs, journals, or author names.
+${sourceRules}
 
-Fix any formatting issues. Output the corrected paper text only.
-Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
-Return clean academic prose only.`;
+Return JSON only. The JSON must have this exact shape:
+{
+  "inTextCitationEdits": [
+    {
+      "find": "exact original sentence or phrase from the paper",
+      "replace": "same exact sentence or phrase with only in-text citation tokens added, removed, or corrected"
+    }
+  ],
+  "references": [
+    "Full corrected reference entry 1",
+    "Full corrected reference entry 2"
+  ],
+  "unresolvedIssues": [
+    "Any citation/reference issue that cannot be fixed without changing the article body"
+  ]
+}
+
+STRICT EDITING LIMITS:
+- Only fix in-text citation tokens and the References section.
+- Do NOT change the title.
+- Do NOT change section headings.
+- Do NOT rewrite ordinary body sentences.
+- Do NOT reorder, merge, split, add, or delete paragraphs.
+- In each inTextCitationEdits item, find and replace must be identical after removing citation tokens.
+- If fixing an issue would require changing a claim, sentence, paragraph, title, or heading, leave the article unchanged and report the issue in unresolvedIssues.
+- Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, Markdown list markers, or prose outside JSON.${buildQualityContextPreservationRule(options.qualityContext)}`;
 }
 
 function buildReferenceRepairSystemPrompt(
   citationStyle: string,
   requiredReferenceCount: number,
   issues: string[],
+  options: ExternalSourcePromptOptions = {},
 ) {
+  const sourceRule = options.externalSourcesAllowed === false
+    ? 'Do not use web_search, browsing, or newly found external sources. Use only references already present in the uploaded materials. If the uploaded materials cannot support the required reference count, do not invent references.'
+    : 'Every reference must be a real published work that actually exists. Use web_search to verify any added or replaced reference.';
+
   return `You are an academic reference repair specialist.
 The following issues were found with the paper's references:
 ${issues.map((issue) => `- ${issue}`).join('\n')}
 
 Fix ALL identified issues in the paper below:
-- If reference count is below ${requiredReferenceCount}, add more real academic journal paper references with proper in-text citations in the body.
+- If reference count is below ${requiredReferenceCount}, add more real academic journal paper references and provide only the needed in-text citation token edits.
 - If any references are from before 2020, replace them with references from 2020 onwards.
 - If any references look like books or non-academic sources, replace them with academic journal paper references.
 - Every reference must be an academic scholar paper. Do not use book sources.
-- ALL references must include real, accurate, and verifiable links (DOI or journal URL). Do NOT fabricate any reference or use any fake or broken link. Every reference must be a real published work that actually exists.
+- ALL references must include real, accurate, and verifiable links (DOI or journal URL). Do NOT fabricate any reference or use any fake or broken link.
+- ${sourceRule}
 - Each reference should include a proper DOI link or journal URL.
 
 Keep the main body text and arguments unchanged. Only fix the references and their corresponding in-text citations.
-Output the complete paper with all fixes applied.
-Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, or Markdown list markers.
-Section headings must be written as plain text on their own line.
-Return clean academic prose only.`;
+Return JSON only. The JSON must have this exact shape:
+{
+  "inTextCitationEdits": [
+    {
+      "find": "exact original sentence or phrase from the paper",
+      "replace": "same exact sentence or phrase with only in-text citation tokens added, removed, or corrected"
+    }
+  ],
+  "references": [
+    "Full corrected reference entry 1",
+    "Full corrected reference entry 2"
+  ],
+  "unresolvedIssues": [
+    "Any citation/reference issue that cannot be fixed without changing the article body"
+  ]
+}
+
+Do NOT change the title, section headings, paragraph order, ordinary body wording, or claims.
+Do not use Markdown syntax, Markdown emphasis markers, Markdown headings, backticks, Markdown list markers, or prose outside JSON.`;
 }
 
 async function repairReferenceIssues(
@@ -708,6 +1170,7 @@ async function repairReferenceIssues(
     requiredReferenceCount: number;
     issues: string[];
     maxAttempts?: number;
+    externalSourcesAllowed?: boolean;
   },
 ): Promise<string> {
   let current = text;
@@ -729,11 +1192,14 @@ async function repairReferenceIssues(
         'citation_verification',
         callMainOpenAIWithRetry('citation_verification', () =>
           streamResponseText({
-            ...buildMainOpenAIResponsesOptions('citation_verification'),
+            ...buildMainOpenAIResponsesOptions('citation_verification', {
+              webSearch: options.externalSourcesAllowed !== false,
+            }),
             instructions: buildReferenceRepairSystemPrompt(
               options.citationStyle,
               options.requiredReferenceCount,
               referenceIssues,
+              { externalSourcesAllowed: options.externalSourcesAllowed },
             ),
             input: [
               {
@@ -745,7 +1211,9 @@ async function repairReferenceIssues(
         ),
       );
 
-      const repaired = repairedText || current;
+      const repaired = repairedText
+        ? applyCitationVerificationPatch(current, repairedText).text
+        : current;
 
       // Only use repaired version if it doesn't introduce critical issues
       const repairedAssessment = assessGeneratedPaper(repaired, {
@@ -842,17 +1310,35 @@ Broken rewrite to avoid:
 ${options.brokenText}`;
 }
 
+function buildCitationVerificationUserPrompt(options: {
+  paper: string;
+  issues?: string[];
+  previousUnsafeOutput?: string;
+}) {
+  const issues = options.issues?.length
+    ? `Citation/reference issues to fix:\n${options.issues.map((issue) => `- ${issue}`).join('\n')}\n\n`
+    : '';
+  const unsafeOutput = options.previousUnsafeOutput
+    ? `Previous unsafe output to avoid because it changed the article body:\n${options.previousUnsafeOutput}\n\n`
+    : '';
+
+  return `${issues}${unsafeOutput}Paper to check:\n${options.paper}`;
+}
+
 async function generateDraft(input: WritingContextInput): Promise<string> {
   const materialContent = await getOrUploadMaterialContent(input.taskId);
 
   const { text: draftText } = await withDraftGenerationTimeout(
       callMainOpenAIWithRetry('draft_generation', () =>
-        streamResponseText({
-          ...buildMainOpenAIResponsesOptions('draft_generation'),
+          streamResponseText({
+          ...buildMainOpenAIResponsesOptions('draft_generation', {
+            webSearch: input.externalSourcesAllowed !== false,
+          }),
           instructions: buildDraftGenerationSystemPrompt(
             input.targetWords,
             input.citationStyle,
             input.requiredReferenceCount,
+            { externalSourcesAllowed: input.externalSourcesAllowed },
           ),
           input: [
             {
@@ -885,11 +1371,14 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
       const { text: repairedDraftText } = await withDraftGenerationTimeout(
         callMainOpenAIWithRetry('draft_generation', () =>
           streamResponseText({
-            ...buildMainOpenAIResponsesOptions('draft_generation'),
+            ...buildMainOpenAIResponsesOptions('draft_generation', {
+              webSearch: input.externalSourcesAllowed !== false,
+            }),
             instructions: buildDraftGenerationSystemPrompt(
               input.targetWords,
               input.citationStyle,
               input.requiredReferenceCount,
+              { externalSourcesAllowed: input.externalSourcesAllowed },
             ),
             input: [
               {
@@ -931,6 +1420,7 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
           citationStyle: input.citationStyle,
           requiredReferenceCount: input.requiredReferenceCount,
           issues: assessment.reasons,
+          externalSourcesAllowed: input.externalSourcesAllowed,
         });
 
         const finalAssessment = assessGeneratedPaper(content, {
@@ -969,6 +1459,7 @@ async function calibrateWordCount(
   citationStyle: string,
   requiredReferenceCount: number,
   versionBase = 0,
+  qualityContext?: string,
 ): Promise<string> {
   const initialRange = isMainBodyWordCountWithinRange(draft, targetWords);
   // 一次性从原始 draft 提取 heading 列表，后续每次 calibration 的 prompt 都以此为 ground truth，
@@ -1001,7 +1492,7 @@ async function calibrateWordCount(
           callMainOpenAIWithRetry('word_calibration', () =>
             streamResponseText({
               ...buildMainOpenAIResponsesOptions('word_calibration'),
-              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings),
+              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings, qualityContext),
               input: [
                 {
                   role: 'user' as const,
@@ -1031,7 +1522,7 @@ async function calibrateWordCount(
             callMainOpenAIWithRetry('word_calibration', () =>
               streamResponseText({
                 ...buildMainOpenAIResponsesOptions('word_calibration'),
-                instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings),
+                instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings, qualityContext),
                 input: [
                   {
                     role: 'user' as const,
@@ -1085,6 +1576,8 @@ async function verifyCitations(
   citationStyle: string,
   requiredReferenceCount: number,
   versionBase = 0,
+  externalSourcesAllowed = true,
+  qualityContext?: string,
 ): Promise<string> {
   let verified = text;
 
@@ -1093,19 +1586,26 @@ async function verifyCitations(
       'citation_verification',
       callMainOpenAIWithRetry('citation_verification', () =>
         streamResponseText({
-          ...buildMainOpenAIResponsesOptions('citation_verification'),
-          instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
+          ...buildMainOpenAIResponsesOptions('citation_verification', {
+            webSearch: externalSourcesAllowed,
+          }),
+          instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount, {
+            externalSourcesAllowed,
+            qualityContext,
+          }),
           input: [
             {
               role: 'user' as const,
-              content: text,
+              content: buildCitationVerificationUserPrompt({ paper: text }),
             },
           ],
         }),
       ),
     );
 
-    verified = verifiedText || text;
+    verified = verifiedText
+      ? applyCitationVerificationPatch(text, verifiedText).text
+      : text;
   } catch (error) {
     if (!isWritingStageTimeoutError(error)) {
       throw error;
@@ -1122,16 +1622,19 @@ async function verifyCitations(
         'citation_verification',
         callMainOpenAIWithRetry('citation_verification', () =>
           streamResponseText({
-            ...buildMainOpenAIResponsesOptions('citation_verification'),
-            instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount),
+            ...buildMainOpenAIResponsesOptions('citation_verification', {
+              webSearch: externalSourcesAllowed,
+            }),
+            instructions: buildCitationVerificationSystemPrompt(citationStyle, requiredReferenceCount, {
+              externalSourcesAllowed,
+              qualityContext,
+            }),
             input: [
               {
                 role: 'user' as const,
-                content: buildStageRepairUserPrompt({
-                  lastGoodText: text,
-                  brokenText: verified,
-                  reasons: assessment.reasons,
-                  stage: 'citation_verification',
+                content: buildCitationVerificationUserPrompt({
+                  paper: verified,
+                  issues: assessment.reasons,
                 }),
               },
             ],
@@ -1139,17 +1642,19 @@ async function verifyCitations(
         ),
       );
 
-      const repaired = repairedCiteText || text;
+      const repaired = repairedCiteText
+        ? applyCitationVerificationPatch(verified, repairedCiteText).text
+        : verified;
       assessment = assessGeneratedPaper(repaired, {
         requiredReferenceCount,
         citationStyle,
       });
-      verified = assessment.valid ? repaired : text;
+      verified = assessment.valid ? repaired : verified;
     } catch (error) {
       if (!isWritingStageTimeoutError(error)) {
         throw error;
       }
-      verified = text;
+      verified = verified || text;
     }
   }
 
@@ -1166,9 +1671,9 @@ async function verifyCitations(
   return verified;
 }
 
-// ─── Polishing (Claude – reduce AI-generated feel) ─────────────────────────
+// ─── Polishing (GPT – reduce AI-generated feel) ────────────────────────────
 
-function buildPolishingSystemPrompt(targetWords: number, currentWords: number): string {
+function buildPolishingSystemPrompt(targetWords: number, currentWords: number, qualityContext?: string): string {
   const { minWords, maxWords } = getWordCountRange(targetWords);
   const needsCondense = currentWords > maxWords;
   const needsExpand = currentWords < minWords;
@@ -1220,7 +1725,7 @@ ABSOLUTE CONSTRAINTS:
 - Do NOT add or remove arguments, evidence, or claims
 - Do NOT change the structure or order of paragraphs/sections${wordCountRule}
 - Do NOT use Markdown syntax (no #, **, __, \`, -, *)
-- Output the COMPLETE paper — no truncation, no preamble, no commentary`;
+- Output the COMPLETE paper — no truncation, no preamble, no commentary${buildQualityContextPreservationRule(qualityContext)}`;
 }
 
 async function polishText(
@@ -1228,6 +1733,7 @@ async function polishText(
   inputText: string,
   versionBase: number,
   targetWords: number,
+  qualityContext?: string,
 ): Promise<string> {
   try {
     const currentWords = countMainBodyWords(inputText);
@@ -1235,9 +1741,14 @@ async function polishText(
     const { text: polishedText } = await Promise.race([
       streamResponseText({
         model: env.openaiModel,
-        instructions: buildPolishingSystemPrompt(targetWords, currentWords),
-        reasoning: { effort: 'high' as any },
-        input: inputText,
+        instructions: buildPolishingSystemPrompt(targetWords, currentWords, qualityContext),
+        reasoning: { effort: 'xhigh' as any },
+        input: [
+          {
+            role: 'user' as const,
+            content: [{ type: 'input_text' as const, text: inputText }],
+          },
+        ],
       } as any),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('polishing timeout')), POLISHING_TIMEOUT_MS),
@@ -1248,6 +1759,11 @@ async function polishText(
 
     if (!polishedText) {
       console.warn(`[polish] GPT returned empty text for task ${taskId}, using original`);
+      return inputText;
+    }
+
+    if (!hasSameBodyHeadingLines(inputText, polishedText)) {
+      console.warn(`[polish] section headings changed for task ${taskId}, using original`);
       return inputText;
     }
 
@@ -1314,13 +1830,79 @@ async function polishText(
   }
 }
 
-// ─── Chart Enhancement (Claude + Chart DSL + QuickChart rendering) ──────────
+// ─── Chart Enhancement (GPT + Chart DSL + QuickChart rendering) ─────────────
 
-function buildChartEnhancementSystemPrompt(targetWords?: number, specialRequirements?: string, outlineContent?: string): string {
+function supportedChartTypeForRequirement(type: ChartRequirementType | undefined) {
+  if (!type) return undefined;
+  if (['line', 'bar', 'scatter', 'pie'].includes(type)) return type;
+  return undefined;
+}
+
+function applyRequiredChartOptions(spec: ChartSpec, requirement: ChartRequirement | undefined): ChartSpec {
+  if (!requirement || requirement.requiresDiagram || !spec.chartjs) return spec;
+
+  const chartjs = { ...spec.chartjs };
+  const requiredType = supportedChartTypeForRequirement(requirement.chartType);
+  if (requiredType) {
+    chartjs.type = requiredType;
+  }
+
+  const options = chartjs.options && typeof chartjs.options === 'object' ? { ...chartjs.options } : {};
+  const scales = options.scales && typeof options.scales === 'object' ? { ...options.scales } : {};
+  const applyAxisTitle = (axis: 'x' | 'y', title: string | undefined) => {
+    if (!title) return;
+    const axisConfig = scales[axis] && typeof scales[axis] === 'object' ? { ...scales[axis] } : {};
+    const titleConfig = axisConfig.title && typeof axisConfig.title === 'object' ? { ...axisConfig.title } : {};
+    scales[axis] = {
+      ...axisConfig,
+      title: {
+        ...titleConfig,
+        display: true,
+        text: title,
+      },
+    };
+  };
+
+  applyAxisTitle('x', requirement.xAxis);
+  applyAxisTitle('y', requirement.yAxis);
+  if (requirement.xAxis || requirement.yAxis) {
+    chartjs.options = { ...options, scales };
+  }
+
+  return { ...spec, chartjs };
+}
+
+function repairChartSpecsForRequirement(
+  charts: Array<{ token: string; spec: ChartSpec }>,
+  requirement: ChartRequirement | undefined,
+) {
+  if (!requirement || charts.length === 0) return charts;
+  if (requirement.requiresDiagram || (requirement.chartTypes?.length || 0) > 1) return charts;
+
+  return charts.map((chart) => ({
+    ...chart,
+    spec: applyRequiredChartOptions(chart.spec, requirement),
+  }));
+}
+
+function describeChartRequirement(requirement: ChartRequirement | undefined) {
+  if (!requirement) return '';
+  const parts = [
+    requirement.chartType ? `chart type: ${requirement.chartType}` : '',
+    requirement.xAxis ? `x-axis title: ${requirement.xAxis}` : '',
+    requirement.yAxis ? `y-axis title: ${requirement.yAxis}` : '',
+    requirement.requiresDiagram ? 'must be a real diagram/flowchart with nodes and arrows' : '',
+  ].filter(Boolean);
+  if (parts.length === 0) return '';
+  return `\nMANDATORY CHART REQUIREMENT FROM USER INSTRUCTIONS:\n- ${parts.join('\n- ')}\nIf you add a chart, its Chart.js config MUST match the requested type and axis titles exactly.`;
+}
+
+function buildChartEnhancementSystemPrompt(targetWords?: number, specialRequirements?: string, outlineContent?: string, chartRequirement?: ChartRequirement): string {
   const { minWords, maxWords } = targetWords ? getWordCountRange(targetWords) : { minWords: 0, maxWords: Infinity };
   const wordBudgetRule = targetWords
     ? `\n- WORD COUNT BUDGET: After adding chart reference sentences and table captions, the main body word count (excluding [CHART_BEGIN]...[CHART_END] blocks and table rows) MUST remain between ${minWords} and ${maxWords} words. If adding reference sentences would push the count over the limit, shorten other body paragraphs to compensate — remove redundant elaboration or tighten phrasing, but keep all in-text citations.`
     : '';
+  const chartRequirementRule = describeChartRequirement(chartRequirement);
 
   const contextSection = [
     specialRequirements?.trim()
@@ -1331,7 +1913,7 @@ function buildChartEnhancementSystemPrompt(targetWords?: number, specialRequirem
       : '',
   ].filter(Boolean).join('\n');
 
-  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and decide whether it genuinely benefits from charts and/or tables, then enhance it only when warranted.
+  return `You are an academic paper visualization specialist. Your task is to analyze a completed English academic paper and decide whether it genuinely benefits from charts, diagrams, and/or tables, then enhance it only when warranted.
 
 VISUALIZATION DECISION FRAMEWORK:
 
@@ -1349,6 +1931,8 @@ DO NOT add charts when:
 
 If you add a chart, every data point MUST be derived from specific information already discussed in the paper. Do not invent data.
 
+DIAGRAMS / FLOWCHARTS — add ONLY when the assignment explicitly asks for a diagram, flowchart, conceptual framework, mechanism diagram, process map, labelled component diagram, or schematic. Use a diagram only for real relationships, stages, components, or mechanisms already discussed in the paper. Do not use a bar chart or pie chart to fake a flowchart.
+
 TABLES — the bar is lower; add when any of these is true:
   a) The paper compares multiple items, theories, cases, or methods across shared dimensions.
   b) The paper presents a framework or classification that is easier to scan in tabular form.
@@ -1360,7 +1944,7 @@ DO NOT add tables when:
 IF NEITHER CHARTS NOR TABLES ARE WARRANTED:
   Output the paper text exactly as-is, with zero modifications.
 
-CHART RULES (only applicable if you decide to add charts):
+CHART RULES (only applicable if you decide to add statistical charts):
 - Add at most 2 charts. Chart data must be derived from information ALREADY discussed in the paper — statistics, comparisons, or referenced data. Do not invent data points that are not grounded in the paper's content.
 - Use the following DSL to define charts. The system will automatically render them into real images embedded in the Word document. Do NOT output Python, matplotlib, R, SVG, or any code. Do NOT output markdown image links like ![...](url). Only use this exact DSL format:
 
@@ -1383,6 +1967,29 @@ CHART RULES (only applicable if you decide to add charts):
 }
 [CHART_END]
 
+- For process diagrams, mechanisms, conceptual frameworks, or labelled schematics, use this diagram DSL instead of chartjs:
+
+[CHART_BEGIN]
+{
+  "title": "Figure 2: Research Process Flowchart",
+  "width": 720,
+  "height": 440,
+  "diagram": {
+    "type": "flowchart",
+    "direction": "TB",
+    "nodes": [
+      { "id": "collect", "label": "Data collection" },
+      { "id": "analysis", "label": "Analysis" },
+      { "id": "findings", "label": "Findings" }
+    ],
+    "edges": [
+      { "from": "collect", "to": "analysis" },
+      { "from": "analysis", "to": "findings" }
+    ]
+  }
+}
+[CHART_END]
+
 - Insert the chart block at the appropriate position WITHIN the paper body sections. NEVER place charts after the References section.
 - The [CHART_BEGIN]...[CHART_END] block must be on its own lines with a blank line before and after.
 - Near each chart, add a brief reference sentence in the text (e.g., "As illustrated in Figure 1, ..." or "Figure 2 demonstrates that ...").
@@ -1395,7 +2002,10 @@ DSL HARD RULES (violating any of these will cause rendering failure):
 - Each dataset.data must be a pure number array (for line/bar/pie/doughnut/radar/polarArea), length <= 100. Exception: scatter/bubble types may use {x: number, y: number} or {x, y, r} objects. No string numbers ("12.5"), no null values.
 - Each dataset.label <= 80 characters.
 - title <= 80 characters. Use "Figure N: xxx" format, numbered in order of appearance.
-- options: only plugins.title / plugins.legend / scales.{x,y}.beginAtZero are allowed. Do not write other options fields.
+- chartjs options: only plugins.title / plugins.legend / indexAxis / scales.{x,y}.beginAtZero / scales.{x,y}.title.text / scales.{x,y}.ticks.autoSkip / scales.{x,y}.ticks.maxRotation / scales.{x,y}.ticks.minRotation are allowed. Do not write callback fields.
+- diagram fields: only type / direction / nodes / edges are allowed. type must be flowchart, concept_map, or mechanism. direction must be TB or LR.
+- diagram.nodes: 2-30 nodes, each with id and label; optional shape is box, ellipse, or diamond. diagram.edges: 1-60 arrows; from/to must refer to existing node ids.
+- Use diagram for flowcharts, process maps, mechanisms, conceptual frameworks, and labelled schematics. Do not fake these with arbitrary chartjs percentages.
 - The entire [CHART_BEGIN]...[CHART_END] block (including JSON) must be <= 30KB.
 - One chart per [CHART_BEGIN]...[CHART_END] block.
 - If data exceeds limits (e.g., 200 time points), aggregate or truncate to <= 50 representative points.
@@ -1419,7 +2029,7 @@ ABSOLUTE CONSTRAINTS:
 - Do NOT add new arguments, evidence, or references that were not in the original paper.
 - Do NOT use Markdown heading syntax (#), bold (**), or any other Markdown formatting in the paper body text.
 - The paper's section headings, references section, and citation style must remain exactly as they were.${wordBudgetRule}
-- Output the COMPLETE paper text — do not truncate or summarize.${contextSection}`;
+- Output the COMPLETE paper text — do not truncate or summarize.${chartRequirementRule}${contextSection}`;
 }
 
 interface ChartEnhancementResult {
@@ -1427,20 +2037,39 @@ interface ChartEnhancementResult {
   mediaMap: Map<string, RenderedChart>;
 }
 
+function buildFinalReviewTextWithRenderedFigures(text: string, mediaMap: Map<string, RenderedChart>) {
+  let reviewText = text;
+  for (const [placeholder, rendered] of mediaMap.entries()) {
+    if (!rendered?.png) continue;
+    const chartjs = rendered.spec.chartjs;
+    const xAxis = chartjs?.options?.scales?.x?.title?.text;
+    const yAxis = chartjs?.options?.scales?.y?.title?.text;
+    const detail = [
+      `Rendered figure embedded in the Word document: ${rendered.spec.title}`,
+      chartjs?.type ? `chart type: ${chartjs.type}` : '',
+      xAxis ? `x-axis: ${xAxis}` : '',
+      yAxis ? `y-axis: ${yAxis}` : '',
+    ].filter(Boolean).join('; ');
+    reviewText = reviewText.replaceAll(placeholder, detail);
+  }
+  return reviewText;
+}
+
 const POST_CHART_CONDENSE_TIMEOUT_MS = 600_000; // 10 minutes
 
 async function postChartCondense(
   enhancedText: string,
   targetWords: number,
+  qualityContext?: string,
 ): Promise<string> {
   const { minWords, maxWords } = getWordCountRange(targetWords);
   const currentWords = countMainBodyWords(enhancedText);
   console.log(`[post-chart-condense] starting: current=${currentWords}, target range=${minWords}-${maxWords}`);
 
-  const stream = anthropic.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 16000,
-    system: `You are an academic writing editor. The paper below has charts and tables embedded using [CHART_BEGIN]...[CHART_END] DSL blocks. The main body word count (excluding chart DSL blocks, table rows, title, and references) is currently ${currentWords} words, but it must be between ${minWords} and ${maxWords} words.
+  const { text: condensed } = await Promise.race([
+    streamResponseText({
+      ...buildMainOpenAIResponsesOptions('post_chart_condense'),
+      instructions: `You are an academic writing editor. The paper below has charts and tables embedded using [CHART_BEGIN]...[CHART_END] DSL blocks. The main body word count (excluding chart DSL blocks, table rows, title, and references) is currently ${currentWords} words, but it must be between ${minWords} and ${maxWords} words.
 
 Condense the main body to fit within ${minWords}-${maxWords} words by:
 1. Removing redundant elaboration and filler phrases
@@ -1454,26 +2083,18 @@ ABSOLUTE CONSTRAINTS:
 - Do NOT remove tables or table captions
 - Do NOT use Markdown syntax
 - Do NOT alter, merge, remove, or inline ANY section headings — every section heading must stay on its own line, word-for-word as in the input
-- Output the COMPLETE paper — no truncation, no preamble`,
-    messages: [{ role: 'user', content: enhancedText }],
-  });
-
-  stream.on('error', (err: any) => {
-    console.warn(`[post-chart-condense] stream error:`, err?.message || err);
-  });
-
-  const response = await Promise.race([
-    stream.finalMessage(),
+- Output the COMPLETE paper — no truncation, no preamble${buildQualityContextPreservationRule(qualityContext)}`,
+      input: [
+        {
+          role: 'user' as const,
+          content: [{ type: 'input_text' as const, text: enhancedText }],
+        },
+      ],
+    } as any),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('post-chart condense timeout')), POST_CHART_CONDENSE_TIMEOUT_MS),
     ),
   ]);
-
-  const resp = response as any;
-  const condensed = resp.content
-    ?.filter((b: any) => b.type === 'text')
-    .map((b: any) => b.text)
-    .join('\n\n') || '';
 
   if (!condensed) {
     console.warn('[post-chart-condense] empty result, using original');
@@ -1481,6 +2102,11 @@ ABSOLUTE CONSTRAINTS:
   }
 
   const condensedWords = countMainBodyWords(condensed);
+  if (!hasSameBodyHeadingLines(enhancedText, condensed)) {
+    console.warn('[post-chart-condense] section headings changed, using original enhanced text');
+    return enhancedText;
+  }
+
   console.log(`[post-chart-condense] done: ${currentWords} → ${condensedWords}`);
   return condensed;
 }
@@ -1492,6 +2118,7 @@ async function enhanceWithCharts(
   targetWords?: number,
   specialRequirements?: string,
   outlineContent?: string,
+  chartRequirement?: ChartRequirement,
 ): Promise<ChartEnhancementResult> {
   const empty: ChartEnhancementResult = {
     text: verifiedText,
@@ -1499,49 +2126,31 @@ async function enhanceWithCharts(
   };
 
   try {
-    // Use streaming to avoid Anthropic SDK timeout on long-running requests.
-    // Non-streaming calls with large max_tokens error out with
-    // "Streaming is required for operations that may take longer than 10 minutes".
-    const stream = anthropic.messages.stream({
-      model: 'claude-opus-4-6',
-      max_tokens: 64000,
-      system: buildChartEnhancementSystemPrompt(targetWords, specialRequirements, outlineContent),
-      thinking: {
-        type: 'adaptive',
-      } as any,
-      ...({ output_config: { effort: 'max' } } as any),
-      messages: [
-        {
-          role: 'user',
-          content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). First decide whether this paper genuinely needs charts and/or tables based on the visualization decision framework above. If it does, enhance accordingly. If not, output the paper unchanged.\n\n${verifiedText}`,
-        },
-      ],
-    } as any);
-
-    const response = await Promise.race([
-      stream.finalMessage(),
+    const { text: rawText, response } = await Promise.race([
+      streamResponseText({
+        ...buildMainOpenAIResponsesOptions('chart_enhancement'),
+        instructions: buildChartEnhancementSystemPrompt(targetWords, specialRequirements, outlineContent, chartRequirement),
+        input: [
+          {
+            role: 'user',
+            content: `Below is a completed academic paper titled "${paperTitle}" (research question: "${researchQuestion}"). First decide whether this paper genuinely needs charts and/or tables based on the visualization decision framework above. If it does, enhance accordingly. If not, output the paper unchanged.\n\n${verifiedText}`,
+          },
+        ],
+      } as any),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('chart enhancement timeout')), CHART_ENHANCEMENT_TIMEOUT_MS),
       ),
     ]);
 
-    // Extract text from Claude response (skip thinking blocks)
-    const resp = response as any;
-    const rawText = resp.content
-      ?.filter((b: any) => b.type === 'text')
-      .map((b: any) => b.text)
-      .join('\n\n') || '';
-
     console.log(
-      `[chart-enhance] stop=${resp.stop_reason}, ` +
-      `blocks=${resp.content?.length ?? 0}, ` +
+      `[chart-enhance] status=${(response as any)?.status ?? 'unknown'}, ` +
       `text_len=${rawText.length}, ` +
       `has_chart_dsl=${rawText.includes('[CHART_BEGIN')}, ` +
-      `usage=${JSON.stringify(resp.usage ?? {})}`,
+      `usage=${JSON.stringify((response as any)?.usage ?? {})}`,
     );
 
     if (!rawText) {
-      console.warn('[chart-enhance] Claude returned empty text, using original');
+      console.warn('[chart-enhance] GPT returned empty text, using original');
       return empty;
     }
 
@@ -1557,11 +2166,10 @@ async function enhanceWithCharts(
 
     console.log(`[chart-enhance] body words: original=${originalWords}, enhanced=${enhancedWords}; headings: original=${originalHeadingCount}, enhanced=${enhancedHeadingCount}`);
 
-    // 如果 chart 增强把正文的 section heading 数量搞少了（GPT/Claude 偶尔合并 heading 入段落），
-    // 整篇回退到原始 verified 文本（不交付残缺结构），用户看到的就是不带图表但带完整小标题的版本。
-    if (originalHeadingCount > 0 && enhancedHeadingCount < originalHeadingCount - 1) {
+    // 如果 chart 增强把正文的 section heading 改了，整篇回退到原始 verified 文本。
+    if (!hasSameBodyHeadingLines(verifiedText, cleanForCheck)) {
       console.warn(
-        `[chart-enhance] heading count dropped from ${originalHeadingCount} to ${enhancedHeadingCount}, discarding chart enhancement to preserve structure`,
+        `[chart-enhance] headings changed from ${originalHeadingCount} to ${enhancedHeadingCount}, discarding chart enhancement to preserve structure`,
       );
       return empty;
     }
@@ -1576,12 +2184,16 @@ async function enhanceWithCharts(
         );
         // Safety net: condense the enhanced text while keeping charts
         try {
-          const condensed = await postChartCondense(rawText, targetWords);
+          const condensed = await postChartCondense(rawText, targetWords, specialRequirements);
           const condensedClean = condensed
             .replace(/\[CHART_BEGIN\][\s\S]*?\[CHART_END\]/g, '')
             .replace(/^\|[^\n]*\|$/gm, '')
             .trim();
           const condensedWords = countMainBodyWords(condensedClean);
+          if (!hasSameBodyHeadingLines(verifiedText, condensedClean)) {
+            console.warn('[chart-enhance] safety-net condense changed section headings, using original polished text');
+            return empty;
+          }
           if (condensedWords >= minWords && condensedWords <= maxWords) {
             console.log(`[chart-enhance] safety-net condense succeeded: ${enhancedWords} → ${condensedWords}`);
             finalRawText = condensed;
@@ -1605,10 +2217,11 @@ async function enhanceWithCharts(
     }
 
     // Parse chart DSL → placeholders + chart specs (reuse revision parser)
-    const { text: textWithPlaceholders, charts } = parseRevisionOutput(finalRawText);
+    const { text: textWithPlaceholders, charts: parsedCharts } = parseRevisionOutput(finalRawText);
+    const charts = repairChartSpecsForRequirement(parsedCharts, chartRequirement);
 
     if (charts.length === 0) {
-      // No charts — Claude decided none needed (may still have tables)
+      // No charts — GPT decided none needed (may still have tables)
       console.log('[chart-enhance] no charts generated (may have tables)');
       return { text: textWithPlaceholders, mediaMap: new Map() };
     }
@@ -1625,13 +2238,14 @@ async function enhanceWithCharts(
 
     return { text: textWithPlaceholders, mediaMap };
   } catch (err: any) {
-    console.warn('[chart-enhance] failed, delivering without charts:', err?.message || err);
+    console.warn('[chart-enhance] failed, returning original text for final quality gate:', err?.message || err);
     return empty;
   }
 }
 
 async function deliverResults(taskId: string, userId: string, finalText: string, task: any, versionBase = 0, chartData?: ChartEnhancementResult) {
-  const wordCount = finalText.split(/\s+/).filter(Boolean).length;
+  const textForDoc = chartData?.text ?? finalText;
+  const wordCount = textForDoc.split(/\s+/).filter(Boolean).length;
   const retentionDays = (await getConfig('result_file_retention_days')) || 3;
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + retentionDays);
@@ -1642,11 +2256,10 @@ async function deliverResults(taskId: string, userId: string, finalText: string,
     version: versionBase + 5,
     stage: 'final',
     word_count: wordCount,
-    content: finalText,
+    content: textForDoc,
   });
 
   // Use media-aware docx builder when chart data is available
-  const textForDoc = chartData?.text ?? finalText;
   const mediaMap = chartData?.mediaMap ?? new Map<string, RenderedChart>();
   const hasMedia = mediaMap.size > 0 || /^\|[^\n]*\|$/m.test(textForDoc);
   const docBuffer = hasMedia
@@ -1722,6 +2335,7 @@ export async function regenerateDeliverableContent(input: WritingContextInput) {
     input.citationStyle,
     input.requiredReferenceCount,
     versionBase,
+    input.requirements,
   );
   return verifyCitations(
     input.taskId,
@@ -1729,6 +2343,8 @@ export async function regenerateDeliverableContent(input: WritingContextInput) {
     input.citationStyle,
     input.requiredReferenceCount,
     versionBase,
+    input.externalSourcesAllowed,
+    input.requirements,
   );
 }
 

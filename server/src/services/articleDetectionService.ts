@@ -5,10 +5,10 @@ import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 // 文章修改：主文章识别
 //
 // 用户在 /dashboard/revision 上传多个文件，可能是「1 篇待修改的主文章 + N 篇参考材料」。
-// 这个 service 负责调 GPT-5.4 (`article_detection` stage) 从文件名 + 字数 + 前 1500 字
+// 这个 service 负责调 GPT-5.5 (`article_detection` stage) 从文件名 + 字数 + 前 1500 字
 // 内容样本里识别出"哪些是主文章"。识别结果用来：
 //   1. 精准计算冻结字数（主文章 × 1.2 + 参考 × 50 + 图片 × 100）
-//   2. 写进 Claude 的 user prompt 告诉它只改主文章不改参考
+//   2. 写进 GPT 的 user prompt 告诉它只改主文章不改参考
 //
 // 失败兜底：超时 / JSON 校验失败 / hallucinated filename → 启发式（docx 字数最大 →
 // 非图片字数最大），绝不抛错（不能阻塞用户提交）。
@@ -66,7 +66,7 @@ export interface ArticleDetectionResult {
 // ---------------------------------------------------------------------------
 
 export interface ArticleDetectionDeps {
-  /** 跑 GPT-5.4 article_detection stage，返回原始 text。默认走 OpenAI Responses API。*/
+  /** 跑 GPT-5.5 article_detection stage，返回原始 text。默认走 OpenAI Responses API。*/
   runDetectionModel: (input: { systemPrompt: string; userMessage: string }) => Promise<{
     text: string;
   }>;
@@ -309,7 +309,7 @@ export function heuristicGuessMainArticle(
  *
  * 调用方（estimateRevisionTotal / createRevision）需要这个结果来：
  *   - 计算精准冻结字数（主文章 × 1.2 + 参考 × 50 + 图片 × 100）
- *   - 在 Claude prompt 里告诉它只改主文章
+ *   - 在 GPT prompt 里告诉它只改主文章
  *
  * **绝不抛错**：GPT 失败 / 超时 / JSON 校验失败都会走启发式兜底。
  */
@@ -351,7 +351,7 @@ export async function detectMainArticle(
     };
   }
 
-  // 主路径：调 GPT-5.4 + 重试
+  // 主路径：调 GPT-5.5 + 重试
   const inputFilenames = new Set(files.map((f) => f.filename));
   const userMessage = buildDetectionUserMessage(files);
   const errors: string[] = [];

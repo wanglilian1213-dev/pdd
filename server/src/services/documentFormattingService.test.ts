@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPaperLayoutModel } from './documentFormattingService';
+import { buildPaperLayoutModel, extractBodyHeadingLines } from './documentFormattingService';
 
 test('buildPaperLayoutModel adds a cover page, body page, and separate references page', () => {
   const model = buildPaperLayoutModel(`The Impact of Electric Buses on Urban Planning
@@ -91,6 +91,30 @@ https://example.com/full-text-entry`, {
   assert.match(references[1]?.text ?? '', /another article with a long retrieval link https:\/\/example\.com\/full-text-entry/i);
 });
 
+test('buildPaperLayoutModel treats Chinese reference headings as the references section', () => {
+  const model = buildPaperLayoutModel(`新能源汽车政策分析
+
+引言
+
+正文讨论城市交通政策变化。
+
+参考文献
+
+Smith, J. (2024). Urban transit reform. Journal of Mobility Studies, 12(3), 14-20.
+Doe, A. (2023). Battery infrastructure and cities. Transport Review, 8(1), 33-49.`);
+
+  const referenceHeading = model.paragraphs.find((paragraph) => paragraph.kind === 'reference_heading');
+  const bodyText = model.paragraphs
+    .filter((paragraph) => paragraph.kind === 'body' || paragraph.kind === 'heading')
+    .map((paragraph) => paragraph.text)
+    .join('\n');
+
+  assert.equal(referenceHeading?.text, '参考文献');
+  assert.equal(referenceHeading?.pageBreakBefore, true);
+  assert.equal(model.paragraphs.filter((paragraph) => paragraph.kind === 'reference').length, 2);
+  assert.doesNotMatch(bodyText, /参考文献/);
+});
+
 test('buildPaperLayoutModel converts inline markdown emphasis into formatted runs instead of leaving raw symbols', () => {
   const model = buildPaperLayoutModel(`Essay Topic
 
@@ -149,6 +173,24 @@ This is the first real body paragraph.`, {
   assert.equal(model.paragraphs.some((paragraph) => paragraph.text.includes('.txt')), false);
 });
 
+test('buildPaperLayoutModel removes hidden control characters from exported text', () => {
+  const model = buildPaperLayoutModel(`Hidden Character Test
+
+Introduction
+
+This paragraph has clean\u0001 text and bad\u0007 controls.
+
+References
+
+Smith, J. (2024). Example\u001F Study.`);
+
+  const exportedText = model.paragraphs.map((paragraph) => paragraph.text).join('\n');
+
+  assert.doesNotMatch(exportedText, /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/);
+  assert.match(exportedText, /clean text and bad controls/);
+  assert.match(exportedText, /Example Study/);
+});
+
 test('buildPaperLayoutModel preserves leading numbering inside markdown table cells when enableMedia is on', () => {
   const model = buildPaperLayoutModel(
     `研究方法步骤
@@ -167,6 +209,45 @@ test('buildPaperLayoutModel preserves leading numbering inside markdown table ce
     ['1. 准备', '收集材料'],
     ['2. 执行', '实施方案'],
   ]);
+});
+
+test('buildPaperLayoutModel recognizes a markdown table with a caption directly above it', () => {
+  const model = buildPaperLayoutModel(
+    `研究方法步骤
+
+Table 1: Summary
+| Metric | Value |
+| --- | --- |
+| Growth | 12% |`,
+    { enableMedia: true },
+  );
+
+  const tableParagraph = model.paragraphs.find((paragraph) => paragraph.kind === 'table');
+  const exportedText = model.paragraphs.map((paragraph) => paragraph.text).join('\n');
+
+  assert.ok(tableParagraph, 'expected a table paragraph');
+  assert.deepEqual(tableParagraph?.tableRows, [
+    ['Metric', 'Value'],
+    ['Growth', '12%'],
+  ]);
+  assert.doesNotMatch(exportedText, /\| Metric \| Value \|/);
+});
+
+test('extractBodyHeadingLines keeps the first heading when there is no separate title line', () => {
+  assert.deepEqual(
+    extractBodyHeadingLines(`Introduction
+
+This essay compares policy choices.
+
+Methodology
+
+The method is a literature review.
+
+References
+
+Smith, J. (2024). Example article.`),
+    ['Introduction', 'Methodology'],
+  );
 });
 
 test('buildPaperLayoutModel removes a duplicated first body title even when punctuation style differs slightly', () => {

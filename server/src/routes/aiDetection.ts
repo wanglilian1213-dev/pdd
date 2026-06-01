@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+import { NextFunction, Router, Response } from 'express';
 import multer from 'multer';
 import { AuthRequest } from '../middleware/auth';
 import { statusGuard } from '../middleware/statusGuard';
@@ -13,6 +13,21 @@ import {
 
 const upload = multer({ storage: multer.memoryStorage() });
 const router = Router();
+const SINGLE_FILE_ERROR = 'AI 检测一次只能处理一个文件，请分批提交。';
+
+export function parseAiDetectionFiles(req: AuthRequest, res: Response, next: NextFunction) {
+  upload.array('files', 1)(req, res, (err: unknown) => {
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_UNEXPECTED_FILE') {
+      res.status(400).json({ success: false, error: SINGLE_FILE_ERROR });
+      return;
+    }
+    if (err) {
+      res.status(400).json({ success: false, error: '文件上传失败，请重新选择文件。' });
+      return;
+    }
+    next();
+  });
+}
 
 router.use(statusGuard);
 
@@ -34,7 +49,7 @@ router.post('/estimate', upload.single('file'), async (req: AuthRequest, res: Re
 });
 
 // POST /api/ai-detection/create
-router.post('/create', upload.array('files', 1), async (req: AuthRequest, res: Response) => {
+router.post('/create', parseAiDetectionFiles, async (req: AuthRequest, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[];
     validateAiDetectionFiles(files);

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { AppError } from '../lib/errors';
 
 import {
   standaloneHumanizeServiceTestUtils,
@@ -8,7 +9,12 @@ import {
   STANDALONE_HUMANIZE_MAX_WORDS,
 } from './standaloneHumanizeService';
 
-const { computeFrozenAmount, extractArticleTitle, sanitizeForFilename } =
+const {
+  computeFrozenAmount,
+  extractArticleTitle,
+  sanitizeForFilename,
+  buildFailureReason,
+} =
   standaloneHumanizeServiceTestUtils;
 
 // ---------------------------------------------------------------------------
@@ -108,4 +114,41 @@ test('validateStandaloneHumanizeFiles: 通过 PDF / DOCX / TXT / MD', () => {
   assert.doesNotThrow(() => validateStandaloneHumanizeFiles([makeFile('a.docx')]));
   assert.doesNotThrow(() => validateStandaloneHumanizeFiles([makeFile('a.txt')]));
   assert.doesNotThrow(() => validateStandaloneHumanizeFiles([makeFile('a.md')]));
+});
+
+// ---------------------------------------------------------------------------
+// buildFailureReason
+// ---------------------------------------------------------------------------
+
+test('buildFailureReason: 超长句错误会翻译成人话并附带退款说明', () => {
+  const reason = buildFailureReason(
+    new Error('Some sentences are too long. Please fix your text and try again.'),
+    { frozenCreditsAmount: 120, alreadySettled: false },
+  );
+
+  assert.equal(
+    reason,
+    '原文里有句子太长，StealthWriter 不接受这类输入。请先把超长句拆短后再试。（积分已自动退回）',
+  );
+});
+
+test('buildFailureReason: StealthWriter 明确报错直接透传并附带退款说明', () => {
+  const reason = buildFailureReason(
+    new Error('StealthWriter 已连续 Humanize More 12 次，V2 仍只有 41 分，已停止自动补降。'),
+    { frozenCreditsAmount: 120, alreadySettled: false },
+  );
+
+  assert.equal(
+    reason,
+    'StealthWriter 已连续 Humanize More 12 次，V2 仍只有 41 分，已停止自动补降。（积分已自动退回）',
+  );
+});
+
+test('buildFailureReason: AppError 继续使用自己的用户提示', () => {
+  const reason = buildFailureReason(
+    new AppError(400, '文件太大了。'),
+    { frozenCreditsAmount: 0, alreadySettled: false },
+  );
+
+  assert.equal(reason, '文件太大了。');
 });

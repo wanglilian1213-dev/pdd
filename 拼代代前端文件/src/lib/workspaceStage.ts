@@ -9,6 +9,7 @@ export function stageToStep(stage: string, status: string): number {
       word_calibrating: 4,
       citation_checking: 5,
       polishing: 5,
+      quality_checking: 6,
       delivering: 6,
       completed: 6,
       humanizing: 7,
@@ -38,6 +39,8 @@ export function stageToStep(stage: string, status: string): number {
       return 5;
     case 'polishing':
       return 5;
+    case 'quality_checking':
+      return 6;
     case 'delivering':
       return 6;
     case 'completed':
@@ -68,11 +71,11 @@ export function getWorkspaceStep(
 }
 
 export function shouldPollWritingStage(stage: string, status: string): boolean {
-  return status === 'processing' && ['writing', 'word_calibrating', 'citation_checking', 'polishing', 'delivering'].includes(stage);
+  return status === 'processing' && ['writing', 'word_calibrating', 'citation_checking', 'polishing', 'quality_checking', 'delivering'].includes(stage);
 }
 
 export function isDeliveryInProgressState(stage: string, status: string): boolean {
-  return stage === 'delivering' && status === 'processing';
+  return ['quality_checking', 'delivering'].includes(stage) && status === 'processing';
 }
 
 export function isDeliveryCompletedState(stage: string, status: string): boolean {

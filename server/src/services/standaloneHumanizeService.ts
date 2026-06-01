@@ -12,13 +12,19 @@ import {
   countWords,
   getFileExtension,
 } from './scoringMaterialService';
-import { undetectableClient, type HumanizeTextResult } from '../lib/undetectable';
+import {
+  buildStealthwriterResultJson,
+  STEALTHWRITER_MODEL,
+  stealthwriterClient,
+} from '../lib/stealthwriter';
 import { buildFormattedPaperDocBuffer } from './documentFormattingService';
 import { recordAuditLog } from './auditLogService';
+import { splitBodyAndReserved, condenseHumanizedBody } from './standaloneHumanizeCondenseService';
 import {
-  splitBodyAndReserved,
-  condenseHumanizedBody,
-} from './standaloneHumanizeCondenseService';
+  runStealthwriterHumanizationLoop,
+  StealthwriterHumanizationLoopError,
+  type StealthwriterHumanizationLoopDeps,
+} from './stealthwriterHumanizationService';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -28,10 +34,10 @@ const DEFAULT_HUMANIZE_PRICE_PER_WORD = 0.4;
 const DEFAULT_MATERIAL_RETENTION_DAYS = 3;
 const DEFAULT_RESULT_FILE_RETENTION_DAYS = 3;
 
-/** 最低字数：短文本降 AI 效果差，且 Undetectable 无下限但实际 <500 效果不稳 */
+/** 最低字数：短文本降 AI 效果差，低于 500 词直接拒绝 */
 export const STANDALONE_HUMANIZE_MIN_WORDS = 500;
 
-/** 最高字数：和 Detector 一致的 30,000 上限（避免超出 Undetectable 长度） */
+/** 最高字数：和检测功能一致的 30,000 上限 */
 export const STANDALONE_HUMANIZE_MAX_WORDS = 30_000;
 
 // 支持 PDF / DOCX / TXT
@@ -41,9 +47,8 @@ const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md']);
 // DI 接口
 // ---------------------------------------------------------------------------
 
-export interface StandaloneHumanizeServiceDeps {
+export interface StandaloneHumanizeServiceDeps extends StealthwriterHumanizationLoopDeps {
   material: ScoringMaterialDeps;
-  humanizeText: (text: string) => Promise<HumanizeTextResult>;
   buildDocx: (text: string, options: { paperTitle: string }) => Promise<Buffer>;
   /**
    * 删减膨胀后的正文到目标字数范围。
@@ -55,7 +60,9 @@ export interface StandaloneHumanizeServiceDeps {
 
 export const defaultStandaloneHumanizeServiceDeps: StandaloneHumanizeServiceDeps = {
   material: defaultScoringMaterialDeps,
-  humanizeText: (text) => undetectableClient.humanizeText(text),
+  humanize: (text) => stealthwriterClient.humanize(text),
+  humanizeMore: (current) => stealthwriterClient.humanizeMore(current),
+  scanV2: (text) => stealthwriterClient.scanV2(text),
   buildDocx: (text, options) => buildFormattedPaperDocBuffer(text, { paperTitle: options.paperTitle }),
   condenseBody: (text, min, max) => condenseHumanizedBody(text, min, max),
   now: () => Date.now(),
@@ -74,6 +81,27 @@ async function readPricePerWord(): Promise<number> {
 
 function computeFrozenAmount(totalWords: number, pricePerWord: number): number {
   return Math.ceil(totalWords * pricePerWord);
+}
+
+function buildFailureReason(
+  error: unknown,
+  options: { frozenCreditsAmount: number; alreadySettled: boolean },
+): string {
+  let baseReason = '降 AI 过程中发生错误，请稍后重试。';
+
+  if (error instanceof AppError) {
+    baseReason = error.userMessage;
+  } else if (error instanceof Error) {
+    if (/Some sentences are too long/i.test(error.message)) {
+      baseReason = '原文里有句子太长，StealthWriter 不接受这类输入。请先把超长句拆短后再试。';
+    } else if (error.message.startsWith('StealthWriter ')) {
+      baseReason = error.message;
+    }
+  }
+
+  return options.frozenCreditsAmount > 0
+    ? `${baseReason}${options.alreadySettled ? '' : '（积分已自动退回）'}`
+    : baseReason;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +527,7 @@ export async function executeStandaloneHumanize(
 ): Promise<void> {
   let frozenCreditsAmount = 0;
   let alreadySettled = false;
+  let displayOriginalText = inputText;
 
   try {
     // 1. Load row（拿 frozen_credits）
@@ -538,13 +567,14 @@ export async function executeStandaloneHumanize(
     if (!text || text.trim().length === 0) {
       throw new AppError(500, '无法读取文章正文。');
     }
+    displayOriginalText = text;
 
     // 3. 分离正文和保护区（引用/附录）
-    //    只把正文送 Undetectable 降 AI，保护区原样保留
+    //    只把正文送 StealthWriter，保护区原样保留
     const { body: originalBody, reserved } = splitBodyAndReserved(text);
     const originalBodyWords = countWords(originalBody);
 
-    // 正文过短（<200 词）Undetectable 效果差且可能直接报错，提前失败退款
+    // 正文过短（<200 词）第三方服务效果差且可能直接报错，提前失败退款
     if (originalBodyWords < 200) {
       throw new AppError(
         500,
@@ -552,9 +582,9 @@ export async function executeStandaloneHumanize(
       );
     }
 
-    // 4. 调 Undetectable Humanization（只发正文）
-    const { documentId, output } = await deps.humanizeText(originalBody);
-    const humanizedBodyRaw = output.trim();
+    // 4. 调 StealthWriter 循环：humanize -> V2 scan -> Humanize More -> ... -> >= 90
+    const loopResult = await runStealthwriterHumanizationLoop(originalBody, deps);
+    const humanizedBodyRaw = loopResult.output.trim();
     if (!humanizedBodyRaw) throw new AppError(500, '降 AI 返回空文本。');
 
     // 5. 字数删减：以原正文字数为基准 ±10%
@@ -564,7 +594,7 @@ export async function executeStandaloneHumanize(
 
     let humanizedBody = humanizedBodyRaw;
     if (humanizedBodyRawWords > maxTargetWords) {
-      // 只有超出上限才触发删减；低于下限不做处理（Undetectable 膨胀是主要问题）
+      // 只有超出上限才触发删减；低于下限不做处理（主要问题是第三方改写后可能膨胀）
       try {
         humanizedBody = await deps.condenseBody(humanizedBodyRaw, minTargetWords, maxTargetWords);
       } catch (condenseError) {
@@ -582,6 +612,10 @@ export async function executeStandaloneHumanize(
     const humanizedText = reserved
       ? humanizedBody.trimEnd() + '\n\n' + reserved
       : humanizedBody;
+    const resultJson = buildStealthwriterResultJson(loopResult.finalScan, {
+      displayText: humanizedText,
+      originalText: text,
+    });
     const humanizedWordCount = countWords(humanizedText);
 
     // 7. 生成 docx
@@ -631,7 +665,11 @@ export async function executeStandaloneHumanize(
         humanized_text: humanizedText,
         humanized_word_count: humanizedWordCount,
         settled_credits: costToSettle,
-        undetectable_document_id: documentId,
+        final_human_score: loopResult.finalHumanScore,
+        scan_version: loopResult.scanVersion,
+        humanize_more_attempts: loopResult.humanizeMoreAttempts,
+        stealthwriter_result_id: loopResult.resultId,
+        result_json: resultJson,
         updated_at: new Date().toISOString(),
       })
       .eq('id', humanizationId);
@@ -661,7 +699,13 @@ export async function executeStandaloneHumanize(
         inputWords: row.input_word_count,
         humanizedWords: humanizedWordCount,
         settledCredits: costToSettle,
-        undetectableDocumentId: documentId,
+        provider: 'stealthwriter',
+        model: STEALTHWRITER_MODEL,
+        level: 8,
+        scanVersion: loopResult.scanVersion,
+        finalHumanScore: loopResult.finalHumanScore,
+        humanizeMoreAttempts: loopResult.humanizeMoreAttempts,
+        stealthwriterResultId: loopResult.resultId,
       },
     });
   } catch (error: unknown) {
@@ -683,21 +727,28 @@ export async function executeStandaloneHumanize(
       }
     }
 
-    const baseReason =
-      error instanceof AppError
-        ? error.userMessage
-        : '降 AI 过程中发生错误，请稍后重试。';
-    const failureReason = frozenCreditsAmount > 0
-      ? `${baseReason}${alreadySettled ? '' : '（积分已自动退回）'}`
-      : baseReason;
+    const failureReason = buildFailureReason(error, { frozenCreditsAmount, alreadySettled });
+    const failureUpdate: Record<string, unknown> = {
+      status: 'failed',
+      failure_reason: failureReason,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (error instanceof StealthwriterHumanizationLoopError) {
+      const resultJson = buildStealthwriterResultJson(error.lastScan, {
+        displayText: error.output,
+        originalText: displayOriginalText,
+      });
+      failureUpdate.final_human_score = resultJson.human_score;
+      failureUpdate.scan_version = error.scanVersion;
+      failureUpdate.humanize_more_attempts = error.humanizeMoreAttempts;
+      failureUpdate.stealthwriter_result_id = error.resultId || resultJson.stealthwriter_result_id;
+      failureUpdate.result_json = resultJson;
+    }
 
     await supabaseAdmin
       .from('standalone_humanizations')
-      .update({
-        status: 'failed',
-        failure_reason: failureReason,
-        updated_at: new Date().toISOString(),
-      })
+      .update(failureUpdate)
       .eq('id', humanizationId);
 
     captureError(error, 'standalone_humanize.execute_failed', { humanizationId });
@@ -844,6 +895,7 @@ export async function acknowledgeStandaloneHumanize(humanizationId: string, user
 // ---------------------------------------------------------------------------
 
 export const standaloneHumanizeServiceTestUtils = {
+  buildFailureReason,
   computeFrozenAmount,
   readPricePerWord,
   STANDALONE_HUMANIZE_MIN_WORDS,

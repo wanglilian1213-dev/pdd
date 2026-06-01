@@ -3,13 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { FileText, FileEdit, Download, Clock, CheckCircle2, AlertCircle, RefreshCw, Search, Filter, Loader2, Info, Gauge, Bot, Sparkles } from 'lucide-react';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../../components/ui/dropdown-menu";
+import { FileText, FileEdit, Download, Clock, CheckCircle2, AlertCircle, RefreshCw, Search, Loader2, Info, Gauge, Bot, Sparkles } from 'lucide-react';
 import { api } from '../../lib/api';
 import { normalizeTaskFiles, pickPrimaryDownloadFile } from '../../lib/taskFiles';
 import { triggerDownload } from '../../lib/downloadFile';
@@ -46,7 +40,7 @@ interface ScoringDetectedFile {
 
 interface ScoringItem {
   id: string;
-  status: 'processing' | 'completed' | 'failed';
+  status: 'initializing' | 'processing' | 'completed' | 'failed';
   scenario: 'rubric' | 'brief_only' | 'article_only' | null;
   overall_score: number | null;
   scoring_word_count: number | null;
@@ -64,6 +58,8 @@ interface AiDetectionItem {
   frozen_credits: number;
   settled_credits: number | null;
   overall_score: number | null;
+  human_score?: number | null;
+  scan_version?: string | null;
   failure_reason: string | null;
   created_at: string;
 }
@@ -75,11 +71,29 @@ interface StandaloneHumanizationItem {
   humanized_word_count: number | null;
   frozen_credits: number;
   settled_credits: number | null;
+  final_human_score?: number | null;
+  humanize_more_attempts?: number | null;
   failure_reason: string | null;
   created_at: string;
 }
 
 type ActiveTab = 'tasks' | 'revisions' | 'scorings' | 'ai-detections' | 'standalone-humanizations';
+
+const statusSelectClass =
+  'h-10 rounded-md border border-red-200 bg-white px-3 text-sm font-medium text-red-700 outline-none transition-colors hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+
+function formatCreditDisplay(
+  status: string,
+  frozenCredits: number,
+  settledCredits?: number | null,
+): string {
+  if (status === 'failed') return '已退回';
+  if (status === 'processing' || status === 'initializing') {
+    return frozenCredits > 0 ? `冻结 ${frozenCredits}` : '-';
+  }
+  const actualCost = settledCredits ?? frozenCredits;
+  return actualCost > 0 ? `-${actualCost}` : '-';
+}
 
 function resolveInitialTab(param: string | null): ActiveTab {
   if (param === 'revisions') return 'revisions';
@@ -498,20 +512,17 @@ export default function Tasks() {
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="bg-white gap-2">
-                    <Filter className="h-4 w-4 text-gray-500" />
-                    <span className="hidden sm:inline">{getTaskStatusLabel(statusFilter)}</span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setStatusFilter('all')}>全部状态</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setStatusFilter('completed')}>已交付</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setStatusFilter('processing')}>处理中</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setStatusFilter('failed')}>生成失败</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <select
+                aria-label="筛选写作任务状态"
+                className={statusSelectClass}
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                <option value="all">全部状态</option>
+                <option value="completed">已交付</option>
+                <option value="processing">处理中</option>
+                <option value="failed">生成失败</option>
+              </select>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -587,7 +598,7 @@ export default function Tasks() {
                               {task.created_at ? formatDate(task.created_at) : '-'}
                             </td>
                             <td className="px-6 py-4 font-medium text-gray-900">
-                              {task.frozen_credits > 0 ? `-${task.frozen_credits}` : '-'}
+                              {formatCreditDisplay(task.status, task.frozen_credits)}
                             </td>
                             <td className="px-6 py-4 text-right">
                               {task.status === 'completed' && (
@@ -632,11 +643,7 @@ export default function Tasks() {
 
                 <div className="flex flex-col sm:flex-row items-center justify-between px-6 py-4 border-t border-gray-100 bg-white gap-4">
                   <div className="text-sm text-gray-500">
-                    显示 1 到 {tasks.length} 条，共 {total} 条记录
-                  </div>
-                  <div className="flex gap-2 w-full sm:w-auto">
-                    <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">上一页</Button>
-                    <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">下一页</Button>
+                    当前显示最近 {tasks.length} 条，共 {total} 条记录
                   </div>
                 </div>
               </>
@@ -660,20 +667,17 @@ export default function Tasks() {
                   onChange={(e) => setRevisionSearch(e.target.value)}
                 />
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="bg-white gap-2">
-                    <Filter className="h-4 w-4 text-gray-500" />
-                    <span className="hidden sm:inline">{getStatusLabel(revisionStatusFilter)}</span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setRevisionStatusFilter('all')}>全部状态</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setRevisionStatusFilter('completed')}>已完成</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setRevisionStatusFilter('processing')}>处理中</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setRevisionStatusFilter('failed')}>失败</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <select
+                aria-label="筛选文章修改状态"
+                className={statusSelectClass}
+                value={revisionStatusFilter}
+                onChange={(e) => setRevisionStatusFilter(e.target.value)}
+              >
+                <option value="all">全部状态</option>
+                <option value="completed">已完成</option>
+                <option value="processing">处理中</option>
+                <option value="failed">失败</option>
+              </select>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -750,7 +754,7 @@ export default function Tasks() {
                               {rev.created_at ? formatDate(rev.created_at) : '-'}
                             </td>
                             <td className="px-6 py-4 font-medium text-gray-900">
-                              {rev.frozen_credits > 0 ? `-${rev.frozen_credits}` : '-'}
+                              {formatCreditDisplay(rev.status, rev.frozen_credits)}
                             </td>
                             <td className="px-6 py-4 text-right">
                               {rev.status === 'completed' && (
@@ -794,11 +798,7 @@ export default function Tasks() {
 
                 <div className="flex flex-col sm:flex-row items-center justify-between px-6 py-4 border-t border-gray-100 bg-white gap-4">
                   <div className="text-sm text-gray-500">
-                    显示 1 到 {revisions.length} 条，共 {revisionTotal} 条记录
-                  </div>
-                  <div className="flex gap-2 w-full sm:w-auto">
-                    <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">上一页</Button>
-                    <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">下一页</Button>
+                    当前显示最近 {revisions.length} 条，共 {revisionTotal} 条记录
                   </div>
                 </div>
               </>
@@ -822,20 +822,17 @@ export default function Tasks() {
                   onChange={(e) => setScoringSearch(e.target.value)}
                 />
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" className="bg-white gap-2">
-                    <Filter className="h-4 w-4 text-gray-500" />
-                    <span className="hidden sm:inline">{getStatusLabel(scoringStatusFilter)}</span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => setScoringStatusFilter('all')}>全部状态</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setScoringStatusFilter('completed')}>已完成</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setScoringStatusFilter('processing')}>处理中</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setScoringStatusFilter('failed')}>失败</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <select
+                aria-label="筛选文章评审状态"
+                className={statusSelectClass}
+                value={scoringStatusFilter}
+                onChange={(e) => setScoringStatusFilter(e.target.value)}
+              >
+                <option value="all">全部状态</option>
+                <option value="completed">已完成</option>
+                <option value="processing">处理中</option>
+                <option value="failed">失败</option>
+              </select>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -876,7 +873,6 @@ export default function Tasks() {
                       ) : (
                         scorings.map((scoring) => {
                           const title = getScoringDisplayTitle(scoring);
-                          const actualCost = scoring.settled_credits ?? scoring.frozen_credits;
                           return (
                             <tr key={scoring.id} className="bg-white border-b border-gray-100 hover:bg-gray-50 transition-colors">
                               <td className="px-6 py-4">
@@ -907,6 +903,11 @@ export default function Tasks() {
                                     <CheckCircle2 className="w-3.5 h-3.5" /> 已完成
                                   </span>
                                 )}
+                                {scoring.status === 'initializing' && (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                                    <Clock className="w-3.5 h-3.5 animate-pulse" /> 正在验证材料
+                                  </span>
+                                )}
                                 {scoring.status === 'processing' && (
                                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
                                     <Clock className="w-3.5 h-3.5 animate-pulse" /> 处理中
@@ -920,10 +921,10 @@ export default function Tasks() {
                               </td>
                               <td className="px-6 py-4 text-gray-500 font-mono text-xs">
                                 {scoring.created_at ? formatDate(scoring.created_at) : '-'}
-                              </td>
-                              <td className="px-6 py-4 font-medium text-gray-900">
-                                {actualCost > 0 ? `-${actualCost}` : '-'}
-                              </td>
+                                </td>
+                                <td className="px-6 py-4 font-medium text-gray-900">
+                                  {formatCreditDisplay(scoring.status, scoring.frozen_credits, scoring.settled_credits)}
+                                </td>
                               <td className="px-6 py-4 text-right">
                                 {scoring.status === 'completed' && (
                                   <Button
@@ -967,11 +968,7 @@ export default function Tasks() {
 
                 <div className="flex flex-col sm:flex-row items-center justify-between px-6 py-4 border-t border-gray-100 bg-white gap-4">
                   <div className="text-sm text-gray-500">
-                    显示 1 到 {scorings.length} 条，共 {scoringTotal} 条记录
-                  </div>
-                  <div className="flex gap-2 w-full sm:w-auto">
-                    <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">上一页</Button>
-                    <Button variant="outline" size="sm" disabled className="flex-1 sm:flex-none">下一页</Button>
+                    当前显示最近 {scorings.length} 条，共 {scoringTotal} 条记录
                   </div>
                 </div>
               </>
@@ -1007,7 +1004,7 @@ export default function Tasks() {
                     <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b border-gray-200">
                       <tr>
                         <th scope="col" className="px-6 py-4 w-[30%]">检测 ID</th>
-                        <th scope="col" className="px-6 py-4 w-[15%]">AI 可能性</th>
+                        <th scope="col" className="px-6 py-4 w-[15%]">检测分数</th>
                         <th scope="col" className="px-6 py-4 w-[15%]">状态</th>
                         <th scope="col" className="px-6 py-4 w-[20%]">创建时间</th>
                         <th scope="col" className="px-6 py-4 w-[10%]">消耗积分</th>
@@ -1038,15 +1035,17 @@ export default function Tasks() {
                               </div>
                             </td>
                             <td className="px-6 py-4">
-                              {item.status === 'completed' && item.overall_score !== null ? (
+                              {item.status === 'completed'
+                              && (item.human_score ?? item.overall_score) !== null
+                              && (item.human_score ?? item.overall_score) !== undefined ? (
                                 <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
-                                  item.overall_score >= 60
-                                    ? 'bg-red-50 text-red-700 border border-red-200'
-                                    : item.overall_score >= 30
-                                    ? 'bg-amber-50 text-amber-700 border border-amber-200'
-                                    : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  (item.human_score ?? item.overall_score ?? 0) >= 90
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : (item.human_score ?? item.overall_score ?? 0) >= 75
+                                      ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                      : 'bg-red-50 text-red-700 border border-red-200'
                                 }`}>
-                                  {Math.round(item.overall_score)}%
+                                  {Math.round(item.human_score ?? item.overall_score ?? 0)}%
                                 </span>
                               ) : (
                                 <span className="text-gray-400">-</span>
@@ -1073,16 +1072,14 @@ export default function Tasks() {
                               {item.created_at ? formatDate(item.created_at) : '-'}
                             </td>
                             <td className="px-6 py-4 font-medium text-gray-900">
-                              {(item.settled_credits ?? item.frozen_credits) > 0
-                                ? `-${item.settled_credits ?? item.frozen_credits}`
-                                : '-'}
+                              {formatCreditDisplay(item.status, item.frozen_credits, item.settled_credits)}
                             </td>
                             <td className="px-6 py-4 text-right">
                               <Button
                                 variant="outline"
                                 size="sm"
                                 className="gap-2"
-                                onClick={() => navigate('/dashboard/ai-tools')}
+                                onClick={() => navigate(`/dashboard/ai-tools?tab=detection&detection=${encodeURIComponent(item.id)}`)}
                               >
                                 打开页面
                               </Button>
@@ -1128,10 +1125,12 @@ export default function Tasks() {
                   <table className="w-full text-sm text-left text-gray-500 min-w-[720px]">
                     <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b border-gray-200">
                       <tr>
-                        <th scope="col" className="px-6 py-4 w-[30%]">降 AI ID</th>
-                        <th scope="col" className="px-6 py-4 w-[15%]">降 AI 后字数</th>
-                        <th scope="col" className="px-6 py-4 w-[15%]">状态</th>
-                        <th scope="col" className="px-6 py-4 w-[20%]">创建时间</th>
+                        <th scope="col" className="px-6 py-4 w-[24%]">降 AI ID</th>
+                        <th scope="col" className="px-6 py-4 w-[14%]">降 AI 后字数</th>
+                        <th scope="col" className="px-6 py-4 w-[12%]">检测分数</th>
+                        <th scope="col" className="px-6 py-4 w-[10%]">补降次数</th>
+                        <th scope="col" className="px-6 py-4 w-[12%]">状态</th>
+                        <th scope="col" className="px-6 py-4 w-[18%]">创建时间</th>
                         <th scope="col" className="px-6 py-4 w-[10%]">消耗积分</th>
                         <th scope="col" className="px-6 py-4 w-[10%] text-right">操作</th>
                       </tr>
@@ -1139,7 +1138,7 @@ export default function Tasks() {
                     <tbody>
                       {allHumanizations.length === 0 ? (
                         <tr>
-                          <td colSpan={6} className="px-6 py-12 text-center text-gray-500">
+                          <td colSpan={8} className="px-6 py-12 text-center text-gray-500">
                             暂无独立降 AI 记录
                           </td>
                         </tr>
@@ -1165,6 +1164,28 @@ export default function Tasks() {
                                 : '-'}
                             </td>
                             <td className="px-6 py-4">
+                              {item.status === 'completed'
+                              && item.final_human_score !== null
+                              && item.final_human_score !== undefined ? (
+                                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
+                                  (item.final_human_score ?? 0) >= 90
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : (item.final_human_score ?? 0) >= 75
+                                      ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                                      : 'bg-red-50 text-red-700 border border-red-200'
+                                }`}>
+                                  {item.final_human_score}%
+                                </span>
+                              ) : (
+                                <span className="text-gray-400">-</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 font-medium text-gray-900">
+                              {item.status === 'completed'
+                                ? `${item.humanize_more_attempts ?? 0} 次`
+                                : '-'}
+                            </td>
+                            <td className="px-6 py-4">
                               {item.status === 'completed' && (
                                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
                                   <CheckCircle2 className="w-3.5 h-3.5" /> 完成
@@ -1185,9 +1206,7 @@ export default function Tasks() {
                               {item.created_at ? formatDate(item.created_at) : '-'}
                             </td>
                             <td className="px-6 py-4 font-medium text-gray-900">
-                              {(item.settled_credits ?? item.frozen_credits) > 0
-                                ? `-${item.settled_credits ?? item.frozen_credits}`
-                                : '-'}
+                              {formatCreditDisplay(item.status, item.frozen_credits, item.settled_credits)}
                             </td>
                             <td className="px-6 py-4 text-right">
                               {item.status === 'completed' ? (
@@ -1210,7 +1229,7 @@ export default function Tasks() {
                                   variant="outline"
                                   size="sm"
                                   className="gap-2"
-                                  onClick={() => navigate('/dashboard/ai-tools')}
+                                  onClick={() => navigate('/dashboard/ai-tools?tab=humanization')}
                                 >
                                   打开页面
                                 </Button>

@@ -120,7 +120,7 @@ export const api = {
       '预估失败',
     );
   },
-  // 多文件精准预估：调 GPT-5.4 article_detection 识别主文章 +
+  // 多文件精准预估：调 GPT-5.5 article_detection 识别主文章 +
   // 按 ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100 公式算冻结金额。
   // 前端在文件列表停止变化 1.5 秒后防抖调用，给用户展示「主文章: xxx · 实际冻结 X 积分」。
   // GPT 失败时后端会自动 fallback 到启发式（docx 字数最大 → 非图片字数最大），不会抛错。
@@ -199,30 +199,6 @@ export const api = {
     request<any>(`/api/scoring/${scoringId}/file/${fileId}/download`),
 
   // AI Detection (检测 AI)
-  // 前端选文件后立即调 estimate 显示「预估 N 积分」；不扣积分不入库。
-  estimateAiDetection: async (file: File) => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) throw new Error('未登录');
-
-    const fd = new FormData();
-    fd.append('file', file);
-
-    const res = await fetch(`${API_BASE}/api/ai-detection/estimate`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${session.access_token}` },
-      body: fd,
-    });
-    return parseApiResponse<{
-      filename: string;
-      words: number;
-      pricePerWord: number;
-      estimatedAmount: number;
-      tooShort: boolean;
-      tooLong: boolean;
-      isScannedPdf: boolean;
-      isImage: boolean;
-    }>(res, '预估失败');
-  },
   createAiDetection: async (file: File) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) throw new Error('未登录');
@@ -261,29 +237,6 @@ export const api = {
     request<any>(`/api/ai-detection/list?limit=${limit}&offset=${offset}`),
 
   // Standalone Humanize (独立降 AI)
-  estimateStandaloneHumanize: async (file: File) => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) throw new Error('未登录');
-
-    const fd = new FormData();
-    fd.append('file', file);
-
-    const res = await fetch(`${API_BASE}/api/standalone-humanize/estimate`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${session.access_token}` },
-      body: fd,
-    });
-    return parseApiResponse<{
-      filename: string;
-      words: number;
-      pricePerWord: number;
-      estimatedAmount: number;
-      tooShort: boolean;
-      tooLong: boolean;
-      isScannedPdf: boolean;
-      isImage: boolean;
-    }>(res, '预估失败');
-  },
   createStandaloneHumanize: async (file: File) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) throw new Error('未登录');

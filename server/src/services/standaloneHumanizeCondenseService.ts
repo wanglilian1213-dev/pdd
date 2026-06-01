@@ -4,8 +4,8 @@ import { countWords } from './scoringMaterialService';
 
 // 独立降 AI 专用工具：
 //   1. splitBodyAndReserved —— 把上传文档分成「正文」和「保护区」（引用/附录）
-//      分离后只把正文送 Undetectable 降 AI，保护区原样保留
-//   2. condenseHumanizedBody —— 降 AI 后字数膨胀太多时，用 GPT-5.4 只删不改地压字数
+//      分离后只把正文送 StealthWriter，保护区原样保留
+//   2. condenseHumanizedBody —— 降 AI 后字数膨胀太多时，用 GPT-5.5 只删不改地压字数
 //
 // 和工作台 humanizeService.condensePaper 的区别：
 //   - 工作台：降 AI **前**压缩（允许改写），目标靠 condense + humanize 两步叠加
@@ -63,15 +63,15 @@ export function splitBodyAndReserved(text: string): { body: string; reserved: st
 }
 
 // ---------------------------------------------------------------------------
-// 2. GPT-5.4 删减
+// 2. GPT-5.5 删减
 // ---------------------------------------------------------------------------
 
 const MAX_CONDENSE_ATTEMPTS = 3;
 // 单次 3 分钟（不是 5 分钟）—— 时间预算：
-//   Undetectable 降 AI 基线 ~10 min + condense 3 次 × 3 min = 19 min
+//   StealthWriter 循环降 AI 基线 ~10 min + condense 3 次 × 3 min = 19 min
 //   < 前端轮询总超时 20 min（POLL_TIMEOUT_HUMANIZE_MS）
 //   < cleanupRuntime 兜底 45 min
-// 如果改成 5 min（原默认），3 次重试 = 15 min，加 Undetectable 10 min = 25 min，
+// 如果改成 5 min（原默认），3 次重试 = 15 min，加第三方降 AI 10 min = 25 min，
 // 会撑爆前端轮询上限，用户看到"降 AI 超时"但后端还在跑。
 const CONDENSE_SINGLE_TIMEOUT_MS = 3 * 60 * 1000;
 
@@ -122,8 +122,13 @@ export const defaultCondenseDeps: CondenseDeps = {
       streamResponseText({
         model: env.openaiModel,
         instructions: systemPrompt,
-        reasoning: { effort: 'high' as any },
-        input: text,
+        reasoning: { effort: 'xhigh' as any },
+        input: [
+          {
+            role: 'user' as const,
+            content: [{ type: 'input_text' as const, text }],
+          },
+        ],
       } as any),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('condense attempt timeout')), timeoutMs),

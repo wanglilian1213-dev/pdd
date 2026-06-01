@@ -13,11 +13,12 @@ import {
   getFileExtension,
 } from './scoringMaterialService';
 import {
-  undetectableDetectorClient,
-  type DetectAiResult,
-  type DetectedSentence,
-} from '../lib/undetectableDetector';
-import { env } from '../lib/runtimeEnv';
+  stealthwriterClient,
+  buildStealthwriterResultJson,
+  type StealthwriterScanResult,
+  type StealthwriterScanSentence,
+  type StealthwriterResultJson,
+} from '../lib/stealthwriter';
 import { recordAuditLog } from './auditLogService';
 
 // ---------------------------------------------------------------------------
@@ -27,10 +28,10 @@ import { recordAuditLog } from './auditLogService';
 const DEFAULT_AI_DETECTION_PRICE_PER_WORD = 0.05;
 const DEFAULT_MATERIAL_RETENTION_DAYS = 3;
 
-/** 最低字数：Undetectable 官方建议 200 词 */
+/** 最低字数：StealthWriter V2 对极短文本判断不稳定，低于 200 词直接拒绝 */
 export const AI_DETECTION_MIN_WORDS = 200;
 
-/** 最高字数：Undetectable 请求体硬上限 30,000 词 */
+/** 最高字数：与降 AI 功能保持一致，避免超长文本拖垮检测 */
 export const AI_DETECTION_MAX_WORDS = 30_000;
 
 // 只支持 PDF / DOCX / TXT（图片不做检测，因为无法提取文字）
@@ -42,26 +43,95 @@ const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md']);
 
 export interface AiDetectionServiceDeps {
   material: ScoringMaterialDeps;
-  /** 跑 Undetectable Detector 并返回结构化结果 */
-  runDetector: (text: string) => Promise<DetectAiResult>;
+  /** 跑 StealthWriter V2 检测并返回结构化结果 */
+  runDetector: (text: string) => Promise<StealthwriterScanResult>;
   now: () => number;
 }
 
 export const defaultAiDetectionServiceDeps: AiDetectionServiceDeps = {
   material: defaultScoringMaterialDeps,
-  // 2026-04-19 改成走 WebSocket 句子级；如果 UNDETECTABLE_USER_ID 没配会 fallback 到篇章级
-  // （不会崩但前端看不到句子标红；在日志里提醒运维）
-  runDetector: (text) => {
-    if (env.undetectableUserId) {
-      return undetectableDetectorClient.detectAiWithSentences(text);
-    }
-    console.warn(
-      '[ai_detection] UNDETECTABLE_USER_ID 未配置，fallback 到篇章级 REST（前端看不到句子标红）',
-    );
-    return undetectableDetectorClient.detectAi(text);
-  },
+  runDetector: (text) => stealthwriterClient.scanV2(text),
   now: () => Date.now(),
 };
+
+export type AiDetectionResultJson = StealthwriterResultJson;
+
+export function buildAiDetectionResultJson(
+  detectResult: StealthwriterScanResult,
+  originalText?: string,
+): AiDetectionResultJson {
+  return buildStealthwriterResultJson(detectResult, {
+    displayText: originalText,
+    originalText,
+  });
+}
+
+function hasDisplayText(resultJson?: AiDetectionResultJson | null) {
+  return Boolean(resultJson?.display_text?.trim() || resultJson?.original_text?.trim());
+}
+
+async function hydrateDetectionDisplayTextIfMissing(
+  detectionId: string,
+  resultJson: AiDetectionResultJson | null | undefined,
+  deps: AiDetectionServiceDeps = defaultAiDetectionServiceDeps,
+): Promise<AiDetectionResultJson | null | undefined> {
+  if (!resultJson || hasDisplayText(resultJson)) {
+    return resultJson;
+  }
+
+  try {
+    const { data: fileRow } = await supabaseAdmin
+      .from('ai_detection_files')
+      .select('storage_path, original_name, mime_type')
+      .eq('detection_id', detectionId)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (!fileRow) {
+      return resultJson;
+    }
+
+    const blob = await deps.material.downloadFile(fileRow.storage_path);
+    const buffer = Buffer.from(await blob.arrayBuffer());
+    const extracted = await extractFileText(
+      {
+        originalname: fileRow.original_name,
+        buffer,
+        mimetype: fileRow.mime_type || '',
+      },
+      deps.material,
+    );
+
+    const originalText = extracted.rawText?.trim();
+    if (!originalText) {
+      return resultJson;
+    }
+
+    const mergedResultJson: AiDetectionResultJson = {
+      ...resultJson,
+      display_text: resultJson.display_text || originalText,
+      original_text: resultJson.original_text || originalText,
+    };
+
+    try {
+      await supabaseAdmin
+        .from('ai_detections')
+        .update({
+          result_json: mergedResultJson,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', detectionId);
+    } catch (persistError) {
+      captureError(persistError, 'ai_detection.persist_display_text_failed', { detectionId });
+    }
+
+    return mergedResultJson;
+  } catch (error) {
+    captureError(error, 'ai_detection.hydrate_display_text_failed', { detectionId });
+    return resultJson;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 定价辅助
@@ -503,30 +573,27 @@ export async function executeAiDetection(
       throw new AppError(500, '无法读取文章正文。');
     }
 
-    // 3. 调 Undetectable Detector
+    // 3. 调 StealthWriter V2
     const detectResult = await deps.runDetector(text);
+    const resultJson = buildAiDetectionResultJson(detectResult, text);
+    const humanScore = resultJson.human_score;
 
     // 4. 结算金额（字数已经确定，差额通常为 0）
     const pricePerWord = await readPricePerWord();
     const actualCost = Math.ceil(detection.input_word_count * pricePerWord);
     const costToSettle = Math.min(actualCost, frozenCreditsAmount);
 
-    // 5. 落库 result_json + overall_score
+    // 5. 落库 result_json + score
     const { error: updateError } = await supabaseAdmin
       .from('ai_detections')
       .update({
         status: 'completed',
-        overall_score: Math.round(detectResult.overallScore),
+        overall_score: humanScore,
+        human_score: humanScore,
+        scan_version: detectResult.scanVersion || 'v2',
+        stealthwriter_result_id: detectResult.resultId,
         settled_credits: costToSettle,
-        result_json: {
-          overall_score: detectResult.overallScore,
-          result_details: detectResult.resultDetails,
-          undetectable_document_id: detectResult.documentId,
-          // 句子级结果（走 WebSocket 时有值，走篇章级 fallback 时 undefined）
-          // 每项：{ chunk: 句子原文, result: 0-1 浮点 AI 概率, label?: 'Human'|'AI' }
-          sentences: detectResult.sentences,
-          raw: detectResult.raw,
-        },
+        result_json: resultJson,
         updated_at: new Date().toISOString(),
       })
       .eq('id', detectionId);
@@ -555,7 +622,9 @@ export async function executeAiDetection(
       targetType: 'ai_detection',
       targetId: detectionId,
       detail: {
-        overallScore: detectResult.overallScore,
+        humanScore,
+        verdict: detectResult.verdict,
+        scanVersion: detectResult.scanVersion || 'v2',
         inputWordCount: detection.input_word_count,
         settledCredits: costToSettle,
       },
@@ -613,6 +682,11 @@ export async function getAiDetection(detectionId: string, userId: string) {
     throw new AppError(404, '检测记录不存在。');
   }
 
+  data.result_json = await hydrateDetectionDisplayTextIfMissing(
+    detectionId,
+    data.result_json as AiDetectionResultJson | null | undefined,
+  );
+
   const { data: files } = await supabaseAdmin
     .from('ai_detection_files')
     .select('id, original_name, file_size, mime_type, extracted_word_count, created_at, expires_at')
@@ -631,6 +705,11 @@ export async function getAiDetectionCurrent(userId: string) {
     .maybeSingle();
 
   if (!data) return null;
+
+  data.result_json = await hydrateDetectionDisplayTextIfMissing(
+    data.id,
+    data.result_json as AiDetectionResultJson | null | undefined,
+  );
 
   const { data: files } = await supabaseAdmin
     .from('ai_detection_files')
@@ -663,6 +742,7 @@ export async function getAiDetectionList(userId: string, limit = 20, offset = 0)
 export const aiDetectionServiceTestUtils = {
   computeFrozenAmount,
   readPricePerWord,
+  buildAiDetectionResultJson,
   AI_DETECTION_MIN_WORDS,
   AI_DETECTION_MAX_WORDS,
   DEFAULT_AI_DETECTION_PRICE_PER_WORD,

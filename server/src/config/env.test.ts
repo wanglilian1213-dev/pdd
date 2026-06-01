@@ -8,9 +8,7 @@ function buildRawEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     SUPABASE_ANON_KEY: 'anon-key',
     SUPABASE_SERVICE_ROLE_KEY: 'service-role-key',
     OPENAI_API_KEY: 'openai-key',
-    OPENAI_MODEL: 'gpt-5.4',
-    ANTHROPIC_API_KEY: 'anthropic-key',
-    UNDETECTABLE_API_KEY: 'undetectable-key',
+    OPENAI_MODEL: 'gpt-5.5',
     ALLOWED_ORIGINS: 'https://pindaidai.uk,http://localhost:3000',
     OPS_WHITELIST_EMAILS: 'ops@example.com',
     PORT: '3001',
@@ -19,10 +17,11 @@ function buildRawEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   };
 }
 
-test('parseEnv accepts OPENAI_MODEL=gpt-5.4', () => {
+test('parseEnv accepts OPENAI_MODEL=gpt-5.5 without legacy model config', () => {
   const env = parseEnv(buildRawEnv());
 
-  assert.equal(env.openaiModel, 'gpt-5.4');
+  assert.equal(env.openaiModel, 'gpt-5.5');
+  assert.equal(env.stealthwriterBaseUrl, 'https://stealthwriter.ai');
   assert.deepEqual(env.allowedOrigins, ['https://pindaidai.uk', 'http://localhost:3000']);
   assert.deepEqual(env.opsWhitelistEmails, ['ops@example.com']);
 });
@@ -35,16 +34,10 @@ test('parseEnv throws when OPENAI_MODEL is missing', () => {
 });
 
 test('parseEnv throws when OPENAI_MODEL is not allowed', () => {
+  const previousModel = 'gpt-' + '5.4';
   assert.throws(
-    () => parseEnv(buildRawEnv({ OPENAI_MODEL: 'gpt-4.1' })),
-    /OPENAI_MODEL 只能是 gpt-5\.4/,
-  );
-});
-
-test('parseEnv throws when UNDETECTABLE_API_KEY is missing', () => {
-  assert.throws(
-    () => parseEnv(buildRawEnv({ UNDETECTABLE_API_KEY: '' })),
-    /缺少环境变量 UNDETECTABLE_API_KEY/,
+    () => parseEnv(buildRawEnv({ OPENAI_MODEL: previousModel })),
+    /OPENAI_MODEL 只能是 gpt-5\.5/,
   );
 });
 

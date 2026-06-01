@@ -78,6 +78,13 @@ function getReliabilityLabel(score: number) {
   }
 }
 
+function capScoreForDetails(score: number, details: CitationDetail[]) {
+  if (details.some((detail) => detail.status === 'fail')) {
+    return Math.min(score, 49);
+  }
+  return score;
+}
+
 function safeJsonParse(content: string) {
   try {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -161,7 +168,7 @@ export function parseCitationReportData(
   const citations: CitationEntry[] = rawCitations.map((citation, index) => {
     const rawScore = Number(citation.score ?? 0);
     // Model may return decimal (0-1) instead of percentage (0-100); normalise.
-    const score = clampScore(rawScore > 0 && rawScore <= 1 ? Math.round(rawScore * 100) : Math.round(rawScore));
+    const baseScore = clampScore(rawScore > 0 && rawScore <= 1 ? Math.round(rawScore * 100) : Math.round(rawScore));
     const details = Array.isArray(citation.details) ? citation.details as Array<Record<string, unknown>> : [];
     // Filter out any formatting-related criteria the model may still return
     const FORMATTING_KEYWORDS = /\bformat/i;
@@ -180,6 +187,8 @@ export function parseCitationReportData(
           status: 'warning',
         }];
 
+    const score = capScoreForDetails(baseScore, normalizedDetails);
+
     return {
       citationLabel: String(citation.citation_label ?? `Citation ${index + 1}`),
       sourceText: String(citation.source_text ?? 'Source text not provided'),
@@ -190,14 +199,19 @@ export function parseCitationReportData(
     };
   });
 
-  // Use actual parsed count — Claude's reported total_citations may not match.
+  // Use actual parsed count — AI's reported total_citations may not match.
   const totalCitations = citations.length;
   const rawOverall = Number(parsed?.overall_score ?? 0);
-  const computedOverall = rawOverall > 0
+  const modelOverall = rawOverall > 0
     ? (rawOverall > 0 && rawOverall <= 1 ? Math.round(rawOverall * 100) : Math.round(rawOverall))
     : (citations.length > 0
       ? Math.round(citations.reduce((sum, citation) => sum + citation.score, 0) / citations.length)
       : 0);
+  const hasFailedDetails = citations.some((citation) => citation.details.some((detail) => detail.status === 'fail'));
+  const citationAverage = citations.length > 0
+    ? Math.round(citations.reduce((sum, citation) => sum + citation.score, 0) / citations.length)
+    : modelOverall;
+  const computedOverall = hasFailedDetails ? Math.min(modelOverall, citationAverage) : modelOverall;
   const overallScore = clampScore(computedOverall);
   const keyFindings = Array.isArray(parsed?.key_findings) && parsed?.key_findings.length > 0
     ? parsed!.key_findings.map((item) => String(item))

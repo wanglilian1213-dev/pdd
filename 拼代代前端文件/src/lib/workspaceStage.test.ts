@@ -10,6 +10,7 @@ import {
 } from './workspaceStage';
 
 test('stageToStep keeps delivering in the delivery phase instead of forcing completion', () => {
+  assert.equal(stageToStep('quality_checking', 'processing'), 6);
   assert.equal(stageToStep('delivering', 'processing'), 6);
   assert.equal(stageToStep('completed', 'completed'), 6);
 });
@@ -26,6 +27,7 @@ test('getWorkspaceStep keeps step 7 when humanize has failed', () => {
 });
 
 test('delivery state helpers separate in-progress delivery from true completion', () => {
+  assert.equal(isDeliveryInProgressState('quality_checking', 'processing'), true);
   assert.equal(isDeliveryInProgressState('delivering', 'processing'), true);
   assert.equal(isDeliveryInProgressState('completed', 'completed'), false);
   assert.equal(isDeliveryCompletedState('completed', 'completed'), true);
@@ -33,6 +35,7 @@ test('delivery state helpers separate in-progress delivery from true completion'
 });
 
 test('shouldPollWritingStage keeps polling while delivery files are still being prepared', () => {
+  assert.equal(shouldPollWritingStage('quality_checking', 'processing'), true);
   assert.equal(shouldPollWritingStage('delivering', 'processing'), true);
   assert.equal(shouldPollWritingStage('completed', 'completed'), false);
 });

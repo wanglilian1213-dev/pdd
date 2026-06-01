@@ -39,6 +39,7 @@ test('buildScoringSystemPrompt: contains 75-84 anchor and mentor framing', () =>
   assert.match(p, /75–84/);
   assert.match(p, /belongs in this band/i);
   assert.match(p, /seasoned academic mentor/i);
+  assert.match(p, /Rubric cap and automatic-fail rules override/i);
 });
 
 test('buildScoringSystemPrompt: contains tolerance list and JSON schema marker', () => {
@@ -225,6 +226,82 @@ test('validateScoringJson: overall_score out of range fails', () => {
   );
 });
 
+test('validateScoringJson rejects score above explicit rubric cap', () => {
+  const bad = buildValidResult();
+  bad.overall_score = 85;
+  bad.dimensions[4].weaknesses = ['The citation style is wrong and does not follow the rubric.'];
+
+  const result = validateScoringJson(bad, {
+    rubricText: 'If the citation style is wrong, the maximum score is 60.',
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((error) => /rubric cap 60/.test(error)));
+});
+
+test('validateScoringJson rejects no-more-than rubric caps when the issue is admitted', () => {
+  const bad = buildValidResult();
+  bad.overall_score = 70;
+  bad.dimensions[4].weaknesses = ['The references section is missing from the submission.'];
+
+  const result = validateScoringJson(bad, {
+    rubricText: 'Without references, award no more than 40 marks.',
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((error) => /rubric cap 40/.test(error)));
+});
+
+test('validateScoringJson applies the strictest triggered rubric cap', () => {
+  const bad = buildValidResult();
+  bad.overall_score = 55;
+  bad.dimensions[1].weaknesses = ['The citation style is wrong and the Literature Review section is missing.'];
+
+  const result = validateScoringJson(bad, {
+    rubricText: 'If citation style is wrong, the maximum score is 60. If the Literature Review is missing, the maximum score is 50.',
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((error) => /rubric cap 50/.test(error)));
+});
+
+test('validateScoringJson ignores conditional late caps unless the result says the paper was late', () => {
+  const ok = buildValidResult();
+  ok.overall_score = 85;
+
+  const result = validateScoringJson(ok, {
+    rubricText: 'Late submissions are capped at 40. Non-late submissions should use the normal rubric scale.',
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('validateScoringJson rejects admitted missing automatic-fail section with passing score', () => {
+  const bad = buildValidResult();
+  bad.overall_score = 70;
+  bad.dimensions[0].weaknesses = ['The paper is missing the Methodology section.'];
+
+  const result = validateScoringJson(bad, {
+    rubricText: 'Methodology is mandatory. Missing Methodology is an automatic fail.',
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((error) => /automatic-fail|knockout/.test(error)));
+});
+
+test('validateScoringJson rejects no-passing-mark knockout rules with passing scores', () => {
+  const bad = buildValidResult();
+  bad.overall_score = 70;
+  bad.dimensions[0].weaknesses = ['The paper is missing the Methodology section.'];
+
+  const result = validateScoringJson(bad, {
+    rubricText: 'A submission without a Methodology section cannot receive a passing mark.',
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((error) => /automatic-fail|knockout/.test(error)));
+});
+
 test('validateScoringJson: overall_comment empty fails', () => {
   const bad = buildValidResult();
   bad.overall_comment = '';
@@ -240,7 +317,7 @@ test('validateScoringJson: empty dimensions fails', () => {
   assert.ok(!result.ok && result.errors.some((e) => /dimensions/.test(e)));
 });
 
-test('validateScoringJson: weight sum outside [95, 105] fails', () => {
+test('validateScoringJson: weight sum outside 100 fails', () => {
   const bad = buildValidResult();
   bad.dimensions[0].weight = 60; // sum now 110
   const result = validateScoringJson(bad);
@@ -248,11 +325,25 @@ test('validateScoringJson: weight sum outside [95, 105] fails', () => {
   assert.ok(!result.ok && result.errors.some((e) => /weights must sum/.test(e)));
 });
 
-test('validateScoringJson: weight sum 101 still passes (rounding tolerance)', () => {
-  const ok = buildValidResult();
-  ok.dimensions[0].weight = 31; // sum 101
-  const result = validateScoringJson(ok);
-  assert.equal(result.ok, true);
+test('validateScoringJson: weight sum 101 fails instead of entering the scoring report', () => {
+  const bad = buildValidResult();
+  bad.dimensions[0].weight = 31; // sum 101
+  const result = validateScoringJson(bad);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((e) => /got 101/.test(e)));
+});
+
+test('validateScoringJson rejects an overall score that contradicts weighted dimension scores', () => {
+  const bad = buildValidResult();
+  bad.overall_score = 95;
+  bad.dimensions.forEach((dimension) => {
+    dimension.score = 65;
+  });
+
+  const result = validateScoringJson(bad);
+
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.errors.some((error) => /weighted dimension score/i.test(error)));
 });
 
 test('validateScoringJson: dimension missing strengths fails', () => {

@@ -36,10 +36,36 @@ export interface PreparedMaterialContent {
 const IMAGE_EXTENSIONS = new Set([
   'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'heic', 'heif',
 ]);
+const UNSAFE_FILENAME_TEXT_RE = /\b(?:ignore|disregard)\s+(?:all\s+)?(?:previous|above|system|developer)\s+instructions\b|\bprint\s+(?:the\s+)?(?:api key|secret|system prompt)\b|\b(?:OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|SUPABASE_ANON_KEY|SERVICE_ROLE_KEY|API[_-]?KEY|SECRET|TOKEN|PASSWORD|system prompt|developer prompt)\b|输出.*(?:密钥|系统提示词|后台提示词)|忽略.*(?:规则|指令|要求)/i;
+const PRIVATE_FILENAME_TEXT_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|[-+]?\d{1,2}\.\d{4,}\s*,\s*[-+]?\d{1,3}\.\d{4,}|\+?\d[\d\s().-]{7,}\d|\b(?:MRN|medical record|patient id|participant id|subject id|SSN|NHS)\s*[:#-]?\s*[A-Z0-9-]{3,}\b|(?:学号|学生号|学生编号|工号|员工号|医院号|门诊号|住院号|病案号|病历号|身份证号?|护照号|医保号|宿舍号|家庭住址|住址)\s*[:：#-]?\s*[A-Z0-9\u4e00-\u9fff-]{2,}|(?:学生|患者|病人|受试者|客户|员工|姓名)\s*[:：#-]?\s*[\u4e00-\u9fff]{2,4}/i;
+const CHINESE_PERSON_FILENAME_RE = /(?:^|[\s._\-()（）\[\]【】])(?:欧阳|司马|上官|诸葛|东方|夏侯|张|王|李|赵|陈|刘|杨|黄|周|吴|徐|孙|胡|朱|高|林|何|郭|马|罗|梁|宋|郑|谢|韩|唐|冯|于|董|萧|程|曹|袁|邓|许|傅|沈|曾|彭|吕|苏|卢|蒋|蔡|贾|丁|魏|薛|叶|阎|余|潘|杜|戴|夏|钟|汪|田|任|姜|范|方|石|姚|谭|廖|邹|熊|金|陆|郝|孔|白|崔|康|毛|邱|秦|江|史|顾|侯|邵|孟|龙|万|段|雷|钱|汤|尹|黎|易|常|武|乔|贺|赖|龚|文)[\u4e00-\u9fff]{1,2}(?=$|[\s._\-()（）\[\]【】])/;
 
 function getFileExtension(filename: string) {
   const segments = filename.toLowerCase().split('.');
   return segments.length > 1 ? segments.pop() || '' : '';
+}
+
+function normalizeFilenameText(filename: string) {
+  return filename
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060-\u206F]/g, '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter(Boolean)
+    .pop()
+    ?.trim() || '';
+}
+
+function safeMaterialFilename(filename: string) {
+  const normalized = normalizeFilenameText(filename);
+  const ext = getFileExtension(normalized);
+  const safeExt = /^[a-z0-9]{1,10}$/.test(ext) && !UNSAFE_FILENAME_TEXT_RE.test(ext) ? `.${ext}` : '';
+
+  if (!normalized || UNSAFE_FILENAME_TEXT_RE.test(normalized) || PRIVATE_FILENAME_TEXT_RE.test(normalized) || CHINESE_PERSON_FILENAME_RE.test(normalized)) {
+    return `redacted-material${safeExt}`;
+  }
+
+  return normalized.slice(0, 180);
 }
 
 function getMimeType(filename: string, mimeType: string | null, body: Blob) {
@@ -74,11 +100,12 @@ export async function prepareMaterialContent(
   for (const file of files) {
     const body = await deps.downloadMaterial(file.storage_path);
     const mimeType = getMimeType(file.original_name, file.mime_type, body);
+    const filename = safeMaterialFilename(file.original_name);
     const base64 = await blobToBase64(body);
 
     parts.push({
       type: 'input_text',
-      text: `材料文件：${file.original_name}`,
+      text: `材料文件：${filename}`,
     });
 
     if (isImageFile(file.original_name, mimeType)) {
@@ -93,7 +120,7 @@ export async function prepareMaterialContent(
     parts.push({
       type: 'input_file',
       file_data: `data:${mimeType};base64,${base64}`,
-      filename: file.original_name,
+      filename,
     });
   }
 

@@ -48,6 +48,11 @@ export function extractOutputText(response: {
   return '';
 }
 
+export function isMissingOutputArrayFinalResponseError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /Cannot read properties of undefined \(reading ['"]map['"]\)/i.test(message);
+}
+
 /**
  * Stream an OpenAI Responses API call and accumulate output text from SSE
  * events. Since ~2026-04-07 the ChatGPT codex backend no longer populates
@@ -64,14 +69,34 @@ export async function streamResponseText(
   let deltaText = '';
   // Primary: accumulate from 'done' events (canonical complete text per content part)
   stream.on('response.output_text.done', (ev: any) => {
-    doneText += ev.text;
+    if (typeof ev.text === 'string') {
+      doneText += ev.text;
+    }
   });
   // Fallback: accumulate from 'delta' events (incremental chunks, more universally
   // forwarded by SSE gateways like sub2api)
   stream.on('response.output_text.delta', (ev: any) => {
-    deltaText += ev.delta;
+    if (typeof ev.delta === 'string') {
+      deltaText += ev.delta;
+    }
   });
-  const response = await stream.finalResponse();
+  let response: any;
+  try {
+    response = await stream.finalResponse();
+  } catch (error) {
+    const recoveredText = doneText || deltaText;
+    if (recoveredText && isMissingOutputArrayFinalResponseError(error)) {
+      return {
+        text: recoveredText,
+        response: {
+          output_text: recoveredText,
+          recoveredFromFinalResponseError: true,
+          finalResponseError: error instanceof Error ? error.message : String(error || ''),
+        },
+      };
+    }
+    throw error;
+  }
   // Prefer done (authoritative), fall back to delta, then to response.output
   let text = doneText || deltaText;
   if (!text) {

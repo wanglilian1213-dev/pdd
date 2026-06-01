@@ -4,14 +4,18 @@ import { buildMainOpenAIResponsesOptions, type MainOpenAIStage, type ReasoningEf
 import { env } from './runtimeEnv';
 
 const expectedEffortByStage: Record<MainOpenAIStage, ReasoningEffort> = {
-  outline_generation: 'medium',
-  outline_regeneration: 'medium',
-  outline_translation: 'medium',
+  outline_generation: 'xhigh',
+  outline_regeneration: 'xhigh',
+  outline_translation: 'xhigh',
   draft_generation: 'xhigh',
-  word_calibration: 'medium',
-  citation_verification: 'medium',
-  scoring: 'high',
-  article_detection: 'medium',
+  word_calibration: 'xhigh',
+  citation_verification: 'xhigh',
+  scoring: 'xhigh',
+  article_detection: 'xhigh',
+  revision_generation: 'xhigh',
+  chart_enhancement: 'xhigh',
+  post_chart_condense: 'xhigh',
+  final_quality_review: 'xhigh',
 };
 
 for (const [stage, expectedEffort] of Object.entries(expectedEffortByStage) as Array<[
@@ -27,3 +31,13 @@ for (const [stage, expectedEffort] of Object.entries(expectedEffortByStage) as A
     assert.equal('text' in options, false);
   });
 }
+
+test('buildMainOpenAIResponsesOptions can disable web search for closed-book draft and citation tasks', () => {
+  const draftOptions = buildMainOpenAIResponsesOptions('draft_generation', { webSearch: false });
+  const citationOptions = buildMainOpenAIResponsesOptions('citation_verification', { webSearch: false });
+
+  assert.equal('tools' in draftOptions, false);
+  assert.equal('tool_choice' in draftOptions, false);
+  assert.equal('tools' in citationOptions, false);
+  assert.equal('tool_choice' in citationOptions, false);
+});

@@ -1,17 +1,19 @@
 import { supabaseAdmin } from '../lib/supabase';
-import { anthropic } from '../lib/anthropic';
 import { AppError, InsufficientBalanceError } from '../lib/errors';
 import { freezeCredits, settleCredits, refundCredits, getBalance } from './walletService';
 import { getConfig } from './configService';
 import {
+  collectRevisionMaterialFilenames,
   getRevisionMaterialContent,
   SUPPORTED_REVISION_EXTENSIONS,
   getFileExtension,
+  type RevisionInputPart,
 } from './revisionMaterialService';
 import { buildFormattedPaperDocBufferWithMedia } from './documentFormattingService';
 import { parseRevisionOutput } from './revisionContentParser';
 import { renderCharts, type RenderedChart } from './chartRenderService';
 import { isMostlyGarbage } from './scoringMaterialService';
+import { assessWritingQualityRequirements } from './writingQualityGateService';
 import {
   detectMainArticle,
   type ArticleDetectionFile,
@@ -19,6 +21,8 @@ import {
 } from './articleDetectionService';
 import mammoth from 'mammoth';
 import { captureError } from '../lib/errorMonitor';
+import { streamResponseText } from '../lib/openai';
+import { buildMainOpenAIResponsesOptions } from '../lib/openaiMainConfig';
 
 // pdf-parse 没有官方 d.ts；延迟 require 避免默认入口在 node 启动时触发 test 资源加载。
 // 走 /lib/pdf-parse.js 绕过顶层入口那段 "if (module === require.main)" 的测试分支。
@@ -31,7 +35,7 @@ function loadPdfParse() {
 }
 
 // ---------------------------------------------------------------------------
-// System prompt：把 Claude 从「乐于助人的聊天助手」拉成「严格的论文修订工」。
+// System prompt：把 GPT 从「乐于助人的聊天助手」拉成「严格的论文修订工」。
 // 关键约束：
 //  1. 严格遵循指令（不展开详细列「不许做什么」，按用户要求）
 //  2. 严格基于上传原文做最小修改
@@ -46,8 +50,10 @@ const REVISION_SYSTEM_PROMPT = `你是一名严谨的学术论文修改助手。
 2. 严格基于用户上传的原始文档作为底稿。所有修改建立在原文之上，保留原作者的论证逻辑、术语和文风，做最小必要的修改。
 3. 你的输出就是最终交付物。直接输出修改后的完整论文全文，不要任何开场白、不要任何结尾总结、不要任何"以上修改包括"之类的话。
 
-图表生成（chart / graph / 折线图 / 柱状图 / 饼图 / 雷达图 / 散点图等）：
-当用户要求添加或修改图表时，必须使用以下专用 DSL 输出。系统会自动把它渲染为真实图片嵌入 Word 文档，不要输出 Python / matplotlib / R / 任何代码：
+图表 / 图示生成（chart / graph / diagram / flowchart / 折线图 / 柱状图 / 饼图 / 雷达图 / 散点图 / 流程图 / 示意图等）：
+当用户要求添加或修改图表、流程图或示意图时，必须使用以下专用 DSL 输出。系统会自动把它渲染为真实图片嵌入 Word 文档，不要输出 Python / matplotlib / R / Mermaid / SVG / 任何代码：
+
+统计图使用 chartjs：
 
 [CHART_BEGIN]
 {
@@ -68,6 +74,29 @@ const REVISION_SYSTEM_PROMPT = `你是一名严谨的学术论文修改助手。
 }
 [CHART_END]
 
+流程图 / 概念图 / 机制图使用 diagram，不要用柱状图冒充流程图：
+
+[CHART_BEGIN]
+{
+  "title": "图 2：研究流程图",
+  "width": 720,
+  "height": 440,
+  "diagram": {
+    "type": "flowchart",
+    "direction": "TB",
+    "nodes": [
+      { "id": "collect", "label": "数据收集" },
+      { "id": "analysis", "label": "数据分析" },
+      { "id": "findings", "label": "形成结论" }
+    ],
+    "edges": [
+      { "from": "collect", "to": "analysis" },
+      { "from": "analysis", "to": "findings" }
+    ]
+  }
+}
+[CHART_END]
+
 DSL 硬性规则（违反任何一条都会导致图渲染失败）：
 - chartjs 字段必须是合法的 Chart.js v3 JSON 配置（type / data / options），不能出现 callbacks、函数字符串、未在下方列出的字段
 - chartjs.type 必须是以下之一，其他类型一律禁止：line / bar / pie / doughnut / radar / scatter / bubble / polarArea
@@ -79,6 +108,10 @@ DSL 硬性规则（违反任何一条都会导致图渲染失败）：
 - 每个 dataset 的 label 字段 ≤ 80 字符
 - title 文本 ≤ 80 字符；中文论文用「图 N：xxx」，英文论文用「Figure N: xxx」，按图表出现顺序编号
 - options 字段只允许 plugins.title / plugins.legend / scales.{x,y}.beginAtZero，其他 options 字段不要写
+- diagram 只能包含 type / direction / nodes / edges；type 只能是 flowchart / concept_map / mechanism；direction 只能是 TB 或 LR
+- diagram.nodes 至少 2 个、最多 30 个；每个节点必须有 id 和 label，label ≤ 80 字符；shape 只能是 box / ellipse / diamond，可省略
+- diagram.edges 至少 1 条、最多 60 条；from / to 必须指向已有节点 id，不能指向不存在的节点
+- 需要流程、步骤、机制、概念框架时必须用 diagram；不要用没有真实数值的 chartjs 柱状图、饼图冒充
 - 整个 [CHART_BEGIN]…[CHART_END] 块（含 JSON）大小 ≤ 30KB
 - 一个 [CHART_BEGIN]...[CHART_END] 块只放一张图
 - 块的前后必须各有一个空行，独立成段，不要嵌在列表或引用块里
@@ -130,7 +163,7 @@ export function validateRevisionFileTypes(files: Express.Multer.File[]): void {
 // 导致用户两万多积分被报"余额不足"。新逻辑：
 //   - PDF: 真用 pdf-parse 解析 + 30s 超时，扫描件检测靠 isMostlyGarbage（与评审一致）
 //   - DOCX/TXT/MD: 真解析（不再加 1.2 缓冲，结算时按真实字数退差）
-//   - 图片: 每张固定 100 字（约 20 积分），象征性覆盖 Claude Vision 处理成本
+//   - 图片: 每张固定 100 字（约 20 积分），象征性覆盖视觉处理成本
 // 估算口径与 executeRevision 第 4 步的结算口径都用同一个 countWords。
 
 const REVISION_IMAGE_EXTS = new Set([
@@ -155,7 +188,7 @@ export interface RevisionFileEstimate {
   filename: string;
   words: number;
   isScannedPdf: boolean;
-  /** 前 1500 字纯文本样本，用于 GPT-5.4 主文章识别。图片为 undefined。*/
+  /** 前 1500 字纯文本样本，用于 GPT-5.5 主文章识别。图片为 undefined。*/
   rawTextSample?: string;
   /** 文件扩展名（小写，不含点）。供主文章识别 / 计费分类使用。*/
   ext: string;
@@ -280,7 +313,7 @@ export async function estimateRevisionForFile(
  *   - 用于"上传材料原始总字数"展示
  *
  * 模式 2（detectMainArticle=true）：
- *   - 额外调用 GPT-5.4 article_detection 识别主文章
+ *   - 额外调用 GPT-5.5 article_detection 识别主文章
  *   - 计算精准冻结字数：ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100
  *   - 返回 mainArticleFilenames / preciseFrozenWords / preciseFrozenAmount / breakdown
  *   - GPT 失败自动 fallback 启发式（不抛错）
@@ -315,7 +348,7 @@ export async function estimateRevisionTotal(
     return { totalWords, perFile, scannedFilenames };
   }
 
-  // 调用 GPT-5.4 识别主文章
+  // 调用 GPT-5.5 识别主文章
   const detectionInput: ArticleDetectionFile[] = perFile.map((f) => ({
     filename: f.filename,
     ext: f.ext,
@@ -387,24 +420,52 @@ export async function getRevisionPricePerWord(): Promise<number> {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.2;
 }
 
-function countWords(text: string): number {
-  return text.trim().split(/\s+/).filter(Boolean).length;
+export interface RevisionVisualDeliveryCheck {
+  pass: boolean;
+  requiresVisual: boolean;
+  requiredVisualCount: number;
+  parsedVisualCount: number;
+  renderedVisualCount: number;
+  failedVisualCount: number;
+  failureCodes: string[];
 }
 
-function extractTextFromResponse(response: any): string {
-  if (!response?.content || !Array.isArray(response.content)) {
-    throw new AppError(500, 'AI 返回结果格式异常。');
+export function assessRevisionVisualDelivery(
+  instructions: string | null | undefined,
+  parsedVisualCount: number,
+  rendered: RenderedChart[],
+): RevisionVisualDeliveryCheck {
+  const profile = assessWritingQualityRequirements({ specialRequirements: instructions });
+  const requiredVisualCount = profile.requiresVisual
+    ? Math.max(1, profile.requiredVisualCount)
+    : 0;
+  const renderedVisualCount = rendered.filter((item) => !!item.png).length;
+  const failedVisualCount = rendered.filter((item) => !item.png).length;
+  const failureCodes: string[] = [];
+
+  if (failedVisualCount > 0) {
+    failureCodes.push('visual_render_failed');
+  }
+  if (requiredVisualCount > 0 && parsedVisualCount === 0) {
+    failureCodes.push('visual_required_missing');
+  }
+  if (requiredVisualCount > 0 && renderedVisualCount < requiredVisualCount) {
+    failureCodes.push('visual_count_too_low');
   }
 
-  const textBlocks = response.content
-    .filter((block: any) => block.type === 'text')
-    .map((block: any) => block.text);
+  return {
+    pass: failureCodes.length === 0,
+    requiresVisual: profile.requiresVisual,
+    requiredVisualCount,
+    parsedVisualCount,
+    renderedVisualCount,
+    failedVisualCount,
+    failureCodes,
+  };
+}
 
-  if (textBlocks.length === 0) {
-    throw new AppError(500, 'AI 未返回任何文本结果。');
-  }
-
-  return textBlocks.join('\n\n');
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
 function getNow(): number {
@@ -412,25 +473,20 @@ function getNow(): number {
 }
 
 /**
- * 构造给 Claude 的"主文章 / 参考材料"分组说明，让 Claude 知道改哪份不改哪份。
+ * 构造"主文章 / 参考材料"分组说明，让 GPT 知道改哪份不改哪份。
  *
  * 兼容性：mainArticleFilenames 为空数组（旧任务 / cleanup 重试）时返回空字符串，
  * userMessage 完全保持旧行为不变。
  */
 function buildFileRoleSection(
-  materialBlocks: ReadonlyArray<unknown>,
+  materialBlocks: ReadonlyArray<RevisionInputPart>,
   mainArticleFilenames: string[],
 ): string {
   if (!mainArticleFilenames || mainArticleFilenames.length === 0) {
     return '';
   }
 
-  const allTitles = materialBlocks
-    .map((b) => {
-      const title = (b as { title?: unknown }).title;
-      return typeof title === 'string' ? title : '';
-    })
-    .filter(Boolean);
+  const allTitles = collectRevisionMaterialFilenames(materialBlocks);
   if (allTitles.length === 0) return '';
 
   const mainSet = new Set(mainArticleFilenames);
@@ -518,7 +574,7 @@ export async function createRevision(
     throw new AppError(400, '您当前有一个正在处理的修改请求，请等待完成后再提交新的修改。');
   }
 
-  // 2. 估算字数（带 GPT-5.4 主文章识别）
+  // 2. 估算字数（带 GPT-5.5 主文章识别）
   //    精准冻结公式：ceil(主文章字数 × 1.2) + 参考材料数 × 50 + 图片数 × 100
   //    GPT 失败自动 fallback 启发式（docx 字数最大 → 非图片字数最大），不会抛错
   const estimateResult = await estimateRevisionTotal(files, { detectMainArticle: true });
@@ -550,7 +606,7 @@ export async function createRevision(
   }
 
   // 4. 插入 revision 记录（先建单，需要 id 给后续文件路径用）
-  //    main_article_filenames 写进 DB 让 executeRevision 在调 Claude 时用得上
+  //    main_article_filenames 写进 DB 让 executeRevision 在调 GPT 时用得上
   const { data: revision, error: insertError } = await supabaseAdmin
     .from('revisions')
     .insert({
@@ -640,23 +696,18 @@ export async function executeRevision(revisionId: string, userId: string) {
     if (loadError || !revision) throw new AppError(500, '修改记录不存在。');
     frozenCreditsAmount = revision.frozen_credits;
 
-    // 2. Prepare material content for Claude
+    // 2. Prepare material content for GPT
     const materialBlocks = await getRevisionMaterialContent(revisionId);
 
-    // 2.5 主文章识别结果：由 createRevision 里 GPT-5.4 article_detection 写入。
+    // 2.5 主文章识别结果：由 createRevision 里 GPT-5.5 article_detection 写入。
     //     旧任务（cleanup 重试 / 历史数据）main_article_filenames 是空数组 → 走旧 prompt 行为。
     const mainArticleFilenames: string[] = Array.isArray(revision.main_article_filenames)
       ? revision.main_article_filenames
       : [];
 
-    // 3. Call Anthropic API with adaptive extended thinking + max effort
-    //    Opus 4.6 推荐写法：thinking.adaptive + output_config.effort=max
-    //    （旧写法 thinking.enabled+budget_tokens 已 deprecated）
-    //    output_config 是 SDK 类型尚未补齐的新字段，用 spread + as any 透传
-    //
+    // 3. Call OpenAI Responses API with max reasoning.
     //    系统提示见顶部 REVISION_SYSTEM_PROMPT 常量。
-    //    用户消息用结构化模板，把任务/指令/输出要求三段分开，让 Claude 更难跑偏。
-    //    max_tokens 提到 80000：旧值 16000 对长论文会被截断；如果上游拒绝再降到 32000。
+    //    用户消息用结构化模板，把任务/指令/输出要求三段分开，让 GPT 更难跑偏。
     const fileRoleSection = buildFileRoleSection(materialBlocks, mainArticleFilenames);
     const userMessage = `【任务】基于上方提供的原始文档，按以下指令输出修改后的完整论文。
 ${fileRoleSection}
@@ -670,45 +721,31 @@ ${revision.instructions}
 - 表格用 Markdown 表格输出
 - 直接以论文内容开始，正文结束即停止`;
 
-    const response = await anthropic.messages
-      .stream({
-        model: 'claude-opus-4-6',
-        max_tokens: 80000,
-        system: REVISION_SYSTEM_PROMPT,
-        thinking: {
-          type: 'adaptive',
-        } as any,
-        ...({ output_config: { effort: 'max' } } as any),
-        messages: [
-          {
-            role: 'user',
-            content: [
-              ...materialBlocks,
-              {
-                type: 'text',
-                text: userMessage,
-              },
-            ],
-          },
-        ],
-      })
-      .finalMessage();
-
-    // 验证 extended thinking 是否真的被上游执行：sub2api 不会动 thinking 字段，
-    // 但如果 model id 在 normalize 阶段被映射成不支持 adaptive 的版本，会被静默忽略。
-    // thinking_blocks > 0 → 已生效；= 0 → 切 explicit 模式 {type:'enabled',budget_tokens:8000}
-    const thinkingBlocks = response.content.filter((b) => (b as any).type === 'thinking');
-    console.log(
-      `[revision] anthropic response: stop=${response.stop_reason}, ` +
-        `blocks=${response.content.length}, thinking_blocks=${thinkingBlocks.length}, ` +
-        `usage=${JSON.stringify(response.usage)}`,
-    );
-
     // 4. Extract result text + 解析图表 DSL + 渲染图表
     //    rawText 含 [CHART_BEGIN]…[CHART_END] 块
     //    parseRevisionOutput 会把它替换为 [[CHART_PLACEHOLDER_N]] 占位 token
     //    并返回需要渲染的 charts 数组
-    const rawText = extractTextFromResponse(response);
+    const { text: rawText, response } = await streamResponseText({
+      ...buildMainOpenAIResponsesOptions('revision_generation'),
+      instructions: REVISION_SYSTEM_PROMPT,
+      input: [
+        {
+          role: 'user',
+          content: [
+            ...materialBlocks,
+            {
+              type: 'input_text',
+              text: userMessage,
+            },
+          ],
+        },
+      ],
+    } as any);
+
+    console.log(
+      `[revision] openai response: status=${(response as any)?.status ?? 'unknown'}, ` +
+        `text_len=${rawText.length}, usage=${JSON.stringify((response as any)?.usage ?? {})}`,
+    );
     const { text: textWithPlaceholders, charts } = parseRevisionOutput(rawText);
 
     // 并发渲染所有图表（每张独立 retry，互不影响；失败的会在 docx 里降级为占位段，
@@ -719,6 +756,14 @@ ${revision.instructions}
       `[revision] charts parsed=${charts.length}, rendered_ok=${renderedOk}, ` +
         `rendered_failed=${charts.length - renderedOk}`,
     );
+    const visualDelivery = assessRevisionVisualDelivery(
+      revision.instructions,
+      charts.length,
+      rendered,
+    );
+    if (!visualDelivery.pass) {
+      throw new AppError(500, '图表或图示生成未达标，系统已自动退款，请重新提交。');
+    }
 
     // 构造 token → RenderedChart 的映射表，给 docx builder 用
     const mediaMap = new Map<string, RenderedChart>();

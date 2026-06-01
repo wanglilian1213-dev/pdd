@@ -18,9 +18,12 @@ CREATE TABLE ai_detections (
   frozen_credits INTEGER NOT NULL DEFAULT 0,
   -- 成功时等于 frozen_credits（字数确定，差额一般为 0）
   settled_credits INTEGER,
-  -- Undetectable 综合 AI 概率 0-100（越高越像 AI）
+  -- 历史字段名沿用 overall_score；当前 StealthWriter 口径是“人类写作分”0-100（越高越像人写）
   overall_score INTEGER,
-  -- Undetectable 完整返回，含 8 家子检测器分数（result_details.scoreXxx 是"人工%"方向）
+  human_score INTEGER,
+  scan_version TEXT,
+  stealthwriter_result_id TEXT,
+  -- StealthWriter 完整检测结果，含逐句分数和原文展示字段
   result_json JSONB,
   status TEXT NOT NULL DEFAULT 'initializing'
     CHECK (status IN ('initializing', 'processing', 'completed', 'failed')),
@@ -84,10 +87,10 @@ CREATE TABLE standalone_humanizations (
   frozen_credits INTEGER NOT NULL DEFAULT 0,
   -- ceil(humanized_word_count × humanize_price_per_word)，completed 时写入
   settled_credits INTEGER,
-  -- Undetectable Humanization 返回的降 AI 后正文
+  -- 降 AI 后正文
   humanized_text TEXT,
   humanized_word_count INTEGER,
-  -- Undetectable 返回的 document id，便于排查
+  -- 历史字段：旧 Undetectable 返回的 document id；当前 StealthWriter 链路不再写入
   undetectable_document_id TEXT,
   status TEXT NOT NULL DEFAULT 'initializing'
     CHECK (status IN ('initializing', 'processing', 'completed', 'failed')),

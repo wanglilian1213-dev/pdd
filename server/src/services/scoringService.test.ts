@@ -7,7 +7,7 @@ import {
 } from './scoringService';
 import type { ScoringResult } from './scoringPromptService';
 
-const { computeFrozenAmount, sanitizeForFilename } = scoringServiceTestUtils;
+const { computeFrozenAmount, sanitizeForFilename, validateDetectedArticleFiles } = scoringServiceTestUtils;
 
 // ---------------------------------------------------------------------------
 // computeFrozenAmount
@@ -127,6 +127,81 @@ test('computeSettledWords: multiple articles summed', () => {
     1300,
   );
   assert.equal(settled, 1100);
+});
+
+test('validateDetectedArticleFiles: fails when no uploaded file is detected as article', () => {
+  const result = makeResult([], [
+    { filename: 'rubric.pdf', role: 'rubric' },
+    { filename: 'brief.pdf', role: 'brief' },
+  ]);
+
+  assert.deepEqual(
+    validateDetectedArticleFiles(result, [
+      { originalName: 'rubric.pdf' },
+      { originalName: 'brief.pdf' },
+    ]),
+    ['detected_files must include at least one article file'],
+  );
+});
+
+test('validateDetectedArticleFiles: fails when article filename does not match upload', () => {
+  const result = makeResult(['invented-essay.docx'], [
+    { filename: 'rubric.pdf', role: 'rubric' },
+  ]);
+
+  assert.deepEqual(
+    validateDetectedArticleFiles(result, [
+      { originalName: 'rubric.pdf' },
+      { originalName: 'brief.pdf' },
+    ]),
+    ['detected article filename must match an uploaded file'],
+  );
+});
+
+test('validateDetectedArticleFiles: accepts a matched article file', () => {
+  const result = makeResult([' Final Essay.DOCX '], [
+    { filename: 'rubric.pdf', role: 'rubric' },
+  ]);
+
+  assert.deepEqual(
+    validateDetectedArticleFiles(result, [
+      { originalName: 'final essay.docx' },
+      { originalName: 'rubric.pdf' },
+    ]),
+    [],
+  );
+});
+
+test('extractRubricValidationText: extracts only hinted rubric text for scoring caps', async () => {
+  const text = await scoringServiceTestUtils.extractRubricValidationText(
+    [
+      {
+        original_name: 'student-essay.txt',
+        storage_path: 'essay',
+        mime_type: 'text/plain',
+        hinted_role: 'article',
+      },
+      {
+        original_name: 'rubric.pdf',
+        storage_path: 'rubric',
+        mime_type: 'application/pdf',
+        hinted_role: 'rubric',
+      },
+    ],
+    {
+      downloadFile: async (storagePath: string) =>
+        new Blob([
+          storagePath === 'rubric'
+            ? 'If citation style is wrong, the maximum score is 60.'
+            : 'Essay body text should not be used as rubric text.',
+        ]),
+      extractDocx: async (buffer: Buffer) => ({ value: buffer.toString('utf8') }),
+      parsePdf: async (buffer: Buffer) => ({ text: buffer.toString('utf8') }),
+    },
+  );
+
+  assert.match(text || '', /maximum score is 60/);
+  assert.doesNotMatch(text || '', /Essay body text/);
 });
 
 test('computeSettledWords: filename mismatch entirely → fallback', () => {

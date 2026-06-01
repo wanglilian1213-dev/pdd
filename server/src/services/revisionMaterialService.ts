@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import mammoth from 'mammoth';
 import { supabaseAdmin } from '../lib/supabase';
 import { AppError } from '../lib/errors';
@@ -48,104 +47,97 @@ async function downloadFromStorage(storagePath: string): Promise<Blob> {
 
 export interface RevisionMaterialDeps {
   downloadFile: (storagePath: string) => Promise<Blob>;
+  extractDocx: (buffer: Buffer) => Promise<{ value: string; messages?: Array<{ message?: string }> }>;
 }
 
 const defaultDeps: RevisionMaterialDeps = {
   downloadFile: downloadFromStorage,
+  extractDocx: (buffer) => mammoth.extractRawText({ buffer }),
 };
 
+export type RevisionInputTextPart = { type: 'input_text'; text: string };
+export type RevisionInputFilePart = { type: 'input_file'; filename: string; file_data: string };
+export type RevisionInputPart = RevisionInputTextPart | RevisionInputFilePart;
+
+function fileMarker(filename: string): RevisionInputTextPart {
+  return { type: 'input_text', text: `材料文件：${filename}` };
+}
+
+function textMaterial(filename: string, text: string): RevisionInputTextPart {
+  return {
+    type: 'input_text',
+    text: `【${filename} 内容开始】\n${text}\n【${filename} 内容结束】`,
+  };
+}
+
+export function collectRevisionMaterialFilenames(parts: ReadonlyArray<RevisionInputPart>): string[] {
+  const names: string[] = [];
+  for (const part of parts) {
+    if (part.type !== 'input_text') continue;
+    const match = /^材料文件：(.+)$/.exec(part.text.trim());
+    if (match) names.push(match[1]);
+  }
+  return names;
+}
+
 /**
- * 把用户上传的材料文件转换为 Anthropic Messages API 的 ContentBlock 数组。
+ * 把用户上传的材料文件转换为 OpenAI Responses API 可接受的 input parts。
  *
- * 支持的格式：
- *  - PDF                       → document + base64 (application/pdf)
- *  - PNG/JPG/WEBP/GIF 图片     → image + base64
- *  - TXT/MD                    → document + text source
- *  - DOCX                      → 服务端 mammoth 抽文本 → document + text source
- *
- * 关于 docx 为什么必须服务端抽文本（而不是直接传二进制）：
- *  1. api.anthropic.com /v1/messages 的 inline document block 原生只接受 application/pdf。
- *     Anthropic 官方文档原话："For file types that are not supported as document blocks
- *     (.csv, .txt, .md, .docx, .xlsx), convert the files to plain text, and include the
- *     content directly in your message"。docx 二进制塞 base64 上去 Anthropic 自己 400。
- *  2. Files API (file_id) 这条路被 sub2api 网关屏蔽——gateway 只代理 /v1/messages，
- *     根本没有暴露 /v1/files 端点。
- *  3. claude.ai 网页能上传 docx 是因为它走的是 Skills (anthropic-skills:docx) +
- *     Code Execution Tool，需要 workspace API key + 启用 code_execution 工具。而我们
- *     用的是 Pro OAuth token，sub2api gateway 还会强制把 tools 字段清空，这条路
- *     在三层都被堵死。
- *  所以唯一可行就是在我们这边解出文本再以 text source 上送（这正是 Anthropic 文档
- *  推荐的做法）。.doc (老 Word 二进制格式) 仍然不支持，需要用户另存为 docx 或 PDF。
+ * - PDF 用 input_file + data URL
+ * - 图片只传文件名说明：当前 sub2api 的 ChatGPT OAuth 通道实测不接受 input_image，会 502
+ * - TXT/MD/DOCX 转成 input_text
+ * - 每个文件前都加一条"材料文件：xxx"标记，供 prompt 里的主文章/参考材料分组使用
  */
-export async function prepareRevisionMaterialForClaude(
+export async function prepareRevisionMaterialForOpenAI(
   files: StoredRevisionFile[],
   deps: RevisionMaterialDeps = defaultDeps,
-): Promise<Anthropic.ContentBlockParam[]> {
-  const blocks: Anthropic.ContentBlockParam[] = [];
+): Promise<RevisionInputPart[]> {
+  const parts: RevisionInputPart[] = [];
 
   for (const file of files) {
     const ext = getFileExtension(file.original_name);
     const body = await deps.downloadFile(file.storage_path);
     const buffer = Buffer.from(await body.arrayBuffer());
+    parts.push(fileMarker(file.original_name));
 
-    // PDF —— 唯一支持的文档格式
     if (ext === 'pdf' || file.mime_type === 'application/pdf') {
-      blocks.push({
-        type: 'document',
-        source: {
-          type: 'base64',
-          media_type: 'application/pdf',
-          data: buffer.toString('base64'),
-        },
+      parts.push({
+        type: 'input_file',
+        filename: file.original_name,
+        file_data: `data:application/pdf;base64,${buffer.toString('base64')}`,
       });
       continue;
     }
 
-    // Word .docx —— 服务端用 mammoth 抽纯文本，以 text document 透传
-    // 为什么不能直接传 docx 二进制？见文件顶部注释。
     if (ext === 'docx' || file.mime_type === DOCX_MIME) {
-      const { value: text, messages: warnings } = await mammoth.extractRawText({ buffer });
+      const { value: text, messages: warnings = [] } = await deps.extractDocx(buffer);
       if (!text.trim()) {
         throw new AppError(400, `Word 文档 ${file.original_name} 内容为空或无法解析。`);
       }
       if (warnings.length) {
         console.warn(
           `[revision-material] mammoth warnings for ${file.original_name}:`,
-          warnings.slice(0, 5).map((w) => w.message),
+          warnings.slice(0, 5).map((w) => w.message).filter(Boolean),
         );
       }
-      blocks.push({
-        type: 'document',
-        source: { type: 'text', media_type: 'text/plain', data: text } as any,
-        title: file.original_name,
-      } as any);
+      parts.push(textMaterial(file.original_name, text));
       continue;
     }
 
-    // 图片
     if (ext in IMAGE_EXTENSIONS) {
-      blocks.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: IMAGE_EXTENSIONS[ext],
-          data: buffer.toString('base64'),
-        },
-      });
+      parts.push(textMaterial(
+        file.original_name,
+        '这是用户上传的图片文件。当前网关不能稳定读取图片二进制内容；如用户要求处理图片，请基于文件名、用户文字说明和上下文处理，不要声称已看清图片细节。',
+      ));
       continue;
     }
 
-    // 纯文本
     if (TEXT_EXTENSIONS.has(ext) || (file.mime_type?.startsWith('text/') ?? false)) {
       const text = buffer.toString('utf8');
       if (!text.trim()) {
         throw new AppError(400, `文件 ${file.original_name} 内容为空。`);
       }
-      blocks.push({
-        type: 'document',
-        source: { type: 'text', media_type: 'text/plain', data: text } as any,
-        title: file.original_name,
-      } as any);
+      parts.push(textMaterial(file.original_name, text));
       continue;
     }
 
@@ -156,13 +148,13 @@ export async function prepareRevisionMaterialForClaude(
     );
   }
 
-  return blocks;
+  return parts;
 }
 
 export async function getRevisionMaterialContent(
   revisionId: string,
   deps: RevisionMaterialDeps = defaultDeps,
-): Promise<Anthropic.ContentBlockParam[]> {
+): Promise<RevisionInputPart[]> {
   const { data: files, error } = await supabaseAdmin
     .from('revision_files')
     .select('original_name, storage_path, mime_type')
@@ -173,5 +165,5 @@ export async function getRevisionMaterialContent(
     throw new AppError(400, '没有找到修改材料文件。');
   }
 
-  return prepareRevisionMaterialForClaude(files, deps);
+  return prepareRevisionMaterialForOpenAI(files, deps);
 }

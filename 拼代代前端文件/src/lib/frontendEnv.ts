@@ -5,8 +5,8 @@ export interface FrontendEnv {
 }
 
 function readRequired(
-  rawEnv: Partial<Record<'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY', string>>,
-  key: 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY',
+  rawEnv: Partial<Record<'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY' | 'VITE_API_BASE_URL', string>>,
+  key: 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY' | 'VITE_API_BASE_URL',
 ) {
   const value = rawEnv[key]?.trim();
   if (!value) {
@@ -25,7 +25,7 @@ export function parseFrontendEnv(rawEnv: ImportMetaEnv): FrontendEnv {
   return {
     supabaseUrl: readRequired(env, 'VITE_SUPABASE_URL'),
     supabaseAnonKey: readRequired(env, 'VITE_SUPABASE_ANON_KEY'),
-    apiBaseUrl: env.VITE_API_BASE_URL?.trim() || 'http://localhost:3001',
+    apiBaseUrl: readRequired(env, 'VITE_API_BASE_URL'),
   };
 }
 

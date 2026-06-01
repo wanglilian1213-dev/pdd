@@ -4,6 +4,7 @@ import {
   cleanupExpiredMaterialsWithDeps,
   DEFAULT_STUCK_TASK_TIMEOUT_MINUTES,
   isAutoCleanupStage,
+  runCleanupCycle,
   runInitialCleanup,
 } from './cleanupRuntime';
 
@@ -65,6 +66,54 @@ test('runInitialCleanup catches startup failures so cleanup service does not cra
   assert.equal(messages.some((message) => message.includes('Initial cleanup failed')), true);
 });
 
+test('runCleanupCycle keeps cleanup running when StealthWriter session refresh fails', async () => {
+  let cleanupCalls = 0;
+
+  await runCleanupCycle({
+    refreshStealthwriterSessionIfNeeded: async () => {
+      throw new Error('worker not configured');
+    },
+    cleanupStuckTasks: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupStuckRevisions: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupStuckScorings: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupStuckHumanizeJobs: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupStuckAiDetections: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupStuckStandaloneHumanizations: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupExpiredFiles: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupExpiredMaterials: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupExpiredScoringMaterials: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupExpiredScoringReports: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupExpiredAiDetectionMaterials: async () => {
+      cleanupCalls += 1;
+    },
+    cleanupExpiredStandaloneHumanizationFiles: async () => {
+      cleanupCalls += 1;
+    },
+  });
+
+  assert.equal(cleanupCalls, 12);
+});
+
 test('isAutoCleanupStage excludes outline_ready because it is waiting for the user', () => {
   assert.equal(isAutoCleanupStage('outline_ready'), false);
 });
@@ -77,8 +126,8 @@ test('isAutoCleanupStage keeps backend-driven stuck stages eligible for cleanup'
       'writing',
       'word_calibrating',
       'citation_checking',
+      'quality_checking',
       'delivering',
-      'humanizing',
     ].map((stage) => ({
       stage,
       value: isAutoCleanupStage(stage),
@@ -89,10 +138,14 @@ test('isAutoCleanupStage keeps backend-driven stuck stages eligible for cleanup'
       { stage: 'writing', value: true },
       { stage: 'word_calibrating', value: true },
       { stage: 'citation_checking', value: true },
+      { stage: 'quality_checking', value: true },
       { stage: 'delivering', value: true },
-      { stage: 'humanizing', value: true },
     ],
   );
+});
+
+test('isAutoCleanupStage leaves humanizing to dedicated humanize cleanup', () => {
+  assert.equal(isAutoCleanupStage('humanizing'), false);
 });
 
 test('default stuck task timeout is 45 minutes', () => {

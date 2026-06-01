@@ -16,7 +16,7 @@ export default function ActivationRules() {
               <h3 className="text-xl font-semibold text-gray-900 mt-8 mb-4">1. 激活码的获取与面值</h3>
               <ul className="list-disc pl-5 space-y-2">
                 <li>本平台的额度激活码仅通过官方销售渠道（微信：PDDService01）出售，请勿通过第三方非官方渠道购买，以免造成财产损失。</li>
-                <li>激活码分为四档固定额度：1,000 积分、5,000 积分、10,000 积分、20,000 积分。</li>
+                <li>激活码分为四档固定额度：1,000 积分、3,000 积分、10,000 积分、20,000 积分。</li>
               </ul>
 
               <h3 className="text-xl font-semibold text-gray-900 mt-8 mb-4">2. 兑换与使用</h3>

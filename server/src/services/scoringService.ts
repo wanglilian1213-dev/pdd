@@ -43,6 +43,8 @@ const SCORING_STAGE_TIMEOUT_MS = 20 * 60 * 1000;
 
 // JSON 格式错误最多重试几次（第 2 次会带错误摘要做 hint）
 const SCORING_JSON_RETRY_MAX_ATTEMPTS = 2;
+const RUBRIC_VALIDATION_TEXT_TIMEOUT_MS = 30_000;
+const RUBRIC_VALIDATION_TEXT_MAX_CHARS = 100_000;
 
 const DEFAULT_SCORING_PRICE_PER_WORD = 0.1;
 const DEFAULT_RESULT_FILE_RETENTION_DAYS = 3;
@@ -152,6 +154,98 @@ async function readPricePerWord(): Promise<number> {
 
 function computeFrozenAmount(totalWords: number, pricePerWord: number): number {
   return Math.ceil(totalWords * pricePerWord);
+}
+
+function withRubricValidationTextTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  filename: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`rubric validation text extraction timed out for ${filename}`)),
+      timeoutMs,
+    );
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+async function extractRubricValidationText(
+  files: StoredScoringFile[],
+  deps: ScoringMaterialDeps,
+): Promise<string | null> {
+  const chunks: string[] = [];
+
+  for (const file of files) {
+    if (file.hinted_role !== 'rubric') continue;
+
+    try {
+      const body = await withRubricValidationTextTimeout(
+        deps.downloadFile(file.storage_path),
+        RUBRIC_VALIDATION_TEXT_TIMEOUT_MS,
+        file.original_name,
+      );
+      const buffer = Buffer.from(await body.arrayBuffer());
+      const ext = getFileExtension(file.original_name);
+      let text = '';
+
+      if (ext === 'pdf') {
+        text = (await withRubricValidationTextTimeout(
+          deps.parsePdf(buffer),
+          RUBRIC_VALIDATION_TEXT_TIMEOUT_MS,
+          file.original_name,
+        )).text;
+      } else if (ext === 'docx') {
+        text = (await withRubricValidationTextTimeout(
+          deps.extractDocx(buffer),
+          RUBRIC_VALIDATION_TEXT_TIMEOUT_MS,
+          file.original_name,
+        )).value;
+      } else if (['txt', 'md', 'markdown'].includes(ext)) {
+        text = buffer.toString('utf8');
+      }
+
+      const trimmed = text.replace(/\s+/g, ' ').trim();
+      if (trimmed) chunks.push(trimmed);
+    } catch (err) {
+      captureError(err, 'scoring.rubric_validation_text', {
+        filename: file.original_name,
+      });
+    }
+  }
+
+  const joined = chunks.join('\n\n').slice(0, RUBRIC_VALIDATION_TEXT_MAX_CHARS).trim();
+  return joined || null;
+}
+
+export function validateDetectedArticleFiles(
+  result: ScoringResult,
+  fileInfos: Array<{ originalName: string }>,
+): string[] {
+  const uploadedNames = new Set(fileInfos.map((info) => normalizeFilename(info.originalName)));
+  const detectedArticleNames = result.detected_files
+    .filter((file) => file.role === 'article')
+    .map((file) => normalizeFilename(file.filename))
+    .filter(Boolean);
+
+  if (detectedArticleNames.length === 0) {
+    return ['detected_files must include at least one article file'];
+  }
+
+  const matchedArticleNames = detectedArticleNames.filter((name) => uploadedNames.has(name));
+  if (matchedArticleNames.length === 0) {
+    return ['detected article filename must match an uploaded file'];
+  }
+
+  return [];
 }
 
 /**
@@ -522,6 +616,7 @@ export async function executeScoring(
 
     // 3. 准备 OpenAI content parts
     const parts = await prepareScoringMaterialParts(storedFiles, deps.material);
+    const rubricValidationText = await extractRubricValidationText(storedFiles, deps.material);
 
     // 4. 调用 GPT，最多重试一次
     const systemPrompt = buildScoringSystemPrompt();
@@ -557,11 +652,23 @@ export async function executeScoring(
         continue;
       }
 
-      const validation = validateScoringJson(parsed);
+      const validation = validateScoringJson(parsed, { rubricText: rubricValidationText });
       if (!validation.ok) {
         lastErrors = validation.errors;
         if (attempt === SCORING_JSON_RETRY_MAX_ATTEMPTS) {
           throw new AppError(500, '评审结果格式异常，请重新提交。');
+        }
+        continue;
+      }
+
+      const articleErrors = validateDetectedArticleFiles(
+        validation.result,
+        rawFiles.map((file) => ({ originalName: file.original_name })),
+      );
+      if (articleErrors.length > 0) {
+        lastErrors = articleErrors;
+        if (attempt === SCORING_JSON_RETRY_MAX_ATTEMPTS) {
+          throw new AppError(400, '未识别到待评审文章，请上传学生文章后重新提交。');
         }
         continue;
       }
@@ -836,6 +943,8 @@ export const scoringServiceTestUtils = {
   computeFrozenAmount,
   readPricePerWord,
   computeSettledWords,
+  extractRubricValidationText,
+  validateDetectedArticleFiles,
   sanitizeForFilename,
   withScoringTimeout,
   ScoringTimeoutError,
