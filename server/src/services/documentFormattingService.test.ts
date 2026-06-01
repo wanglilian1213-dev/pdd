@@ -250,6 +250,29 @@ Smith, J. (2024). Example article.`),
   );
 });
 
+test('extractBodyHeadingLines counts outline-style numbered headings', () => {
+  assert.deepEqual(
+    extractBodyHeadingLines(`Essay Title
+
+1. Introduction
+
+The essay starts here.
+
+2. Body Paragraphs
+
+The argument develops here.
+
+3. Conclusion
+
+The essay ends here.
+
+References
+
+Smith, J. (2024). Example. https://example.com`),
+    ['Introduction', 'Body Paragraphs', 'Conclusion'],
+  );
+});
+
 test('buildPaperLayoutModel removes a duplicated first body title even when punctuation style differs slightly', () => {
   const model = buildPaperLayoutModel(`The Impact of Social Media Use on University Students’ Mental Health
 

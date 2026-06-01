@@ -268,10 +268,11 @@ export function extractBodyHeadingLines(text: string): string[] {
   for (let i = startIdx; i < endIdx; i += 1) {
     const trimmed = rawLines[i]!.trim();
     if (!trimmed) continue;
+    const headingText = stripLeadingMarkdownSyntax(trimmed);
     // Only count lines that stand alone (surrounded by empty lines OR at block boundary).
     // We use the same isHeadingBlock logic but apply it to single-line input.
-    if (isHeadingBlock([trimmed])) {
-      headings.push(trimmed);
+    if (isHeadingBlock([headingText])) {
+      headings.push(headingText);
     }
   }
   return headings;

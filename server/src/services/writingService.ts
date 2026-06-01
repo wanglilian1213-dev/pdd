@@ -56,6 +56,83 @@ function isCriticalPaperFailure(reasons: string[]) {
   return reasons.some((r) => CRITICAL_PAPER_REASONS.has(r));
 }
 
+function normalizeHeadingComparable(value: string) {
+  return String(value || '')
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[.)]?\s+/, '')
+    .replace(/^[IVXLC]+[.)]\s+/i, '')
+    .replace(/\s*[:：]\s*/g, ' ')
+    .replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeRequiredHeadings(headings: string[] = []) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const heading of headings) {
+    const clean = String(heading || '').replace(/\s+/g, ' ').trim();
+    const key = normalizeHeadingComparable(clean);
+    if (!clean || !key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(clean);
+  }
+
+  return result;
+}
+
+function headingMatchesExpected(actual: string, expected: string) {
+  const actualKey = normalizeHeadingComparable(actual);
+  const expectedKey = normalizeHeadingComparable(expected);
+  return !!actualKey && !!expectedKey && (actualKey === expectedKey || actualKey.startsWith(`${expectedKey} `));
+}
+
+function countRequiredHeadings(text: string, requiredHeadings: string[]) {
+  if (requiredHeadings.length === 0) return countBodyHeadingLines(text);
+  const actualHeadings = extractBodyHeadingLines(text);
+  return requiredHeadings.filter((expected) =>
+    actualHeadings.some((actual) => headingMatchesExpected(actual, expected))).length;
+}
+
+function hasRequiredHeadings(text: string, requiredHeadings: string[]) {
+  return requiredHeadings.length === 0 || countRequiredHeadings(text, requiredHeadings) >= requiredHeadings.length;
+}
+
+function cleanOutlineSectionHeading(value: string) {
+  return value
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^\d+(?:\.\d+)*[.)]?\s+/, '')
+    .replace(/^[IVXLC]+[.)]\s+/i, '')
+    .replace(/\s*[:：]\s*.*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractOutlineSectionHeadings(outline: string) {
+  const headings: string[] = [];
+
+  for (const rawLine of String(outline || '').replace(/\r\n/g, '\n').split('\n')) {
+    const line = rawLine.trim();
+    if (!line || /^[-*+]\s+/.test(line)) continue;
+
+    const numbered = line.match(/^(?:#{1,6}\s*)?(?:\d+(?:\.\d+)*[.)]?|[IVXLC]+[.)])\s+(.+)$/i);
+    if (numbered?.[1]) {
+      const heading = cleanOutlineSectionHeading(numbered[1]);
+      if (heading) headings.push(heading);
+      continue;
+    }
+
+    const clean = cleanOutlineSectionHeading(line);
+    if (clean.length <= 80 && /^[A-Z][A-Za-z0-9\s/&-]+$/.test(clean)) {
+      headings.push(clean);
+    }
+  }
+
+  return normalizeRequiredHeadings(headings);
+}
+
 interface WritingContextInput {
   taskId: string;
   materialFiles: StoredMaterialFile[];
@@ -65,6 +142,7 @@ interface WritingContextInput {
   targetWords: number;
   citationStyle: string;
   requiredReferenceCount: number;
+  requiredSectionHeadings?: string[];
   requirements: string;
   courseCode?: string | null;
   versionBase?: number;
@@ -74,6 +152,7 @@ interface WritingContextInput {
 interface ExternalSourcePromptOptions {
   externalSourcesAllowed?: boolean;
   qualityContext?: string;
+  requiredSectionHeadings?: string[];
 }
 
 interface GeneratedTaskFilePayload {
@@ -322,14 +401,18 @@ async function runWordCalibrationAttempts(options: {
   targetWords: number;
   maxAttempts?: number;
   draftHeadings?: string[];
+  requiredHeadings?: string[];
   rewrite: (text: string, attempt: number) => Promise<string>;
 }) {
   let latestText = options.initialText;
   const maxAttempts = options.maxAttempts || WORD_CALIBRATION_MAX_ATTEMPTS;
-  const expectedHeadingCount = options.draftHeadings?.length ?? 0;
+  const requiredHeadings = normalizeRequiredHeadings(
+    options.requiredHeadings?.length ? options.requiredHeadings : (options.draftHeadings ?? []),
+  );
+  const expectedHeadingCount = requiredHeadings.length;
   const initialRange = isMainBodyWordCountWithinRange(latestText, options.targetWords);
 
-  if (initialRange.withinRange) {
+  if (initialRange.withinRange && hasRequiredHeadings(latestText, requiredHeadings)) {
     return {
       text: latestText,
       attemptsUsed: 0,
@@ -349,7 +432,7 @@ async function runWordCalibrationAttempts(options: {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     latestText = await options.rewrite(latestText, attempt);
     const range = isMainBodyWordCountWithinRange(latestText, options.targetWords);
-    const headingCount = countBodyHeadingLines(latestText);
+    const headingCount = countRequiredHeadings(latestText, requiredHeadings);
     const distance = range.withinRange
       ? 0
       : Math.min(
@@ -679,6 +762,7 @@ export const writingServiceTestUtils = {
   countMainBodyWords,
   isMainBodyWordCountWithinRange,
   runWordCalibrationAttempts,
+  extractOutlineSectionHeadings,
   applyCitationVerificationPatch,
   isCitationOnlyReplacement,
   hasSameBodyHeadingLines,
@@ -808,6 +892,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       outline: latestOutline.content,
       materialFiles: typedMaterialFiles,
     });
+    const requiredSectionHeadings = extractOutlineSectionHeadings(latestOutline.content);
     const dataAnalysis = await runStructuredDataAnalysisForMaterials(typedMaterialFiles, {
       required: qualityProfile.requiresDataAnalysis,
     });
@@ -834,6 +919,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       targetWords: unifiedRequirements.targetWords,
       citationStyle: unifiedRequirements.citationStyle,
       requiredReferenceCount: unifiedRequirements.requiredReferenceCount,
+      requiredSectionHeadings,
       requirements: requirementsWithQualityContext,
       versionBase,
       externalSourcesAllowed: qualityProfile.externalSourcesAllowed,
@@ -849,6 +935,7 @@ export async function startWritingPipeline(taskId: string, userId: string) {
       unifiedRequirements.requiredReferenceCount,
       versionBase,
       qualityContext,
+      requiredSectionHeadings,
     );
 
     // Step 3: Citation check
@@ -984,6 +1071,10 @@ export function buildDraftGenerationSystemPrompt(
 ) {
   const { minWords, maxWords } = getWordCountRange(targetWords);
   const externalSourcesAllowed = options.externalSourcesAllowed !== false;
+  const requiredHeadings = normalizeRequiredHeadings(options.requiredSectionHeadings);
+  const requiredHeadingRule = requiredHeadings.length > 0
+    ? `\nRequired section heading lines, in order:\n${requiredHeadings.map((heading) => `- ${heading}`).join('\n')}\n\nThe paper MUST contain every required section heading above as a plain-text line on its own. Copy the heading text after each dash, not the dash itself. Do not merge the body section into Introduction or Conclusion.`
+    : '';
   const sourceRules = externalSourcesAllowed
     ? `You have access to the web_search tool. Before writing any in-text citation or any entry in the references section, you MUST use web_search to verify that the cited work actually exists. Search for the exact title, the author name combined with the year, and the DOI when possible. Only cite a work after web_search returns a credible match (a publisher page, a Crossref entry, a journal landing page, or an indexed scholarly database). If web_search cannot find a real source for a claim, weaken or remove the claim instead of inventing a citation. Never fabricate authors, titles, journals, years, DOIs, or URLs. Every reference in the final references section must correspond to a real paper that you confirmed via web_search during this turn.
 
@@ -999,6 +1090,7 @@ URL / DOI integrity rules (very strict):
 Write the entire article at once.
 Write all chapters from the provided outline in order.
 Each chapter must start with its section title as a plain-text heading on its own line, exactly as named in the outline.
+${requiredHeadingRule}
 The target word count is ${targetWords} words. The main body (excluding the paper title and the References section) MUST fall between ${minWords} and ${maxWords} words. Do NOT exceed ${maxWords} words under any circumstances. Do NOT fall below ${minWords} words.
 If you feel a tradeoff arises between word count and depth, write concisely and stay inside the ${minWords}-${maxWords} range — but NEVER sacrifice: (a) section headings (every section from the outline must appear as its own heading line), (b) the minimum required reference count of ${requiredReferenceCount}, (c) critical argumentation with specific evidence. Tighten phrasing instead.
 Use ${citationStyle} citation style.
@@ -1051,7 +1143,7 @@ export function buildWordCalibrationSystemPrompt(
   const { minWords, maxWords } = getWordCountRange(targetWords);
   const headingRule = draftHeadings.length > 0
     ? `\n\nStructural preservation rules (very strict, must follow exactly):
-- The ORIGINAL draft contained these ${draftHeadings.length} section heading(s), in order: ${draftHeadings.map((h) => `"${h}"`).join(', ')}.
+- The REQUIRED paper structure contains these ${draftHeadings.length} section heading(s), in order: ${draftHeadings.map((h) => `"${h}"`).join(', ')}.
 - Your output MUST contain ALL ${draftHeadings.length} of these headings, each on its own line, word-for-word as above.
 - If the current input has lost or modified any of these headings, RESTORE them from the list above — do not invent new ones.
 - Never merge, rename, reorder, inline, or delete a heading to save words.
@@ -1338,7 +1430,10 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
             input.targetWords,
             input.citationStyle,
             input.requiredReferenceCount,
-            { externalSourcesAllowed: input.externalSourcesAllowed },
+            {
+              externalSourcesAllowed: input.externalSourcesAllowed,
+              requiredSectionHeadings: input.requiredSectionHeadings,
+            },
           ),
           input: [
             {
@@ -1378,7 +1473,10 @@ async function generateDraft(input: WritingContextInput): Promise<string> {
               input.targetWords,
               input.citationStyle,
               input.requiredReferenceCount,
-              { externalSourcesAllowed: input.externalSourcesAllowed },
+              {
+                externalSourcesAllowed: input.externalSourcesAllowed,
+                requiredSectionHeadings: input.requiredSectionHeadings,
+              },
             ),
             input: [
               {
@@ -1460,13 +1558,17 @@ async function calibrateWordCount(
   requiredReferenceCount: number,
   versionBase = 0,
   qualityContext?: string,
+  requiredSectionHeadings: string[] = [],
 ): Promise<string> {
   const initialRange = isMainBodyWordCountWithinRange(draft, targetWords);
   // 一次性从原始 draft 提取 heading 列表，后续每次 calibration 的 prompt 都以此为 ground truth，
   // 避免多轮重试中 heading 被删后无法恢复。
   const draftHeadings = extractBodyHeadingLines(draft);
+  const structuralHeadings = normalizeRequiredHeadings(
+    requiredSectionHeadings.length > 0 ? requiredSectionHeadings : draftHeadings,
+  );
 
-  if (initialRange.withinRange) {
+  if (initialRange.withinRange && hasRequiredHeadings(draft, structuralHeadings)) {
     await supabaseAdmin.from('document_versions').insert({
       task_id: taskId,
       version: versionBase + 2,
@@ -1481,7 +1583,8 @@ async function calibrateWordCount(
     initialText: draft,
     targetWords,
     maxAttempts: WORD_CALIBRATION_MAX_ATTEMPTS,
-    draftHeadings,
+    draftHeadings: structuralHeadings,
+    requiredHeadings: structuralHeadings,
     rewrite: async (currentText) => {
       const currentWords = countMainBodyWords(currentText);
       let calibrated = currentText;
@@ -1492,7 +1595,7 @@ async function calibrateWordCount(
           callMainOpenAIWithRetry('word_calibration', () =>
             streamResponseText({
               ...buildMainOpenAIResponsesOptions('word_calibration'),
-              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings, qualityContext),
+              instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, structuralHeadings, qualityContext),
               input: [
                 {
                   role: 'user' as const,
@@ -1522,7 +1625,7 @@ async function calibrateWordCount(
             callMainOpenAIWithRetry('word_calibration', () =>
               streamResponseText({
                 ...buildMainOpenAIResponsesOptions('word_calibration'),
-                instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, draftHeadings, qualityContext),
+                instructions: buildWordCalibrationSystemPrompt(currentWords, targetWords, citationStyle, requiredReferenceCount, structuralHeadings, qualityContext),
                 input: [
                   {
                     role: 'user' as const,

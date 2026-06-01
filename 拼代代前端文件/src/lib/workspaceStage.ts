@@ -78,6 +78,10 @@ export function shouldShowWritingProcessingState(step: number, status?: string):
   return status === 'processing' && step >= 3 && step <= 5;
 }
 
+export function shouldShowDeliveryState(step: number, status?: string): boolean {
+  return step === 6 && status !== 'failed';
+}
+
 export function isDeliveryInProgressState(stage: string, status: string): boolean {
   return ['quality_checking', 'delivering'].includes(stage) && status === 'processing';
 }

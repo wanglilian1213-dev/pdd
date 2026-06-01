@@ -40,6 +40,25 @@ test('buildDraftGenerationSystemPrompt disables web-search citation rules for cl
   assert.doesNotMatch(prompt, /MUST use web_search/i);
 });
 
+test('outline section headings are extracted from numbered outline entries', () => {
+  const extractOutlineSectionHeadings = (writingServiceTestUtils as Record<string, unknown>).extractOutlineSectionHeadings as
+    | ((outline: string) => string[])
+    | undefined;
+
+  assert.equal(typeof extractOutlineSectionHeadings, 'function');
+  assert.deepEqual(
+    extractOutlineSectionHeadings!(`1. Introduction
+- Open with the debate.
+
+2. Body Paragraphs: Reasons, Evidence, and Counterargument
+- Body Paragraph 1: focus and attention.
+
+3. Conclusion
+- Restate the position.`),
+    ['Introduction', 'Body Paragraphs', 'Conclusion'],
+  );
+});
+
 test('buildWordCalibrationSystemPrompt also forbids markdown-style output', () => {
   const prompt = buildWordCalibrationSystemPrompt(1200, 1500, 'APA 7', 10);
 
@@ -777,4 +796,65 @@ test('runWordCalibrationAttempts: heading 齐全的候选优先于 heading 掉�
   assert.equal(result.withinRange, false);
   // 1202 = 600 body + 1 "Introduction" heading + 601 body + 1 "Conclusion" heading（countMainBodyWords 算上 heading 行）
   assert.equal(result.mainBodyWordCount, 1202, '应该优先保 heading 完整的 attempt (1200 body + 2 heading = 1202)');
+});
+
+test('runWordCalibrationAttempts repairs an in-range draft when a required outline heading is missing', async () => {
+  const runWordCalibrationAttempts = (writingServiceTestUtils as Record<string, unknown>).runWordCalibrationAttempts as
+    | ((options: {
+        initialText: string;
+        targetWords: number;
+        maxAttempts?: number;
+        draftHeadings?: string[];
+        requiredHeadings?: string[];
+        rewrite: (text: string, attempt: number) => Promise<string>;
+      }) => Promise<{ text: string; attemptsUsed: number; withinRange: boolean; mainBodyWordCount: number }>)
+    | undefined;
+
+  assert.equal(typeof runWordCalibrationAttempts, 'function');
+
+  const attempts: number[] = [];
+  const initial = [
+    'Title',
+    '',
+    'Introduction',
+    'word '.repeat(300),
+    '',
+    'Conclusion',
+    'word '.repeat(600),
+    '',
+    'References',
+    'Smith, J. (2024). Example. https://example.com',
+  ].join('\n');
+  const repaired = [
+    'Title',
+    '',
+    'Introduction',
+    'word '.repeat(250),
+    '',
+    'Body Paragraphs',
+    'word '.repeat(400),
+    '',
+    'Conclusion',
+    'word '.repeat(250),
+    '',
+    'References',
+    'Smith, J. (2024). Example. https://example.com',
+  ].join('\n');
+
+  const result = await runWordCalibrationAttempts!({
+    initialText: initial,
+    targetWords: 1000,
+    maxAttempts: 1,
+    draftHeadings: ['Introduction', 'Conclusion'],
+    requiredHeadings: ['Introduction', 'Body Paragraphs', 'Conclusion'],
+    rewrite: async (_text, attempt) => {
+      attempts.push(attempt);
+      return repaired;
+    },
+  });
+
+  assert.deepEqual(attempts, [1]);
+  assert.equal(result.attemptsUsed, 1);
+  assert.equal(result.withinRange, true);
+  assert.match(result.text, /Body Paragraphs/);
 });

@@ -6,6 +6,7 @@ import {
   isDeliveryCompletedState,
   isDeliveryInProgressState,
   shouldShowWritingProcessingState,
+  shouldShowDeliveryState,
   shouldPollWritingStage,
   stageToStep,
 } from './workspaceStage';
@@ -46,6 +47,13 @@ test('failed writing stages do not show the processing spinner state', () => {
   assert.equal(shouldShowWritingProcessingState(4, 'processing'), true);
   assert.equal(shouldShowWritingProcessingState(5, 'processing'), true);
   assert.equal(shouldShowWritingProcessingState(3, 'failed'), false);
+});
+
+test('failed delivery-stage writing tasks do not show the completed delivery card', () => {
+  assert.equal(shouldShowDeliveryState(6, 'processing'), true);
+  assert.equal(shouldShowDeliveryState(6, 'completed'), true);
+  assert.equal(shouldShowDeliveryState(6, 'failed'), false);
+  assert.equal(shouldShowDeliveryState(5, 'completed'), false);
 });
 
 test('getHumanizeStepAfterStartAttempt only enters step 7 after the backend confirms start', () => {

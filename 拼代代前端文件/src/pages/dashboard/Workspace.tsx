@@ -18,6 +18,7 @@ import {
   isDeliveryCompletedState,
   isDeliveryInProgressState,
   shouldPollWritingStage,
+  shouldShowDeliveryState,
   shouldShowWritingProcessingState,
 } from '../../lib/workspaceStage';
 import { getPollDelayMs, hasPollingTimedOut, type PollStage } from '../../lib/polling';
@@ -647,6 +648,7 @@ export default function Workspace() {
   const isDeliveryComplete = taskData ? isDeliveryCompletedState(taskData.task.stage, taskData.task.status) : false;
   const isWritingTaskFailed = taskData?.task.status === 'failed';
   const shouldShowWritingProcessing = shouldShowWritingProcessingState(step, taskData?.task.status);
+  const shouldShowDelivery = shouldShowDeliveryState(step, taskData?.task.status);
   const deliveryDownloadCards = buildDownloadCards(taskData?.files ?? [], {
     includeCategories: (taskData?.files ?? [])
       .map((file) => file.category)
@@ -961,7 +963,7 @@ export default function Workspace() {
       )}
 
       {/* Step 6: Delivery */}
-      {step === 6 && (
+      {shouldShowDelivery && (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
           <Card className="border-gray-200 shadow-sm border-t-4 border-t-emerald-500">
             <CardHeader>
