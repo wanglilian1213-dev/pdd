@@ -97,7 +97,11 @@ const TABLE_OF_CONTENTS_RE = /\btable of contents\b|目录/i;
 const PROHIBIT_VISUAL_RE = /\b(?:do\s+not|don't|dont|must\s+not|should\s+not|no|without|avoid|exclude)\s+(?:include|use|add|create|draw|provide)?\s*(?:any\s+)?(?:charts?|graphs?|figures?|diagrams?|flowcharts?|visuals?|plots?)\b|不要(?:包含|使用|添加|画)?(?:任何)?(?:图表|图示|示意图|流程图|图片)|不(?:需要|要|允许)(?:任何)?(?:图表|图示|示意图|流程图|图片)|禁止(?:图表|图示|示意图|流程图|图片)/i;
 const PROHIBIT_BULLET_LIST_RE = /\b(?:no|without|avoid|exclude)\s+(?:bullet points?|bulleted lists?|numbered lists?)\b|\b(?:do\s+not|don't|dont|must\s+not|should\s+not)\s+(?:use|include|write)\s+(?:bullet points?|bulleted lists?|numbered lists?)\b|\bfull academic paragraphs only\b|不要(?:使用|写)?(?:项目符号|列表|编号列表)|禁止(?:项目符号|列表|编号列表)|只写(?:完整)?段落/i;
 const PROHIBIT_FIRST_PERSON_RE = /\b(?:third person only|write in third person|avoid first person|no first person|without first person|do not use first person|don't use first person|must not use first person|avoid personal pronouns|no personal pronouns)\b|第三人称|不要(?:使用)?第一人称|禁止第一人称|避免第一人称|不要(?:用)?我(?:们)?|禁止(?:用)?我(?:们)?/i;
-const DATA_ANALYSIS_RE = /\b(data analysis|analyse data|analyze data|analyse the data|analyze the data|dataset|csv|tsv|spreadsheet|excel|workbook|json data|regression|statistics|statistical|correlation|anova|t-test|chi-square|quantitative)\b|数据分析|数据集|统计|回归|相关分析|定量/i;
+const DATA_ANALYSIS_RE = /\b(data analysis|statistical analysis|analyse data|analyze data|analyse the data|analyze the data|dataset|data set|csv|tsv|spreadsheet|excel|workbook|json data|regression|correlation|anova|t-test|chi-square)\b|数据分析|数据集|统计分析|回归|相关分析/i;
+const DATA_ANALYSIS_INTENT_RE = /\b(data analysis|statistical analysis|analyse data|analyze data|analyse the data|analyze the data)\b|数据分析|统计分析/i;
+const DATA_FILE_CONTEXT_RE = /\b(dataset|data set|csv|tsv|spreadsheet|excel|workbook|json data)\b|数据集|数据文件|电子表格|工作簿/i;
+const UPLOADED_DATA_CONTEXT_RE = /\b(?:uploaded|provided|attached|source|raw)\b[^.。！？\n]{0,80}\b(?:data|dataset|data set|csv|tsv|spreadsheet|excel|workbook|json)\b|\b(?:data|dataset|data set|csv|tsv|spreadsheet|excel|workbook|json)\b[^.。！？\n]{0,80}\b(?:uploaded|provided|attached|file|files)\b|(?:上传|提供|附加|附件)[^。！？\n]{0,80}(?:数据|数据集|数据文件|表格|电子表格|Excel|CSV)|(?:数据|数据集|数据文件|表格|电子表格|Excel|CSV)[^。！？\n]{0,80}(?:上传|提供|附件|文件)/i;
+const DATA_METHOD_REQUEST_RE = /\b(?:run|perform|conduct|carry out|calculate|compute|test|estimate|model|analyse|analyze)\b[^.。！？\n]{0,100}\b(?:regression|correlation|anova|t-test|chi-square)\b|\b(?:regression|correlation|anova|t-test|chi-square)\b[^.。！？\n]{0,100}\b(?:analysis|test|model)\b|(?:回归|相关分析)[^。！？\n]{0,60}(?:分析|模型|检验)/i;
 const PIVOT_OPERATION_RE = /\b(?:pivot\s+table|pivot\s+chart|crosstab|cross-?tab|cross\s+tabulation)\b|数据透视表|透视表|交叉表/i;
 const JOIN_OPERATION_RE = /\b(?:join|merge|match|link|combine)\b[^。！？\n]{0,120}\b(?:by|on|using|with)\b[^。！？\n]{0,80}\b(?:id|key|code|customer|order|student|patient|account)|(?:按|根据|通过)[^。！？\n]{0,80}(?:id|编号|键|客户|订单|学生|患者|账号)[^。！？\n]{0,80}(?:合并|连接|关联|匹配)/i;
 const LOOKUP_OPERATION_RE = /\b(?:xlookup|vlookup|hlookup|index\s*match|lookup)\b|查找函数|查找匹配/i;
@@ -138,7 +142,7 @@ const ACTIONABLE_HIGH_RISK_CHART_UNIT_RE = /\((?:a|amp|amps|ma|v|kw|hp|mm|mm²|s
 const CITATION_NEARBY_RE = /\([^)]+,\s*(19|20)\d{2}[a-z]?\)|\b[A-Z][A-Za-z-]+(?:\s+et al\.)?\s*\((19|20)\d{2}[a-z]?\)|\[\d+(?:\s*[,\u2013-]\s*\d+)*\]/;
 const NEGATED_REQUIREMENT_RE = /\b(?:do\s+not|don't|dont|must\s+not|should\s+not)\s+(?:include|use|perform|run|add|create|draw|provide)\b|\b(?:no|without|avoid|exclude)\b|\bnot\s+(?:required|needed|necessary|allowed)\b|不要|不需要|无需|禁止|不得|不能/i;
 const PURE_NEGATED_REQUIREMENT_RE = /^(?:please\s+)?(?:do\s+not|don't|dont|must\s+not|should\s+not|no|without|avoid|exclude)\b|\bnot\s+(?:required|needed|necessary|allowed)\b|^(?:请\s*)?(?:不要|不需要|无需|禁止|不得|不能)\b/i;
-const DATA_ANALYSIS_NEGATED_RE = /\b(?:do\s+not|don't|dont|no|without|avoid|exclude)\s+(?:run|perform|include|use|analyse|analyze)?\s*(?:data analysis|statistics|statistical analysis|regression|dataset analysis)\b|不要.*(?:数据分析|统计|回归)|不需要.*(?:数据分析|统计|回归)/i;
+const DATA_ANALYSIS_NEGATED_RE = /\b(?:do\s+not|don't|dont|no|without|avoid|exclude)\s+(?:run|perform|include|use|analyse|analyze)?\s*(?:data analysis|statistical analysis|regression|dataset analysis|uploaded data|dataset)\b|不要.*(?:数据分析|统计分析|回归|数据集)|不需要.*(?:数据分析|统计分析|回归|数据集)/i;
 const SENSITIVE_INTERNAL_ARTIFACT_RE = /\b(?:OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|SUPABASE_ANON_KEY|SUPABASE_URL|SERVICE_ROLE_KEY|API_KEY|system prompt|developer prompt)\b/i;
 const PROMPT_INJECTION_ARTIFACT_RE = /\b(?:ignore|disregard)\s+(?:all\s+)?(?:previous|above|system|developer)\s+instructions\b|\bprint\s+(?:the\s+)?(?:api key|secret|system prompt)\b|输出.*(?:密钥|系统提示词|后台提示词)|忽略.*(?:规则|指令|要求)/i;
 const PRIVATE_IDENTIFIER_TEXT_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|[-+]?\d{1,2}\.\d{4,}\s*,\s*[-+]?\d{1,3}\.\d{4,}|\b(?:MRN|medical record|patient id|participant id|subject id|SSN|NHS)\s*[:#-]?\s*[A-Z0-9-]{3,}\b|\b(?:patient|participant|subject|client)\s+(?:name\s*)?[:#-]?\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b|(?:患者|病人|受试者|客户|员工|姓名)\s*[:：]?\s*[\u4e00-\u9fff]{2,4}/i;
@@ -184,6 +188,28 @@ function joinedTaskText(input: WritingQualityRequirementInput) {
     .map((value) => normalizeText(normalizeSafetyDetectionText(value)))
     .filter(Boolean)
     .join('\n');
+}
+
+function joinedOriginalTaskText(input: WritingQualityRequirementInput) {
+  return [input.specialRequirements]
+    .map((value) => normalizeText(normalizeSafetyDetectionText(value)))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function outlineTaskText(input: WritingQualityRequirementInput) {
+  return normalizeText(normalizeSafetyDetectionText(input.outline));
+}
+
+function hasExplicitDataAnalysisRequest(text: string) {
+  return DATA_ANALYSIS_INTENT_RE.test(text)
+    || UPLOADED_DATA_CONTEXT_RE.test(text)
+    || DATA_METHOD_REQUEST_RE.test(text);
+}
+
+function hasOutlineDataAnalysisRequest(text: string) {
+  return UPLOADED_DATA_CONTEXT_RE.test(text)
+    || (DATA_FILE_CONTEXT_RE.test(text) && DATA_METHOD_REQUEST_RE.test(text));
 }
 
 function stripNegatedRequirementSegments(text: string, signal: RegExp) {
@@ -601,6 +627,8 @@ export function assessWritingQualityRequirements(
   const files = input.materialFiles || [];
   const visualText = stripNegatedRequirementSegments(text, VISUAL_RE);
   const dataAnalysisText = stripNegatedRequirementSegments(text, DATA_ANALYSIS_RE);
+  const originalDataAnalysisText = stripNegatedRequirementSegments(joinedOriginalTaskText(input), DATA_ANALYSIS_RE);
+  const outlineDataAnalysisText = stripNegatedRequirementSegments(outlineTaskText(input), DATA_ANALYSIS_RE);
   const rubricText = stripNegatedRequirementSegments(text, RUBRIC_RE);
   const professionalText = stripNegatedRequirementSegments(text, PROFESSIONAL_RE);
   const documentElementText = stripNegatedRequirementSegments(text, DOCUMENT_ELEMENT_RE);
@@ -623,7 +651,8 @@ export function assessWritingQualityRequirements(
   const unsupportedDataOperations = parseUnsupportedDataOperations(dataAnalysisText);
   const { requiredVisualCount, maximumVisualCount } = deriveVisualRequirement(visualText);
   const requiresVisual = VISUAL_RE.test(visualText) || requiredVisualCount > 0;
-  const requiresDataAnalysis = DATA_ANALYSIS_RE.test(dataAnalysisText)
+  const requiresDataAnalysis = hasExplicitDataAnalysisRequest(originalDataAnalysisText)
+    || hasOutlineDataAnalysisRequest(outlineDataAnalysisText)
     || (hasStructuredDataFile(files) && !DATA_ANALYSIS_NEGATED_RE.test(text));
   const requiresRubricReview = RUBRIC_RE.test(rubricText);
   const requiresProfessionalParameters = (PROFESSIONAL_RE.test(professionalText) && (PARAMETER_RE.test(professionalText) || VISUAL_RE.test(professionalText)))

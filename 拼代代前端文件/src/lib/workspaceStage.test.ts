@@ -5,6 +5,7 @@ import {
   getHumanizeStepAfterStartAttempt,
   isDeliveryCompletedState,
   isDeliveryInProgressState,
+  shouldShowWritingProcessingState,
   shouldPollWritingStage,
   stageToStep,
 } from './workspaceStage';
@@ -38,6 +39,13 @@ test('shouldPollWritingStage keeps polling while delivery files are still being 
   assert.equal(shouldPollWritingStage('quality_checking', 'processing'), true);
   assert.equal(shouldPollWritingStage('delivering', 'processing'), true);
   assert.equal(shouldPollWritingStage('completed', 'completed'), false);
+});
+
+test('failed writing stages do not show the processing spinner state', () => {
+  assert.equal(shouldShowWritingProcessingState(3, 'processing'), true);
+  assert.equal(shouldShowWritingProcessingState(4, 'processing'), true);
+  assert.equal(shouldShowWritingProcessingState(5, 'processing'), true);
+  assert.equal(shouldShowWritingProcessingState(3, 'failed'), false);
 });
 
 test('getHumanizeStepAfterStartAttempt only enters step 7 after the backend confirms start', () => {

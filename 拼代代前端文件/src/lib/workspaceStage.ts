@@ -74,6 +74,10 @@ export function shouldPollWritingStage(stage: string, status: string): boolean {
   return status === 'processing' && ['writing', 'word_calibrating', 'citation_checking', 'polishing', 'quality_checking', 'delivering'].includes(stage);
 }
 
+export function shouldShowWritingProcessingState(step: number, status?: string): boolean {
+  return status === 'processing' && step >= 3 && step <= 5;
+}
+
 export function isDeliveryInProgressState(stage: string, status: string): boolean {
   return ['quality_checking', 'delivering'].includes(stage) && status === 'processing';
 }

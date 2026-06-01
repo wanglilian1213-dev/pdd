@@ -56,6 +56,46 @@ test('negated quality requirements are not treated as requested work', () => {
   assert.deepEqual(profile.signals, ['visuals_prohibited']);
 });
 
+test('ordinary essay statistics evidence is not treated as uploaded data analysis', () => {
+  const profile = assessWritingQualityRequirements({
+    specialRequirements: 'Write a simple school policy essay. Use at least 2 pieces of evidence, such as statistics, real examples, expert opinions, or school-related observations.',
+    outline: [
+      'Introduction',
+      '- Introduce the school policy issue.',
+      'Body',
+      '- Use five APA 7 references total, including statistics, expert opinions, real school policy examples, and school-related observations to strengthen the argument.',
+      'Conclusion',
+      '- Summarise the argument.',
+    ].join('\n'),
+    materialFiles: [{ original_name: 'assignment-brief.docx', mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', storage_path: 'task/brief.docx' }],
+  });
+
+  assert.equal(profile.requiresDataAnalysis, false);
+  assert.ok(!profile.signals.includes('data_analysis_required'));
+});
+
+test('generated outline data-analysis heading alone does not require uploaded data analysis', () => {
+  const profile = assessWritingQualityRequirements({
+    specialRequirements: 'Write a simple essay about school phone policies with academic references.',
+    outline: 'Introduction\nData Analysis\nDiscussion\nConclusion',
+    materialFiles: [{ original_name: 'data-analysis-assignment-brief.docx', mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', storage_path: 'task/brief.docx' }],
+  });
+
+  assert.equal(profile.requiresDataAnalysis, false);
+  assert.ok(!profile.signals.includes('data_analysis_required'));
+});
+
+test('explicit uploaded dataset request still requires data analysis validation', () => {
+  const profile = assessWritingQualityRequirements({
+    specialRequirements: 'Analyze the uploaded dataset and discuss the main result.',
+    outline: 'Introduction\nAnalysis\nConclusion',
+    materialFiles: [{ original_name: 'assignment-brief.docx', mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', storage_path: 'task/brief.docx' }],
+  });
+
+  assert.equal(profile.requiresDataAnalysis, true);
+  assert.ok(profile.signals.includes('data_analysis_required'));
+});
+
 test('same-sentence table prohibition is not treated as a table requirement', () => {
   const profile = assessWritingQualityRequirements({
     specialRequirements: 'Draw a customer-support flowchart, do not use a table, and make sure it has nodes and arrows.',

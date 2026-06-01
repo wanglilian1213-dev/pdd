@@ -18,6 +18,7 @@ import {
   isDeliveryCompletedState,
   isDeliveryInProgressState,
   shouldPollWritingStage,
+  shouldShowWritingProcessingState,
 } from '../../lib/workspaceStage';
 import { getPollDelayMs, hasPollingTimedOut, type PollStage } from '../../lib/polling';
 
@@ -644,6 +645,8 @@ export default function Workspace() {
   const isHumanizeProcessing = step === 7 && isStartingHumanize && !isHumanizeComplete && !isHumanizeFailed;
   const isDeliveryInProgress = taskData ? isDeliveryInProgressState(taskData.task.stage, taskData.task.status) : false;
   const isDeliveryComplete = taskData ? isDeliveryCompletedState(taskData.task.stage, taskData.task.status) : false;
+  const isWritingTaskFailed = taskData?.task.status === 'failed';
+  const shouldShowWritingProcessing = shouldShowWritingProcessingState(step, taskData?.task.status);
   const deliveryDownloadCards = buildDownloadCards(taskData?.files ?? [], {
     includeCategories: (taskData?.files ?? [])
       .map((file) => file.category)
@@ -913,8 +916,33 @@ export default function Workspace() {
         </motion.div>
       )}
 
+      {/* Failed writing task */}
+      {isWritingTaskFailed && (
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+          <Card className="border-red-200 shadow-sm border-t-4 border-t-red-600">
+            <CardHeader>
+              <div className="flex items-center gap-3 mb-2">
+                <div className="bg-red-50 p-2 rounded-full">
+                  <AlertCircle className="w-6 h-6 text-red-600" />
+                </div>
+                <CardTitle className="text-2xl">任务处理失败</CardTitle>
+              </div>
+              <CardDescription>
+                {taskData?.task.failure_reason || '当前任务没有生成成功，积分已自动退回。'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button onClick={handleNewTask} className="gap-2 bg-red-700 hover:bg-red-800">
+                <RefreshCw className="w-4 h-4" />
+                重新上传并创建任务
+              </Button>
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
+
       {/* Steps 3, 4, 5: Processing */}
-      {step >= 3 && step <= 5 && (
+      {shouldShowWritingProcessing && (
         <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}>
           <Card className="border-gray-200 shadow-sm">
             <CardContent className="p-16 flex flex-col items-center justify-center space-y-6">
